@@ -5,7 +5,7 @@ on:
     - cron: '0 0 * * *'
   push:
     paths:
-      - 'custom_rules.json'
+      - 'fakeip-filter-Remote-DNS.json' 
 
 jobs:
   build:
@@ -22,31 +22,23 @@ jobs:
 
       - name: Combine Remote Rules
         run: |
-          # 1. 下載 HenryChiao 的文字清單
           curl -sL "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list" -o henry.list
           grep -v '^#' henry.list | grep -v '^$' | sed 's/+/./g' > henry_domains.txt
-          
-          # 2. 下載 DustinWin 的 SRS 並解碼
           curl -sL "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs" -o dustin.srs
           ./sing-box rule-set decompile dustin.srs -o dustin.json
-
-          # 3. 合併兩者
           python3 -c "
           import json
           with open('henry_domains.txt') as f:
               h_domains = [l.strip() for l in f if l.strip()]
           with open('dustin.json') as f:
               d_data = json.load(f)
-          
           d_domains = []
           d_suffixes = []
           for rule in d_data.get('rules', []):
               d_domains.extend(rule.get('domain', []))
               d_suffixes.extend(rule.get('domain_suffix', []))
-          
           all_domains = set(d_domains) | set([d for d in h_domains if not d.startswith('.')])
           all_suffixes = set(d_suffixes) | set([d[1:] if d.startswith('.') else d for d in h_domains if d.startswith('.')])
-          
           combined = {
               'version': 1,
               'rules': [{'domain': sorted(list(all_domains)), 'domain_suffix': sorted(list(all_suffixes))}]
@@ -54,21 +46,18 @@ jobs:
           with open('combined.json', 'w') as f:
               json.dump(combined, f)
           "
-          # 4. 編譯合併後的檔案
           ./sing-box rule-set compile combined.json -o fakeip-filter.srs
 
-      - name: Process Custom Rules (Renamed)
+      - name: Process Custom Rules
         run: |
-          if [ -f "custom_rules.json" ]; then
-            # 這裡更改了輸出檔名
-            ./sing-box rule-set compile custom_rules.json -o fakeip-filter-Remote-DNS.srs
+          if [ -f "fakeip-filter-Remote-DNS.json" ]; then
+            ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
           fi
 
       - name: Push to Repo
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
-          # 同步更新 git add 的檔案名稱
           git add fakeip-filter.srs fakeip-filter-Remote-DNS.srs
-          git commit -m "Update comprehensive and renamed custom srs" || exit 0
+          git commit -m "Update SRS using new JSON name" || exit 0
           git push
