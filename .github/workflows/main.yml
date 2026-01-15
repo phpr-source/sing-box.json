@@ -5,7 +5,7 @@ on:
     - cron: '0 0 * * *'
   push:
     paths:
-      - 'fakeip-filter-Remote-DNS.json'
+      - 'fakeip-filter-Remote-DNS.json' 
 
 jobs:
   build:
@@ -58,9 +58,6 @@ jobs:
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
-          # 注意：這裡絕對不要出現 custom.srs 或 custom_rules.json
           git add fakeip-filter.srs fakeip-filter-Remote-DNS.srs
-          # 這裡加一個參數 -A，會自動清理倉庫中已被刪除的檔案
-          git add -A
-          git commit -m "Cleanup old files and update new ones" || exit 0
+          git commit -m "Update SRS using new JSON name" || exit 0
           git push
