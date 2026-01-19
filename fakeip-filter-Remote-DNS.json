@@ -1,20 +1,42 @@
 {
-  "version": 1,
+  "version": 3,
   "rules": [
     {
       "domain": [
-        "proxy.golang.org", "sum.golang.org", "lens.l.google.com", "na.b.g-tun.com",
-        "xnotify.xboxlive.com", "api-jooxtt.sanook.com", "api.joox.com", "joox.com",
-        "shark007.net", "adguardteam.github.io", "adrules.top", "anti-ad.net",
-        "static.adtidy.org", "github.io"
+        "proxy.golang.org",
+        "sum.golang.org",
+        "lens.l.google.com",
+        "na.b.g-tun.com",
+        "xnotify.xboxlive.com",
+        "api-jooxtt.sanook.com",
+        "api.joox.com",
+        "joox.com",
+        "shark007.net",
+        "adguardteam.github.io",
+        "adrules.top",
+        "anti-ad.net",
+        "static.adtidy.org",
+        "github.io"
       ]
     },
     {
       "domain_suffix": [
-        "steamcontent.com", "steamstatic.com", "srv.nintendo.net", "cdn.nintendo.net",
-        "battle.net", "battlenet.com", "wargaming.net", "nflxvideo.net",
-        "media.dssott.com", "square-enix.com", "finalfantasyxiv.com", "ffxiv.com",
-        "ff14.sdo.com", "xboxlive.com", "docker.io", "githubusercontent.com"
+        "steamcontent.com",
+        "steamstatic.com",
+        "srv.nintendo.net",
+        "cdn.nintendo.net",
+        "battle.net",
+        "battlenet.com",
+        "wargaming.net",
+        "nflxvideo.net",
+        "media.dssott.com",
+        "square-enix.com",
+        "finalfantasyxiv.com",
+        "ffxiv.com",
+        "ff14.sdo.com",
+        "xboxlive.com",
+        "docker.io",
+        "githubusercontent.com"
       ]
     },
     {
