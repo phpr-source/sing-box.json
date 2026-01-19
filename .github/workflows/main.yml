@@ -22,7 +22,7 @@ jobs:
           tar -xvf sing-box.tar.gz
           mv sing-box-*/sing-box .
 
-      - name: Combine Remote Rules
+      - name: Combine Remote Rules (FakeIP)
         run: |
           curl -sL "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list" -o henry.list
           grep -v '^#' henry.list | grep -v '^$' | sed 's/+/./g' > henry_domains.txt
@@ -52,6 +52,32 @@ jobs:
           "
           ./sing-box rule-set compile combined.json -o fakeip-filter.srs
 
+      - name: Process WebRTC Rules (Remote JSON to Version 3 SRS)
+        run: |
+          # 抓取远程 WebRTC JSON
+          curl -sL "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json" -o raw_webrtc.json
+          
+          # 使用 Python 将其转换为 Version 3 格式并美化排版
+          python3 -c "
+          import json
+          try:
+              with open('raw_webrtc.json', 'r') as f:
+                  data = json.load(f)
+              output = {
+                  'version': 3,
+                  'rules': data.get('rules', [])
+              }
+              with open('webRTC.json', 'w') as f:
+                  json.dump(output, f, indent=2)
+              print('Successfully transformed webRTC.json to Version 3')
+          except Exception as e:
+              print(f'Error: {e}')
+              exit(1)
+          "
+          
+          # 编译成 srs
+          ./sing-box rule-set compile webRTC.json -o webRTC.srs
+
       - name: Process Custom Rules
         run: |
           if [ -f "fakeip-filter-Remote-DNS.json" ]; then
@@ -63,13 +89,17 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
+          # 清理旧的无用文件
           git rm -f custom.srs filter.srs custom_rules.json --ignore-unmatch
           
-          git add .github/workflows/main.yml
-          git add fakeip-filter-Remote-DNS.json
-          git add fakeip-filter.srs
-          git add fakeip-filter-Remote-DNS.srs
+          # 物理删除运行产生的临时产物
+          rm -f raw_webrtc.json henry.list henry_domains.txt dustin.srs dustin.json combined.json sing-box sing-box.tar.gz
           
-          # 提交並強制推送到主分支，確保倉庫乾淨
-          git commit -m "🚀 Update to latest sing-box version & Cleanup workspace" || exit 0
+          # 添加生成的所有结果文件
+          git add webRTC.json webRTC.srs
+          git add fakeip-filter.srs
+          git add fakeip-filter-Remote-DNS.json fakeip-filter-Remote-DNS.srs
+          
+          # 提交更改
+          git commit -m "🚀 Sync Rules: $(date +'%Y-%m-%d %H:%M') | WebRTC v3 & FakeIP" || exit 0
           git push origin main --force
