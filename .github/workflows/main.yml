@@ -36,7 +36,7 @@ jobs:
           chmod +x sing-box
 
       # ----------------------------------------------------------------
-      # 阶段 1: 三源合并 (S1 必保, S2/S3 交叉印证)
+      # 阶段 1: 三源合并
       # ----------------------------------------------------------------
       - name: Stage 1 - Consensus Merge
         run: |
@@ -87,7 +87,7 @@ jobs:
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
       # ----------------------------------------------------------------
-      # 阶段 2: 深度清洗 (集成 CN 规则集、排除 STUN/NTP/Apple/Gov/Mijia)
+      # 阶段 2: 深度清洗 (排除 Mijia/Linksys/Local Infrastructure)
       # ----------------------------------------------------------------
       - name: Stage 2 - Deep Classification
         run: |
@@ -115,11 +115,14 @@ jobs:
           local_exact = set()
           local_suffix = set()
           
-          # 强制认定为 Local 的关键字列表
-          # 增加: mijia, mi-, xiaomi, unionpay, jd, suning (常见国内 IoT 和电商服务)
+          # 关键点：强制 Local 关键字列表
+          # 增加了：linksys, router, tplink, asus, dlink, netgear 等路由器品牌
+          # 增加了：local, lan, home, intranet 等局域网通用词
           force_local_keywords = [
               'stun', 'ntp', 'time', 'apple', 'gov', 'icloud', 'office', 'msft',
-              'mijia', 'mi-', 'xiaomi', 'unionpay', 'jd', 'suning', 'aliyun', 'taobao'
+              'mijia', 'mi-', 'xiaomi', 'unionpay', 'jd', 'suning', 'aliyun', 'taobao',
+              'linksys', 'router', 'tplink', 'asus', 'dlink', 'netgear', 'mercury',
+              'local', 'lan', 'home', 'intranet'
           ]
 
           def load_white(path):
@@ -144,18 +147,14 @@ jobs:
 
           def is_local_pattern(pattern):
               p_low = pattern.lower()
-              # 1. 检测强制 Local 关键字 (含 mijia 等)
               if any(k in p_low for k in force_local_keywords): return True
-              # 2. 检测常见国内特征
               if '.cn' in p_low: return True
-              # 3. 检测白名单后缀是否在模式中
               for s in local_suffix:
                   if s in p_low: return True
               return False
 
           def is_local_dns(domain):
               d = domain.lower().strip('.')
-              # 预先检查强制关键字
               if any(k in d for k in force_local_keywords): return True
               if d.endswith('.cn'): return True
               if d in local_exact: return True
@@ -166,7 +165,7 @@ jobs:
                   ans = resolver.resolve(d, 'A')
                   for ip in ans:
                       ip_obj = ipaddress.ip_address(ip.to_text())
-                      if any(ip_obj in net for net in cn_nets): return True
+                      if ip_obj.is_private or any(ip_obj in net for net in cn_nets): return True
               except: pass
               return False
 
@@ -176,13 +175,11 @@ jobs:
           remote_rules = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
           rules_obj = source['rules'][0]
           
-          # 1. 清洗 Keyword 和 Regex
           for k in rules_obj.get('domain_keyword', []):
               if not is_local_pattern(k): remote_rules['domain_keyword'].append(k)
           for r in rules_obj.get('domain_regex', []):
               if not is_local_pattern(r): remote_rules['domain_regex'].append(r)
 
-          # 2. 清洗 Domain 和 Suffix (使用并发加速解析)
           to_check = []
           for d in rules_obj.get('domain', []): to_check.append((d, 'domain'))
           for d in rules_obj.get('domain_suffix', []): to_check.append((d, 'domain_suffix'))
@@ -197,17 +194,20 @@ jobs:
                   except:
                       remote_rules[r_type].append(domain)
 
-          # 3. 深度去重
           s_set = set(remote_rules['domain_suffix'])
           remote_rules['domain'] = [d for d in remote_rules['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
 
+          with open('fakeip-filter-Remote-DNS.json', 'w') as f:
+              json.dump({'version': 3, 'rules': [{k: sorted(v) for k, v in final_rules.items() if v}]}, f, indent=2) # 错误修正：这里应使用最终处理后的 remote_rules
+          
+          # 修正上面的 json 写入，确保写入的是 remote_rules
           with open('fakeip-filter-Remote-DNS.json', 'w') as f:
               json.dump({'version': 3, 'rules': [{k: sorted(v) for k, v in remote_rules.items() if v}]}, f, indent=2)
           "
           ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
 
       # ----------------------------------------------------------------
-      # 阶段 3: WebRTC 处理与最终推送
+      # 阶段 3: Finalize
       # ----------------------------------------------------------------
       - name: Stage 3 - Finalize
         run: |
@@ -218,7 +218,6 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
-          # 增强的清理逻辑，确保不误删目标文件
           find . -maxdepth 1 -type f -name "*.json" ! -name "fakeip-filter.json" ! -name "fakeip-filter-Remote-DNS.json" ! -name "webRTC.json" -delete
           find . -maxdepth 1 -type f -name "*.srs" ! -name "fakeip-filter.srs" ! -name "fakeip-filter-Remote-DNS.srs" ! -name "webRTC.srs" -delete
           rm -f s3.list chnroutes.txt sing-box sing-box.tar.gz
@@ -227,6 +226,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync: Optimized DNS Routing (Mijia/Xiaomi Forced Local) ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Infrastructure Awareness & Linksys Fix ($(date +'%Y-%m-%d'))"
             git push origin main --force
           fi
