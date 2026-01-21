@@ -87,7 +87,7 @@ jobs:
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
       # ----------------------------------------------------------------
-      # 阶段 2: 深度清洗 (集成 CN 规则集、排除 STUN/NTP/Apple/Gov)
+      # 阶段 2: 深度清洗 (集成 CN 规则集、排除 STUN/NTP/Apple/Gov/Mijia)
       # ----------------------------------------------------------------
       - name: Stage 2 - Deep Classification
         run: |
@@ -115,8 +115,12 @@ jobs:
           local_exact = set()
           local_suffix = set()
           
-          # 强制认定为 Local 的关键字 (STUN, NTP, Apple, Gov)
-          force_local_keywords = ['stun', 'ntp', 'time', 'apple', 'gov', 'icloud', 'office', 'msft']
+          # 强制认定为 Local 的关键字列表
+          # 增加: mijia, mi-, xiaomi, unionpay, jd, suning (常见国内 IoT 和电商服务)
+          force_local_keywords = [
+              'stun', 'ntp', 'time', 'apple', 'gov', 'icloud', 'office', 'msft',
+              'mijia', 'mi-', 'xiaomi', 'unionpay', 'jd', 'suning', 'aliyun', 'taobao'
+          ]
 
           def load_white(path):
               if not os.path.exists(path): return
@@ -140,7 +144,7 @@ jobs:
 
           def is_local_pattern(pattern):
               p_low = pattern.lower()
-              # 1. 检测强制 Local 关键字
+              # 1. 检测强制 Local 关键字 (含 mijia 等)
               if any(k in p_low for k in force_local_keywords): return True
               # 2. 检测常见国内特征
               if '.cn' in p_low: return True
@@ -160,8 +164,9 @@ jobs:
                   if '.'.join(parts[i:]) in local_suffix: return True
               try:
                   ans = resolver.resolve(d, 'A')
-                  ip_obj = ipaddress.ip_address(ans[0].to_text())
-                  if any(ip_obj in net for net in cn_nets): return True
+                  for ip in ans:
+                      ip_obj = ipaddress.ip_address(ip.to_text())
+                      if any(ip_obj in net for net in cn_nets): return True
               except: pass
               return False
 
@@ -177,7 +182,7 @@ jobs:
           for r in rules_obj.get('domain_regex', []):
               if not is_local_pattern(r): remote_rules['domain_regex'].append(r)
 
-          # 2. 清洗 Domain 和 Suffix
+          # 2. 清洗 Domain 和 Suffix (使用并发加速解析)
           to_check = []
           for d in rules_obj.get('domain', []): to_check.append((d, 'domain'))
           for d in rules_obj.get('domain_suffix', []): to_check.append((d, 'domain_suffix'))
@@ -202,7 +207,7 @@ jobs:
           ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
 
       # ----------------------------------------------------------------
-      # 阶段 3: WebRTC 处理与清理推送
+      # 阶段 3: WebRTC 处理与最终推送
       # ----------------------------------------------------------------
       - name: Stage 3 - Finalize
         run: |
@@ -213,7 +218,7 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
-          # 只保留核心结果
+          # 增强的清理逻辑，确保不误删目标文件
           find . -maxdepth 1 -type f -name "*.json" ! -name "fakeip-filter.json" ! -name "fakeip-filter-Remote-DNS.json" ! -name "webRTC.json" -delete
           find . -maxdepth 1 -type f -name "*.srs" ! -name "fakeip-filter.srs" ! -name "fakeip-filter-Remote-DNS.srs" ! -name "webRTC.srs" -delete
           rm -f s3.list chnroutes.txt sing-box sing-box.tar.gz
@@ -222,6 +227,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync: Optimized DNS Routing (Forced Local for STUN/NTP/Apple/Gov) ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Optimized DNS Routing (Mijia/Xiaomi Forced Local) ($(date +'%Y-%m-%d'))"
             git push origin main --force
           fi
