@@ -44,9 +44,6 @@
         "^(.+\\.)?stun\\.[^.]+\\.[^.]+\\.[^.]+\\.[^.]+\\.[^.]+$",
         "^[^.]+\\.[^.]+\\.xboxlive\\.com",
         "^[^.]+\\.n\\.n\\.srv\\.nintendo\\.net",
-        "^[^.]+\\.ntp\\.org\\.cn",
-        "^[^.]+\\.time\\.edu\\.cn",
-        "^localhost\\.[^.]+\\.weixin\\.qq\\.com",
         "^ntp1\\.[^.]+\\.com",
         "^ntp2\\.[^.]+\\.com",
         "^ntp3\\.[^.]+\\.com",
@@ -64,7 +61,6 @@
         "^time7\\.[^.]+\\.com",
         "^time\\.[^.]+\\.apple\\.com",
         "^time\\.[^.]+\\.com",
-        "^time\\.[^.]+\\.edu\\.cn",
         "^time\\.[^.]+\\.gov",
         "^xbox\\.[^.]+\\.[^.]+\\.microsoft\\.com",
         "^xbox\\.[^.]+\\.microsoft\\.com"
