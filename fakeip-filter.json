@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "rules": [
     {
       "domain": [
@@ -35,6 +35,7 @@
         "ntp5.*.com",
         "ntp6.*.com",
         "ntp7.*.com",
+        "proxy.golang.org",
         "ps.res.netease.com",
         "shark007.net",
         "songsearch.kugou.com",
