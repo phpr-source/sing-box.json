@@ -3,7 +3,6 @@
   "rules": [
     {
       "domain": [
-        "*.*.xboxlive.com",
         "adguardteam.github.io",
         "adrules.top",
         "anti-ad.net",
@@ -13,15 +12,6 @@
         "local.adguard.org",
         "mesu.apple.com",
         "na.b.g-tun.com",
-        "ntp.*.com",
-        "ntp1.*.com",
-        "ntp2.*.com",
-        "ntp3.*.com",
-        "ntp4.*.com",
-        "ntp5.*.com",
-        "ntp6.*.com",
-        "ntp7.*.com",
-        "proxy.golang.org",
         "shark007.net",
         "static.adtidy.org",
         "swcdn.apple.com",
@@ -30,19 +20,6 @@
         "swquery.apple.com",
         "swscan.apple.com",
         "time-ios.apple.com",
-        "time-macos.apple.com",
-        "time.*.apple.com",
-        "time.*.com",
-        "time.*.gov",
-        "time1.*.com",
-        "time2.*.com",
-        "time3.*.com",
-        "time4.*.com",
-        "time5.*.com",
-        "time6.*.com",
-        "time7.*.com",
-        "xbox.*.*.microsoft.com",
-        "xbox.*.microsoft.com",
         "xnotify.xboxlive.com"
       ],
       "domain_suffix": [
@@ -70,10 +47,8 @@
         ".wargaming.net",
         "3gppnetwork.org",
         "battle.net",
-        "bogon",
         "cdn.nintendo.net",
         "direct",
-        "docker.io",
         "dynv6.net",
         "example",
         "ffxiv.com",
@@ -81,32 +56,15 @@
         "invalid",
         "linksys.com",
         "linksyssmartwifi.com",
-        "m2m",
-        "media.dssott.com",
-        "msftconnecttest.com",
-        "msftncsi.com",
-        "nip.io",
-        "pool.ntp.org",
-        "push.apple.com",
+        "proxy.golang.org",
         "router.asus.com",
         "square-enix.com",
         "srv.nintendo.net",
-        "sslip.io",
         "steamcontent.com",
-        "stun.*.*",
-        "stun.*.*.*",
-        "stun.*.*.*.*",
-        "stun.*.*.*.*.*",
         "test",
-        "ts.net",
-        "turn.twilio.com",
         "wargaming.net"
       ],
-      "domain_keyword": [
-        "ntp",
-        "stun",
-        "time"
-      ]
+      "domain_keyword": []
     }
   ]
 }
