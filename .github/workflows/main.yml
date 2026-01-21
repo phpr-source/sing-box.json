@@ -25,7 +25,7 @@ jobs:
           python-version: '3.10'
 
       - name: Install Dependencies
-        run: pip install dnspython requests tldextract
+        run: pip install dnspython requests
 
       - name: Install sing-box
         run: |
@@ -49,7 +49,7 @@ jobs:
           curl -sL "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.json" -o geosite-cn.json
 
           python3 -c "
-          import json, re, os, dns.resolver, ipaddress, concurrent.futures, tldextract
+          import json, re, os, dns.resolver, ipaddress, concurrent.futures
 
           # --- 1. 配置与资源加载 ---
           registry = {}
@@ -69,12 +69,15 @@ jobs:
           resolver.nameservers = ['8.8.8.8', '1.1.1.1']
           resolver.timeout = 1.5
 
+          # --- 2. 注册函数 (并集保留逻辑) ---
           def register(val, r_type, source_id):
               val = val.strip().lower()
               if not val or len(val) < 3 or ' ' in val: return
+              # 排除局域网地址
               if any(val.endswith(s) or val == s.strip('.') for s in LAN_SUFFIXES): return
-              if val not in registry: registry[val] = {'sources': set(), 'types': set()}
-              registry[val]['sources'].add(source_id)
+              
+              if val not in registry:
+                  registry[val] = {'types': set()}
               registry[val]['types'].add(r_type)
 
           def load_json(path, sid):
@@ -95,87 +98,66 @@ jobs:
                   if line.startswith('+.') or line.startswith('.'): register(line.lstrip('+').lstrip('.'), 'suffix', 'S3')
                   else: register(line, 'domain', 'S3')
 
-          # --- 2. 权重决策 ---
+          # --- 3. 汇总全量域名 (不再进行加权过滤，全部保留) ---
           candidate_domains = {}
           for val, info in registry.items():
-              if 'S1' in info['sources'] or len(info['sources']) >= 2:
-                  if 'suffix' in info['types']: candidate_domains[val] = 'domain_suffix'
-                  elif 'domain' in info['types']: candidate_domains[val] = 'domain'
-                  else: candidate_domains[val] = 'domain_keyword'
+              # 优先级: suffix > domain > keyword
+              if 'suffix' in info['types']: candidate_domains[val] = 'domain_suffix'
+              elif 'domain' in info['types']: candidate_domains[val] = 'domain'
+              else: candidate_domains[val] = 'domain_keyword'
 
-          # --- 3. 智能分流核心函数 ---
-          def get_domain_info(domain):
-              try:
-                  ans = resolver.resolve(domain, 'A')
-                  ip_str = ans[0].to_text()
-                  ip = ipaddress.ip_address(ip_str)
-                  is_cn = any(ip in net for net in CN_NETWORKS)
-                  is_private = ip.is_private or ip.is_loopback
-                  return is_cn, is_private
-              except:
-                  return False, False
-
-          def check_is_local_strict(domain):
+          # --- 4. 智能分流判定 (Remote vs Local) ---
+          def check_is_local(domain):
               if domain.endswith('.cn'): return True
               parts = domain.split('.')
               for i in range(len(parts)):
                   if '.'.join(parts[i:]) in CN_GEOSITE: return True
-              is_cn, is_private = get_domain_info(domain)
-              return is_cn or is_private
+              try:
+                  ans = resolver.resolve(domain, 'A')
+                  ip = ipaddress.ip_address(ans[0].to_text())
+                  return any(ip in net for net in CN_NETWORKS)
+              except: return False
 
-          # --- 4. 阶段一：初步分类 ---
-          print('Stage 1: Initial classification...')
-          remote_pool = {}
-          local_pool = {}
+          print(f'Total candidates (Union): {len(candidate_domains)}. Starting DNS Cleaning...')
+          
+          # fakeip-filter.json 的全量结果
+          full_final = {'domain': set(), 'domain_suffix': set(), 'domain_keyword': set()}
+          # fakeip-filter-Remote-DNS.json 的结果
+          remote_final = {'domain': set(), 'domain_suffix': set(), 'domain_keyword': set()}
           
           with concurrent.futures.ThreadPoolExecutor(max_workers=30) as exe:
-              futures = {exe.submit(check_is_local_strict, d): (d, t) for d, t in candidate_domains.items()}
+              futures = {exe.submit(check_is_local, d): (d, t) for d, t in candidate_domains.items()}
               for f in concurrent.futures.as_completed(futures):
                   d, t = futures[f]
+                  full_final[t].add(d) # 所有域名都进入 fakeip-filter.json
                   if not f.result(): 
-                      remote_pool[d] = t
-                  else:
-                      local_pool[d] = t
+                      remote_final[t].add(d) # 只有非国内 IP 的进入 Remote-DNS.json
 
-          # --- 5. 阶段二：关联召回 (The Joox Logic) ---
-          print('Stage 2: Semantic association recovery...')
-          remote_roots = set()
-          for d in remote_pool:
-              ext = tldextract.extract(d)
-              if ext.domain: remote_roots.add(ext.domain)
-
-          final_remote_set = remote_pool.copy()
-          for d, t in local_pool.items():
-              ext = tldextract.extract(d)
-              # 只有当 主域名匹配 且 排除关键词干扰 且 不是私有地址时才召回
-              if ext.domain in remote_roots:
-                  # 安全熔断：排除包含 localhost, lan, local 等字眼的二级域名
-                  if not re.search(r'(localhost|local|internal|lan|addr|loopback)', d):
-                      # 额外验证一次解析，确保不是私有IP
-                      _, is_private = get_domain_info(d)
-                      if not is_private:
-                          final_remote_set[d] = t
-
-          # --- 6. 深度去重与导出 ---
-          remote_final = {'domain': set(), 'domain_suffix': set(), 'domain_keyword': set()}
-          for d, t in final_remote_set.items():
-              remote_final[t].add(d)
-
-          s_list = sorted(list(remote_final['domain_suffix']), key=len)
-          filtered_domains = [d for d in remote_final['domain'] if not any(d.endswith('.' + s) or d == s for s in s_list)]
-          
-          output = {
-              'version': 3,
-              'rules': [{
+          # --- 5. 深度去重函数 ---
+          def deep_unify(rule_dict):
+              s_list = sorted(list(rule_dict['domain_suffix']), key=len)
+              filtered_domains = []
+              for d in rule_dict['domain']:
+                  if not any(d.endswith('.' + s) or d == s for s in s_list):
+                      filtered_domains.append(d)
+              return {
                   'domain': sorted(filtered_domains),
-                  'domain_suffix': sorted(list(remote_final['domain_suffix'])),
-                  'domain_keyword': sorted(list(remote_final['domain_keyword']))
-              }]
-          }
+                  'domain_suffix': sorted(list(rule_dict['domain_suffix'])),
+                  'domain_keyword': sorted(list(rule_dict['domain_keyword']))
+              }
+
+          # --- 6. 导出结果 ---
+          # 导出 fakeip-filter.json
+          with open('fakeip-filter.json', 'w') as f:
+              json.dump({'version': 3, 'rules': [deep_unify(full_final)]}, f, indent=2)
+
+          # 导出 fakeip-filter-Remote-DNS.json
           with open('fakeip-filter-Remote-DNS.json', 'w') as f:
-              json.dump(output, f, indent=2)
+              json.dump({'version': 3, 'rules': [deep_unify(remote_final)]}, f, indent=2)
           "
           
+          # 编译成 SRS
+          ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
           ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
 
       - name: Process WebRTC & Extra
@@ -193,6 +175,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync: Accurate Remote DNS Rules with Association Recovery ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Union Rules & Smart DNS Classification ($(date +'%Y-%m-%d'))"
             git push origin main --force
           fi
