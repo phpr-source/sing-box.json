@@ -23,7 +23,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
+          # 移除了 cache: 'pip' 以解决报错问题
 
       - name: Install Dependencies
         run: |
@@ -39,7 +39,7 @@ jobs:
           chmod +x sing-box
 
       # ----------------------------------------------------------------
-      # 阶段 1: 生成 fakeip-filter.json (权重共识逻辑)
+      # 阶段 1: 生成基于权重的 fakeip-filter.json
       # ----------------------------------------------------------------
       - name: Advanced Consensus Merge (FakeIP)
         run: |
@@ -105,7 +105,7 @@ jobs:
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
       # ----------------------------------------------------------------
-      # 阶段 2: 智能分流清洗 (Remote vs Local) - 三层滤网逻辑
+      # 阶段 2: 动态 IP 归属地清洗 (Remote vs Local)
       # ----------------------------------------------------------------
       - name: Classify Domains (Three-Layer Filter)
         run: |
@@ -115,7 +115,7 @@ jobs:
           python3 -c "
           import json, dns.resolver, ipaddress, concurrent.futures
 
-          # 加载数据
+          # 加载资源
           cn_networks = [ipaddress.ip_network(line.strip()) for line in open('chnroutes.txt') if line.strip() and not line.startswith('#')]
           cn_domains_whitelist = set()
           try:
@@ -132,17 +132,18 @@ jobs:
           resolver.lifetime = 2.0
 
           def is_local(domain):
+              # 1. 静态：.cn 后缀
               if domain.endswith('.cn'): return True
-              # 白名单匹配
+              # 2. 静态：Geosite 白名单 (针对 CDN 优化)
               parts = domain.split('.')
               for i in range(len(parts)):
                   if '.'.join(parts[i:]) in cn_domains_whitelist: return True
-              # IP 归属地判定
+              # 3. 动态：IP 归属地
               try:
                   answers = resolver.resolve(domain, 'A')
                   ip = ipaddress.ip_address(answers[0].to_text())
                   return any(ip in net for net in cn_networks)
-              except: return False # 解析失败默认 Remote
+              except: return False
 
           with open('fakeip-filter.json', 'r') as f:
               data = json.load(f)
@@ -152,8 +153,9 @@ jobs:
               for k in ['domain', 'domain_suffix', 'domain_keyword']:
                   for d in r.get(k, []): all_domains.add(d)
 
+          print(f'Starting DNS classification for {len(all_domains)} domains...')
           remote_list = []
-          with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+          with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
               results = list(executor.map(lambda d: (d, is_local(d)), all_domains))
               remote_list = [d for d, local in results if not local]
 
@@ -164,7 +166,7 @@ jobs:
           ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
 
       # ----------------------------------------------------------------
-      # 阶段 3: 处理 WebRTC 等其他规则
+      # 阶段 3: 处理 WebRTC & 其他
       # ----------------------------------------------------------------
       - name: Process WebRTC & Custom Rules
         run: |
@@ -172,23 +174,26 @@ jobs:
           python3 -c "import json; f=open('raw_webrtc.json','r'); d=json.load(f); f.close(); open('webRTC.json','w').write(json.dumps({'version': 3, 'rules': d.get('rules', [])}, indent=2))"
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
 
+          if [ -f "fakeip-filter-Remote-DNS.json" ]; then
+            ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
+          fi
+
       # ----------------------------------------------------------------
-      # 阶段 4: 推送到仓库 
+      # 阶段 4: 推送结果
       # ----------------------------------------------------------------
       - name: Push to Repo
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
-          # 清理运行产生的多余临时文件，只保留生成的 json 和 srs
+          # 清理临时文件
           rm -f s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box sing-box.tar.gz chnroutes.txt geosite-cn.json
           
           git add *.json *.srs
           
-          # 检查是否有文件更改，防止 Git 因为没有内容提交而报错退出
           if git diff --staged --quiet; then
-            echo "No changes detected. Skipping push."
+            echo "No changes to commit."
           else
-            git commit -m "🚀 Sync: Smart DNS Classification & Rules Update ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Smart Classification ($(date +'%Y-%m-%d'))"
             git push origin main --force
           fi
