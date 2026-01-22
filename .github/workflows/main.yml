@@ -36,11 +36,10 @@ jobs:
           chmod +x sing-box
 
       # ----------------------------------------------------------------
-      # 任务 A: Adblock 规则构建 (保留 JSON 用于校验)
+      # 任务 A: Adblock 规则构建
       # ----------------------------------------------------------------
       - name: Task A - Build Adblock SRS
         run: |
-          # 下载并在最后保留为 Adblock.json
           curl -sL "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json" -o Adblock.json
           ./sing-box rule-set compile Adblock.json -o Adblock.srs
 
@@ -86,6 +85,7 @@ jobs:
 
           final_rules = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
           for (r_type, val), sources in registry.items():
+              # 这里可以调整合并策略，目前保留原有的 Consensus (S1 或 S2+S3)
               if 'S1' in sources or ('S2' in sources and 'S3' in sources):
                   final_rules[r_type].append(val)
 
@@ -128,27 +128,30 @@ jobs:
           # ================= 配置区域 =================
           
           # 1. 强制 Remote 列表 (最高优先级)
-          # 即使解析出 CN IP 或在白名单中，也强制保留在 Remote
-          # 包含 Joox (腾讯系误杀修复), Disney (dssott), Netflix 等
+          # 即使在白名单或解析为 CN IP，也强制放入 Remote DNS
+          # 修复: Xbox, Anti-AD, Joox, Streaming
           force_remote_keywords = [
               'joox', 'sanook', 'netflix', 'spotify', 'hbo', 'disney', 'dssott', 
-              'primevideo', 'tiktok', 'hotstar'
+              'primevideo', 'tiktok', 'hotstar',
+              'xbox', 'xboxlive', 'xnotify', 'gamepass', 'anti-ad'
           ]
 
-          # 2. 强制 Local 列表 (防止误入 Remote)
-          # 包含 VoWiFi 核心 (3gppnetwork), 游戏下载 (steam/nintendo), 广告规则 (adrules)
+          # 2. 强制 Local 列表 (优先级高于白名单，用于剔除 Remote)
+          # 包含: VoWiFi (3gpp), Steam/Nintendo下载 (CDN), AdGuard Loopback
           force_local_keywords = [
               'stun', 'ntp', 'time', 'apple', 'gov', 'icloud', 'office', 'msft',
               'mijia', 'mi-', 'xiaomi', 'unionpay', 'jd', 'suning', 'aliyun', 'taobao',
               'linksys', 'router', 'tplink', 'asus', 'tplogin', 'miwifi', 'tendawifi', 
               'tplinkcloud', 'belkin', 'wemo', 'mercury', 'synology', 'qnap',
-              '3gppnetwork', 'steamcontent', 'nintendo', 'playstation', 'xbox', 'games',
-              'volte', 'vowifi', 'ims', 'mms'
+              '3gppnetwork', 'steamcontent', 'cdn.nintendo', 'playstation.net', 'xbox.cn',
+              'volte', 'vowifi', 'ims', 'mms',
+              'adguard', 'local'
           ]
           
+          # 特别精确的 Local 后缀
           force_local_suffixes = {
               'direct', 'lan', 'local', 'home.arpa', 'pi-hole', 'speedtest.net', 
-              'adrules.top'
+              'adrules.top', 'local.adguard.org', 'battlenet.com.cn', 'wotgame.cn', 'wggames.cn'
           }
 
           # ================= 逻辑区域 =================
@@ -163,8 +166,7 @@ jobs:
                           for x in r.get('domain_suffix', []): local_suffix.add(x.lower())
               except: pass
 
-          # 加载下载的白名单
-          # 排除当前任务生成的中间文件
+          # 加载白名单 (排除生成的 Adblock.json 和其他中间文件)
           json_files = [f for f in os.listdir('.') if f.endswith('.json') and f not in ['fakeip-filter.json', 's1.json', 's2.json', 'Adblock.json']]
           for p in json_files:
               load_white(p)
@@ -177,11 +179,10 @@ jobs:
           def is_local_dns(domain):
               d = domain.lower().strip('.')
               
-              # A. 优先级 1: 强制 Remote (保护 Joox/Disney)
-              # 如果匹配，返回 False (代表不是 Local，即保留在 Remote)
+              # A. 优先级 1: 强制 Remote (保护 Xbox, Joox)
               if any(k in d for k in force_remote_keywords): return False
 
-              # B. 优先级 2: 强制 Local (处理 3gpp/Steam)
+              # B. 优先级 2: 强制 Local (保护 AdGuard, VoWiFi, SteamCDN)
               if any(k in d for k in force_local_keywords): return True
               if any(d.endswith(s) for s in force_local_suffixes): return True
               
@@ -199,10 +200,10 @@ jobs:
                       ip_obj = ipaddress.ip_address(ip.to_text())
                       if any(ip_obj in net for net in cn_nets) or ip_obj.is_private: return True
               except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
-                  # 域名不存在，通常认为是内网域名或死域名，不放入 Remote
+                  # 域名不存在 -> 很有可能是运营商内网域名 -> Local
                   return True
               except:
-                  # 解析超时，保守处理，认为是 Local
+                  # 超时 -> 保守判为 Local
                   return True
               return False
 
@@ -212,20 +213,20 @@ jobs:
           remote_rules = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
           rules_obj = source['rules'][0]
           
-          # 处理 Regex 和 Keyword
-          # 逻辑：只要不是强制 Local，且不包含在白名单特征中，则保留
-          # 修正：增加 force_remote_keywords 检查，防止误删
+          # 判断 Pattern (正则/关键字) 是否为 Local
           def is_local_pattern(pattern):
               p_low = pattern.lower()
-              # 1. 如果包含 Joox 等关键字，强制认为是 Remote Pattern (返回 False)
+              
+              # 关键修正: 如果正则中包含 'xbox' 等强制 Remote 词，直接判定为 Remote (False)
+              # 即使它同时也包含 'microsoft'，这行代码会让它优先被保留
               if any(k in p_low for k in force_remote_keywords): return False 
               
-              # 2. 如果包含 Local 关键字，强制认为是 Local
+              # 只有不包含强制 Remote 词，才检查 Local 词
               if any(k in p_low for k in force_local_keywords): return True
               if any(s in p_low for s in force_local_suffixes): return True
               if '.cn' in p_low: return True
               
-              # 3. 简单检查白名单后缀 (防止 .com.cn 正则被误杀，但通常正则比较复杂，这里只做简单匹配)
+              # 简单检查白名单后缀
               for s in local_suffix:
                   if s in p_low: return True
               return False
@@ -235,7 +236,6 @@ jobs:
           for r in rules_obj.get('domain_regex', []):
               if not is_local_pattern(r): remote_rules['domain_regex'].append(r)
 
-          # 处理 Domain 和 Suffix
           to_check = []
           for d in rules_obj.get('domain', []): to_check.append((d, 'domain'))
           for d in rules_obj.get('domain_suffix', []): to_check.append((d, 'domain_suffix'))
@@ -244,11 +244,10 @@ jobs:
               futures = {exe.submit(is_local_dns, item[0]): item for item in to_check}
               for f in concurrent.futures.as_completed(futures):
                   domain, r_type = futures[f]
-                  # 只有当 is_local_dns 返回 False 时，才加入 Remote 列表
                   if not f.result():
                       remote_rules[r_type].append(domain)
 
-          # 深度去重：如果 domain_suffix 已经包含 google.com，则不需要再存 www.google.com
+          # 深度去重
           s_set = set(remote_rules['domain_suffix'])
           remote_rules['domain'] = [d for d in remote_rules['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
 
@@ -269,7 +268,7 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
-          # 清理临时文件，特意排除 Adblock.json 和 Adblock.srs
+          # 清理临时文件 (排除 Adblock.json 和 Adblock.srs)
           find . -maxdepth 1 -type f -name "*.json" ! -name "fakeip-filter.json" ! -name "fakeip-filter-Remote-DNS.json" ! -name "webRTC.json" ! -name "Adblock.json" -delete
           find . -maxdepth 1 -type f -name "*.srs" ! -name "fakeip-filter.srs" ! -name "fakeip-filter-Remote-DNS.srs" ! -name "webRTC.srs" ! -name "Adblock.srs" -delete
           rm -f s3.list chnroutes.txt sing-box sing-box.tar.gz
@@ -278,6 +277,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync: Adblock JSON/SRS & Logic Fixes (Joox/Disney/Regex) ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Fix Xbox/AntiAD/Adguard & Logic Optimization ($(date +'%Y-%m-%d'))"
             git push origin main --force
           fi
