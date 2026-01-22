@@ -3,14 +3,23 @@
   "rules": [
     {
       "domain": [
+        "adguardteam.github.io",
+        "anti-ad.net",
         "api-jooxtt.sanook.com",
         "api.joox.com",
-        "joox.com"
+        "joox.com",
+        "lens.l.google.com",
+        "local.adguard.org",
+        "na.b.g-tun.com",
+        "proxy.golang.org",
+        "shark007.net",
+        "static.adtidy.org"
       ],
       "domain_suffix": [
         ".battle.net",
         ".ffxiv.com",
         ".finalfantasyxiv.com",
+        ".media.dssott.com",
         ".nflxvideo.net",
         ".square-enix.com",
         ".wargaming.net"
