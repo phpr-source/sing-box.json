@@ -3,15 +3,9 @@
   "rules": [
     {
       "domain": [
-        "adguardteam.github.io",
-        "anti-ad.net",
         "api-jooxtt.sanook.com",
-        "lens.l.google.com",
-        "local.adguard.org",
-        "na.b.g-tun.com",
-        "proxy.golang.org",
-        "shark007.net",
-        "static.adtidy.org"
+        "api.joox.com",
+        "joox.com"
       ],
       "domain_suffix": [
         ".battle.net",
@@ -20,12 +14,6 @@
         ".nflxvideo.net",
         ".square-enix.com",
         ".wargaming.net"
-      ],
-      "domain_regex": [
-        "^[^.]+\\.[^.]+\\.xboxlive\\.com",
-        "^[^.]+\\.n\\.n\\.srv\\.nintendo\\.net",
-        "^xbox\\.[^.]+\\.[^.]+\\.microsoft\\.com",
-        "^xbox\\.[^.]+\\.microsoft\\.com"
       ]
     }
   ]
