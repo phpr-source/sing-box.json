@@ -3,31 +3,34 @@
   "rules": [
     {
       "domain": [
+        "lens.l.google.com",           
+        "proxy.golang.org",            
+        "adguardteam.github.io",      
         "anti-ad.net",
-        "api-jooxtt.sanook.com",
+        "static.adtidy.org",
+        "joox.com",                   
         "api.joox.com",
-        "joox.com",
-        "lens.l.google.com",
-        "na.b.g-tun.com",
-        "proxy.golang.org",
-        "shark007.net",
+        "api-jooxtt.sanook.com",
+        "na.b.g-tun.com",           
         "xnotify.xboxlive.com"
       ],
       "domain_suffix": [
-        ".battle.net",
-        ".ffxiv.com",
+        ".nflxvideo.net",             
+        ".media.dssott.com",           
+        ".square-enix.com",          
         ".finalfantasyxiv.com",
-        ".media.dssott.com",
-        ".nflxvideo.net",
-        ".square-enix.com",
-        ".wargaming.net"
+        ".ffxiv.com",
+        ".battle.net",                
+        ".wargaming.net",              
+        ".srv.nintendo.net",          
+        ".cdn.nintendo.net"           
       ],
       "domain_regex": [
-        "^[^.]+\\.[^.]+\\.xboxlive\\.com",
         "^[^.]+\\.n\\.n\\.srv\\.nintendo\\.net",
+        "^[^.]+\\.[^.]+\\.xboxlive\\.com",
         "^xbox\\.[^.]+\\.[^.]+\\.microsoft\\.com",
         "^xbox\\.[^.]+\\.microsoft\\.com"
       ]
     }
   ]
-}
+}  
