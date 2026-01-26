@@ -42,7 +42,7 @@ jobs:
           ./sing-box rule-set compile Adblock.json -o Adblock.srs
 
       # ----------------------------------------------------------------
-      # 任务 B: FakeIP-Filter 构建 (三源合并生成 fakeip-filter.json)
+      # 任务 B: FakeIP-Filter 构建 (保持原始域名格式 + 排序)
       # ----------------------------------------------------------------
       - name: Task B - Consensus Merge
         run: |
@@ -56,24 +56,28 @@ jobs:
           registry = {} 
 
           def add_to_reg(val, r_type, src):
-              if r_type != 'domain_regex': val = val.strip().lower()
+              val = val.strip()
               if not val: return
+              # 使用 (类型, 值) 作为 Key，但值保持原始大小写
               key = (r_type, val)
               if key not in registry: registry[key] = set()
               registry[key].add(src)
 
+          # 加载 S1 (JSON)
           with open('s1.json', 'r') as f:
               d = json.load(f)
               for r in d.get('rules', []):
                   for k in ['domain', 'domain_suffix', 'domain_keyword', 'domain_regex']:
                       for v in r.get(k, []): add_to_reg(v, k, 'S1')
 
+          # 加载 S2 (JSON)
           with open('s2.json', 'r') as f:
               d = json.load(f)
               for r in d.get('rules', []):
                   for k in ['domain', 'domain_suffix', 'domain_keyword', 'domain_regex']:
                       for v in r.get(k, []): add_to_reg(v, k, 'S2')
 
+          # 加载 S3 (List)
           if os.path.exists('s3.list'):
               for line in open('s3.list'):
                   l = line.strip()
@@ -81,11 +85,13 @@ jobs:
                   if l.startswith('.'): add_to_reg(l.lstrip('.'), 'domain_suffix', 'S3')
                   else: add_to_reg(l, 'domain', 'S3')
 
+          # 合并逻辑：S1 存在 或 (S2 且 S3 存在)
           final_rules = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
           for (r_type, val), sources in registry.items():
               if 'S1' in sources or ('S2' in sources and 'S3' in sources):
                   final_rules[r_type].append(val)
 
+          # 修正顺序：排序输出
           output = {'version': 3, 'rules': [{k: sorted(v) for k, v in final_rules.items() if v}]}
           with open('fakeip-filter.json', 'w') as f:
               json.dump(output, f, indent=2)
@@ -93,14 +99,14 @@ jobs:
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
       # ----------------------------------------------------------------
-      # 任务 C: 编译你手动写的 Remote-DNS
+      # 任务 C: 编译手动维护的 Remote-DNS
       # ----------------------------------------------------------------
       - name: Task C - Compile Manual Remote-DNS
         run: |
           if [ -f "fakeip-filter-Remote-DNS.json" ]; then
             ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
           else
-            echo "Warning: fakeip-filter-Remote-DNS.json not found, skipping compile."
+            echo "Warning: fakeip-filter-Remote-DNS.json not found."
           fi
 
       # ----------------------------------------------------------------
@@ -112,7 +118,6 @@ jobs:
           python3 -c "import json; d=json.load(open('raw_webrtc.json')); open('webRTC.json','w').write(json.dumps({'version': 3, 'rules': d.get('rules', [])}, indent=2))"
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
 
-          # 清理合并过程中的临时文件，保留最终的 json 和 srs
           rm -f s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box sing-box.tar.gz
           
           git config --global user.name "github-actions"
@@ -122,6 +127,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync: Updated SRS (Merged FakeIP + Manual Remote) ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Maintain Original Domain Format & Sort Rules ($(date +'%Y-%m-%d'))"
             git push origin main
           fi
