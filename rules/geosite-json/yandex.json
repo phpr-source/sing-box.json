@@ -2,6 +2,7 @@
   "version": 4,
   "rules": [
     {
+      "domain": "yandex-pogoda.static-storage.net",
       "domain_suffix": [
         ".yandex",
         "adfox.ru",

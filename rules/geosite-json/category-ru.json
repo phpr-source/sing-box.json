@@ -2,6 +2,7 @@
   "version": 4,
   "rules": [
     {
+      "domain": "yandex-pogoda.static-storage.net",
       "domain_suffix": [
         ".moscow",
         ".psk",
@@ -17,7 +18,9 @@
         ".xn--p1ai",
         ".yandex",
         "5post.market",
+        "aviasales.com",
         "avito.st",
+        "avs.io",
         "boosty.to",
         "chizhik.club",
         "dodois.com",
