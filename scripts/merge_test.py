@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import subprocess
@@ -110,7 +112,7 @@ except ImportError:
     HAS_HYPOTHESIS = False
 
 try:
-    from greenery import parse, fsm
+    from greenery import parse
     HAS_GREENERY = True
 except ImportError:
     HAS_GREENERY = False
@@ -119,7 +121,7 @@ logger = logging.getLogger(__name__)
 
 
 class CIDRFragmentationError(Exception):
-    __slots__ = ('processed_count', 'limit', 'loss_rate', '__dict__')
+    __slots__ = ('processed_count', 'limit', 'loss_rate')
     def __init__(self, processed_count: int, limit: int, loss_rate: float = 0.0):
         self.processed_count = processed_count
         self.limit = limit
@@ -128,7 +130,7 @@ class CIDRFragmentationError(Exception):
 
 
 class StrictVerificationError(Exception):
-    __slots__ = ('rule_type', 'rule_value', 'source_url', 'confidence', '__dict__')
+    __slots__ = ('rule_type', 'rule_value', 'source_url', 'confidence')
     def __init__(self, message: str, *, rule_type: Optional[str] = None, 
                  rule_value: Optional[str] = None, source_url: Optional[str] = None, 
                  confidence: float = 0.0):
@@ -220,7 +222,7 @@ class MergeConfig:
     rule_specificity_boost: float = 0.1
     enable_merkle_tree: bool = True
     merkle_tree_branching: int = 2
-    cid_approximation_max_loss_rate: float = 0.05
+    cidr_approximation_max_loss_rate: float = 0.05
     enable_smt_verification: bool = True
     smt_timeout_ms: int = 5000
     smt_progressive_timeout: Tuple[int, ...] = (100, 500, 2000, 5000)
@@ -270,14 +272,13 @@ class MergeConfig:
     wal_sync_interval: int = 10
 
     @classmethod
-    def from_dict(cls, d: Dict, base: 'MergeConfig') -> 'MergeConfig':
-        valid_fields = {f.name for f in fields(cls)}
+    def from_dict(cls, d: Dict, base: MergeConfig) -> MergeConfig:
         merged = {}
         for field_info in fields(cls):
             name = field_info.name
             if name in d:
                 value = d[name]
-                if field_info.type == Path and isinstance(value, str):
+                if isinstance(value, str) and (field_info.type == Path or field_info.type == 'Path'):
                     merged[name] = Path(value)
                 else:
                     merged[name] = value
@@ -296,13 +297,13 @@ RE_HTML_MAGIC = re.compile(rb'^\s*<(?:!DOCTYPE|html|head|body|div|span)', re.IGN
 RE_DOMAIN_LABEL = re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
 RE_PUNYCODE = re.compile(r'^xn--[a-z0-9-]+$')
 RE_SYNTAX_SUGAR = re.compile(r'\\[dwsDSW]|\\x[0-9a-fA-F]{2}')
-RE_UNCERTAIN_REGEX = re.compile(r'\[1-9]|\(\?P<|\(\?[=!]|\(\?<=!]|\(\?\#|\\g<|\\k<')
+RE_UNCERTAIN_REGEX = re.compile(r'\[1-9]|\(\?P<|\(\?[=!]|\(\?<!|\(\?\#|\\g<|\\k<')
 RE_CATASTROPHIC_BACKTRACK = re.compile(r'(\w+\([\w\s|]+\)[*+])|(\([\w\s|]+\)\2*?)')
 
 
 class DeterministicRandom:
     __slots__ = ('_rng', '_seed', '_history', '_lock')
-    def __init__(self, seed_data: Union[str, bytes, int, Tuple]):
+    def __init__(self, seed_data: Union[str, bytes, int, Tuple[Any, ...]]):
         if isinstance(seed_data, (str, bytes)):
             if isinstance(seed_data, str):
                 seed_data = seed_data.encode('utf-8')
@@ -493,14 +494,14 @@ class DomainRule:
             if scripts:
                 object.__setattr__(self, 'script_type', ','.join(sorted(scripts)))
 
-    def covers(self, other: 'DomainRule') -> bool:
+    def covers(self, other: DomainRule) -> bool:
         if self.match_type == MatchType.EXACT:
             return self.normalized == other.normalized
         elif self.match_type == MatchType.SUFFIX:
             if other.match_type == MatchType.EXACT:
                 return other.normalized.endswith(self.normalized)
             elif other.match_type == MatchType.SUFFIX:
-                return other.normalized.endswith(self.normalized) or self.normalized.endswith(other.normalized)
+                return other.normalized.endswith(self.normalized)
             else:
                 return other.normalized.endswith(self.normalized)
         elif self.match_type == MatchType.WILDCARD:
@@ -531,7 +532,7 @@ class IPCIDRRule:
         if not self.original_str:
             object.__setattr__(self, 'original_str', str(self.network))
 
-    def covers(self, other: 'IPCIDRRule') -> bool:
+    def covers(self, other: IPCIDRRule) -> bool:
         if self.network.version != other.network.version:
             return False
         return other.network.subnet_of(self.network)
@@ -572,7 +573,7 @@ class RegexRule:
             h = hashlib.sha256(self.pattern.encode()).hexdigest()
             object.__setattr__(self, 'antimirov_hash', int(h[:16], 16))
 
-    def covers(self, other: 'RegexRule') -> bool:
+    def covers(self, other: RegexRule) -> bool:
         if not HAS_GREENERY:
             return False
         if len(self.pattern) > 200 or self.pattern.count('*') + self.pattern.count('+') > 5:
@@ -587,11 +588,11 @@ class RegexRule:
         except Exception:
             return False
 
-    def _check_coverage(self, other: 'RegexRule') -> bool:
+    def _check_coverage(self, other: RegexRule) -> bool:
         try:
             fsm_self = parse(self.pattern).to_fsm()
             fsm_other = parse(other.pattern).to_fsm()
-            return fsm_other.issubset(fsm_self)
+            return fsm_other <= fsm_self
         except Exception:
             return False
 
@@ -608,7 +609,7 @@ RuleType = Union[DomainRule, IPCIDRRule, KeywordRule, RegexRule]
 
 
 class RIRDataManager:
-    __slots__ = ('_prefixes', '_cache_dir', '_cache_file', '_lock', '_last_update')
+    __slots__ = ('_config', '_prefixes', '_cache_dir', '_cache_file', '_lock', '_last_update')
 
     BUILTIN_PREFIXES = {
         '1.0.0.0/8': 'APNIC', '1.1.1.0/24': 'APNIC', '14.0.0.0/8': 'APNIC',
@@ -684,61 +685,62 @@ class RIRDataManager:
         '154.0.0.0/8': 'AFRINIC', '196.0.0.0/8': 'AFRINIC', '197.0.0.0/8': 'AFRINIC',
     }
 
-def __init__(self, config: MergeConfig = DEFAULT_CONFIG):
-    self._prefixes = {}
-    self._cache_dir = Path(tempfile.gettempdir()) / "rir_cache"
-    self._cache_file = self._cache_dir / "rir_data.json"
-    self._lock = threading.RLock()
-    self._last_update = 0
-    self._load_builtin()
-    if config.enable_rir_lookup:
-        self._try_load_cached()
+    def __init__(self, config: MergeConfig = DEFAULT_CONFIG):
+        self._config = config
+        self._prefixes = {}
+        self._cache_dir = Path(tempfile.gettempdir()) / "rir_cache"
+        self._cache_file = self._cache_dir / "rir_data.json"
+        self._lock = threading.RLock()
+        self._last_update = 0
+        self._load_builtin()
+        if config.enable_rir_lookup:
+            self._try_load_cached()
 
-def _load_builtin(self):
-    with self._lock:
-        for prefix_str, rir in self.BUILTIN_PREFIXES.items():
-            try:
-                network = ipaddress.ip_network(prefix_str, strict=False)
-                self._prefixes[network] = rir
-            except ValueError:
-                continue
+    def _load_builtin(self):
+        with self._lock:
+            for prefix_str, rir in self.BUILTIN_PREFIXES.items():
+                try:
+                    network = ipaddress.ip_network(prefix_str, strict=False)
+                    self._prefixes[network] = rir
+                except ValueError:
+                    continue
 
-def _try_load_cached(self):
-    try:
-        if self._cache_file.exists():
-            mtime = self._cache_file.stat().st_mtime
-            if time.time() - mtime < 7 * 86400:
-                with open(self._cache_file, 'r') as f:
-                    data = json.load(f)
-                    for prefix_str, rir in data.items():
-                        try:
-                            network = ipaddress.ip_network(prefix_str, strict=False)
-                            self._prefixes[network] = rir
-                        except ValueError:
-                            continue
-                    self._last_update = mtime
-    except Exception as e:
-        logger.warning(f"Failed to load RIR cache: {e}")
+    def _try_load_cached(self):
+        try:
+            if self._cache_file.exists():
+                mtime = self._cache_file.stat().st_mtime
+                if time.time() - mtime < 7 * 86400:
+                    with open(self._cache_file, 'r') as f:
+                        data = json.load(f)
+                        for prefix_str, rir in data.items():
+                            try:
+                                network = ipaddress.ip_network(prefix_str, strict=False)
+                                self._prefixes[network] = rir
+                            except ValueError:
+                                continue
+                        self._last_update = mtime
+        except Exception as e:
+            logger.warning(f"Failed to load RIR cache: {e}")
 
-def get_owner(self, network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> Optional[str]:
-    with self._lock:
-        best_match = None
-        best_len = -1
-        for prefix, rir in self._prefixes.items():
-            if prefix.version != network.version:
-                continue
-            if network.subnet_of(prefix) and prefix.prefixlen > best_len:
-                best_len = prefix.prefixlen
-                best_match = rir
-        return best_match
+    def get_owner(self, network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> Optional[str]:
+        with self._lock:
+            best_match = None
+            best_len = -1
+            for prefix, rir in self._prefixes.items():
+                if prefix.version != network.version:
+                    continue
+                if network.subnet_of(prefix) and prefix.prefixlen > best_len:
+                    best_len = prefix.prefixlen
+                    best_match = rir
+            return best_match
 
-def can_merge(self, net1: Union[ipaddress.IPv4Network, ipaddress.IPv6Network],
-              net2: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> bool:
-    owner1 = self.get_owner(net1)
-    owner2 = self.get_owner(net2)
-    if owner1 is None or owner2 is None:
-        return True
-    return owner1 == owner2
+    def can_merge(self, net1: Union[ipaddress.IPv4Network, ipaddress.IPv6Network],
+                  net2: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> bool:
+        owner1 = self.get_owner(net1)
+        owner2 = self.get_owner(net2)
+        if owner1 is None or owner2 is None:
+            return True
+        return owner1 == owner2
 
 
 class ReadWriteLock:
@@ -808,7 +810,7 @@ class ResourceMonitor:
             if self._max_duration and (time.time() - self._start_time) > self._max_duration:
                 return False, mem_usage
             return True, mem_usage
-        except:
+        except Exception:
             return True, 0.0
 
     def should_degrade(self, current_level: int) -> bool:
@@ -865,7 +867,7 @@ class VersionedBDDNode:
     _max_cache_size = 50000
     _current_generation = 0
 
-    def __new__(cls, var: int, low: Optional['VersionedBDDNode'], high: Optional['VersionedBDDNode'], generation: int = 0):
+    def __new__(cls, var: int, low: Optional[VersionedBDDNode], high: Optional[VersionedBDDNode], generation: int = 0):
         if low is high:
             return low
         key = (var, id(low) if low else None, id(high) if high else None, generation)
@@ -875,6 +877,7 @@ class VersionedBDDNode:
                 if existing._migrated_to is not None:
                     return existing._migrated_to
                 existing._last_accessed_gen = generation
+                cls._node_cache.move_to_end(key)
                 return existing
             if cls._instance_count >= cls._max_cache_size:
                 cls._emergency_gc(generation)
@@ -915,7 +918,7 @@ class VersionedBDDNode:
             for k in to_remove:
                 del cls._node_cache[k]
 
-    def __init__(self, var: int, low: Optional['VersionedBDDNode'], high: Optional['VersionedBDDNode'], generation: int = 0):
+    def __init__(self, var: int, low: Optional[VersionedBDDNode], high: Optional[VersionedBDDNode], generation: int = 0):
         if hasattr(self, 'var'):
             return
         self.var = var
@@ -946,7 +949,7 @@ class VersionedBDDNode:
             return self.high() if self.high else None
         return self.high
 
-    def mark_migrated(self, new_node: 'VersionedBDDNode'):
+    def mark_migrated(self, new_node: VersionedBDDNode):
         self._migrated_to = new_node
 
     def __hash__(self):
@@ -981,8 +984,8 @@ class TransactionalBDDEngine:
         self._txn_created_nodes = []
 
         with VersionedBDDNode._cache_lock:
-            VersionedBDDNode._node_cache[(float('-inf'), None, None, 0)] = self.false_node
-            VersionedBDDNode._node_cache[(float('inf'), None, None, 0)] = self.true_node
+            VersionedBDDNode._node_cache[(-2, None, None, 0)] = self.false_node
+            VersionedBDDNode._node_cache[(-1, None, None, 0)] = self.true_node
             with VersionedBDDNode._count_lock:
                 VersionedBDDNode._instance_count += 2
 
@@ -1061,7 +1064,7 @@ class TransactionalBDDEngine:
         if g is self.true_node:
             return f if op == 'and' else self.true_node
         if f is g:
-            return f if op == 'and' else f
+            return f
 
         key = (op, min(id(f), id(g)), max(id(f), id(g)), self._generation)
         with self._op_cache_lock:
@@ -1243,7 +1246,6 @@ class BDDRuleVerifier:
 
 
 class SMTVerifier:
-    """修復版：解決進程池序列化問題和緩存無限增長"""
     __slots__ = ('enabled', '_z3_available', '_solver_cache', '_config', '_timeout_stages', 
                  '_process_pool', '_pool_size', '_stop_event', '_cache_lock', '_max_cache_size')
 
@@ -1294,7 +1296,7 @@ class SMTVerifier:
             parent_strs = [f"dom:{r.normalized}" for r in parent_rules if r.match_type != MatchType.WILDCARD]
             child_strs = [f"dom:{r.normalized}" for r in child_rules if r.match_type != MatchType.WILDCARD]
 
-            for timeout_idx, timeout_ms in enumerate(self._timeout_stages):
+            for timeout_ms in self._timeout_stages:
                 if monitor and monitor.should_degrade(3):
                     return False, 0.0, 0, "resource_pressure"
 
@@ -1305,10 +1307,9 @@ class SMTVerifier:
                     result = self._verify_impl(parent_strs, child_strs, timeout_ms)
                 else:
                     try:
-                        config_dict = asdict(self._config)
                         future = self._process_pool.apply_async(
                             SMTVerifier._verify_worker_static, 
-                            (parent_strs, child_strs, timeout_ms, config_dict)
+                            (parent_strs, child_strs, timeout_ms)
                         )
                         result = future.get(timeout=timeout_ms/1000.0 + 1.0)
                     except multiprocessing.TimeoutError:
@@ -1331,10 +1332,10 @@ class SMTVerifier:
             return False, 0.0, 0, f"exception:{str(e)}"
 
     def _verify_impl(self, parent_rules_str, child_rules_str, timeout_ms):
-        return SMTVerifier._verify_worker_static(parent_rules_str, child_rules_str, timeout_ms, asdict(self._config))
+        return SMTVerifier._verify_worker_static(parent_rules_str, child_rules_str, timeout_ms)
 
     @staticmethod
-    def _verify_worker_static(parent_rules_str, child_rules_str, timeout_ms, config_dict):
+    def _verify_worker_static(parent_rules_str, child_rules_str, timeout_ms):
         if not HAS_Z3:
             return False, 0.0, timeout_ms, "z3_unavailable"
 
@@ -1416,6 +1417,8 @@ class StrictNgramSpectrumAnalyzer:
 
     def _extract_ngrams(self, s: str, n: int) -> List[str]:
         s_clean = ''.join(c if c.isalnum() else '-' for c in s.lower())
+        if len(s_clean) < n:
+            return []
         return [s_clean[i:i+n] for i in range(len(s_clean) - n + 1)]
 
     def _detect_script(self, s: str) -> Set[str]:
@@ -1429,7 +1432,7 @@ class StrictNgramSpectrumAnalyzer:
                     scripts.add('COMMON')
                 elif base_script in ('LATIN', 'CYRILLIC', 'GREEK', 'ARABIC', 'HEBREW', 'CJK', 'HANGUL'):
                     scripts.add(base_script)
-            except:
+            except Exception:
                 pass
         return scripts
 
@@ -1587,7 +1590,7 @@ class DomainTrie:
             with self._cache_lock:
                 self._cache.clear()
 
-    def _copy_path(self, node, domain: str, match_type: MatchType):
+    def _copy_path(self, node: DomainTrie.Node, domain: str, match_type: MatchType):
         parts = domain.split('.')
         if len(parts) > self._depth_limit:
             parts = parts[-self._depth_limit:]
@@ -1625,93 +1628,105 @@ class DomainTrie:
         return new_root
 
     def is_covered(self, domain: str, match_type: MatchType = MatchType.EXACT) -> Tuple[bool, MatchType, int]:
-        current_root = self.root
-        current_version = self._version
-        
-        cache_key = f"{domain}:{match_type.value}:{current_version}"
-        with self._cache_lock:
-            if cache_key in self._cache:
-                self._cache.move_to_end(cache_key)
-                return self._cache[cache_key]
+        self._rwlock.acquire_read()
+        try:
+            current_root = self.root
+            current_version = self._version
+            
+            cache_key = f"{domain}:{match_type.value}:{current_version}"
+            with self._cache_lock:
+                if cache_key in self._cache:
+                    self._cache.move_to_end(cache_key)
+                    return self._cache[cache_key]
 
-        parts = domain.split('.')
-        if len(parts) > self._depth_limit:
-            parts = parts[-self._depth_limit:]
+            parts = domain.split('.')
+            if len(parts) > self._depth_limit:
+                parts = parts[-self._depth_limit:]
 
-        node = current_root
-        best_match = (False, MatchType.EXACT, 0)
-        depth = 0
+            node = current_root
+            best_match = (False, MatchType.EXACT, 0)
+            depth = 0
 
-        for i, part in enumerate(reversed(parts)):
-            if MatchType.WILDCARD in node.types and match_type == MatchType.EXACT:
+            for i, part in enumerate(reversed(parts)):
+                if MatchType.WILDCARD in node.types and match_type == MatchType.EXACT:
+                    best_match = (True, MatchType.WILDCARD, depth)
+                if node.terminal and MatchType.SUFFIX in node.types:
+                    best_match = (True, MatchType.SUFFIX, depth)
+                if node.terminal and MatchType.EXACT in node.types and i == len(parts) - 1:
+                    best_match = (True, MatchType.EXACT, depth)
+
+                if part not in node.children:
+                    with self._cache_lock:
+                        self._cache[cache_key] = best_match
+                        if len(self._cache) > self._cache_limit:
+                            self._cache.popitem(last=False)
+                    return best_match
+                node = node.children[part]
+                depth += 1
+
+            if MatchType.WILDCARD in node.types and match_type == MatchType.WILDCARD:
                 best_match = (True, MatchType.WILDCARD, depth)
-            if node.terminal and MatchType.SUFFIX in node.types:
-                best_match = (True, MatchType.SUFFIX, depth)
-            if node.terminal and MatchType.EXACT in node.types and i == len(parts) - 1:
-                best_match = (True, MatchType.EXACT, depth)
+            elif node.terminal:
+                if MatchType.EXACT in node.types and match_type == MatchType.EXACT:
+                    best_match = (True, MatchType.EXACT, depth)
+                elif MatchType.SUFFIX in node.types:
+                    best_match = (True, MatchType.SUFFIX, depth)
 
-            if part not in node.children:
-                with self._cache_lock:
-                    self._cache[cache_key] = best_match
-                    if len(self._cache) > self._cache_limit:
-                        self._cache.popitem(last=False)
-                return best_match
-            node = node.children[part]
-            depth += 1
+            with self._cache_lock:
+                self._cache[cache_key] = best_match
+                if len(self._cache) > self._cache_limit:
+                    self._cache.popitem(last=False)
 
-        if MatchType.WILDCARD in node.types and match_type == MatchType.WILDCARD:
-            best_match = (True, MatchType.WILDCARD, depth)
-        elif node.terminal:
-            if MatchType.EXACT in node.types and match_type == MatchType.EXACT:
-                best_match = (True, MatchType.EXACT, depth)
-            elif MatchType.SUFFIX in node.types:
-                best_match = (True, MatchType.SUFFIX, depth)
-
-        with self._cache_lock:
-            self._cache[cache_key] = best_match
-            if len(self._cache) > self._cache_limit:
-                self._cache.popitem(last=False)
-
-        return best_match
+            return best_match
+        finally:
+            self._rwlock.release_read()
 
     def optimize(self) -> List[Tuple[str, MatchType]]:
-        result = []
-        stack = [(self.root, [])]
-        
-        while stack:
-            node, parts = stack.pop()
+        self._rwlock.acquire_read()
+        try:
+            result = []
+            stack = [(self.root, [])]
             
-            if node.terminal:
-                domain = '.'.join(reversed(parts))
-                if MatchType.WILDCARD in node.types:
-                    result.append((f"*.{domain}" if domain else "*", MatchType.WILDCARD))
-                elif MatchType.EXACT in node.types:
-                    result.append((domain, MatchType.EXACT))
-                elif MatchType.SUFFIX in node.types:
-                    result.append((domain, MatchType.SUFFIX))
+            while stack:
+                node, parts = stack.pop()
+                
+                if node.terminal:
+                    domain = '.'.join(reversed(parts))
+                    if MatchType.WILDCARD in node.types:
+                        result.append((f"*.{domain}" if domain else "*", MatchType.WILDCARD))
+                    elif MatchType.EXACT in node.types:
+                        result.append((domain, MatchType.EXACT))
+                    elif MatchType.SUFFIX in node.types:
+                        result.append((domain, MatchType.SUFFIX))
+                
+                if len(parts) < self._depth_limit:
+                    for part, child in node.children.items():
+                        stack.append((child, parts + [part]))
             
-            if len(parts) < self._depth_limit:
-                for part, child in node.children.items():
-                    stack.append((child, parts + [part]))
-        
-        return result
+            return result
+        finally:
+            self._rwlock.release_read()
 
     def get_specificity_score(self, domain: str) -> int:
-        parts = domain.split('.')
-        if len(parts) > self._depth_limit:
-            parts = parts[-self._depth_limit:]
-        node = self.root
-        score = 0
-        for part in reversed(parts):
-            score += 10
-            if MatchType.EXACT in node.types:
-                score += 5
-            elif MatchType.SUFFIX in node.types:
-                score += 2
-            if part not in node.children:
-                break
-            node = node.children[part]
-        return score
+        self._rwlock.acquire_read()
+        try:
+            parts = domain.split('.')
+            if len(parts) > self._depth_limit:
+                parts = parts[-self._depth_limit:]
+            node = self.root
+            score = 0
+            for part in reversed(parts):
+                score += 10
+                if MatchType.EXACT in node.types:
+                    score += 5
+                elif MatchType.SUFFIX in node.types:
+                    score += 2
+                if part not in node.children:
+                    break
+                node = node.children[part]
+            return score
+        finally:
+            self._rwlock.release_read()
 
 
 class StrictPatriciaTrie:
@@ -1808,6 +1823,7 @@ class StrictPatriciaTrie:
                     node = node.right
 
         return sorted(covering, key=lambda x: (-x.prefixlen, int(x.network_address)))
+
 
 class IntervalTreeNode:
     __slots__ = ('center', 'intervals', 'left', 'right', 'by_start', 'by_end', '_lock', '_max_depth', '_current_depth')
@@ -1932,6 +1948,68 @@ class SweepLineCIDRManager:
             end = int(network.broadcast_address)
             return self._interval_tree.find_overlapping(start, end)
 
+    @staticmethod
+    def _range_to_cidrs(start: int, end: int, version: int):
+        if start > end:
+            return []
+        if version == 4:
+            first = ipaddress.IPv4Address(start)
+            last = ipaddress.IPv4Address(end)
+        else:
+            first = ipaddress.IPv6Address(start)
+            last = ipaddress.IPv6Address(end)
+        return list(ipaddress.summarize_address_range(first, last))
+
+    @staticmethod
+    def _merge_adjacent_cidrs(networks):
+        if not networks:
+            return []
+        return list(ipaddress.collapse_addresses(networks))
+
+    @staticmethod
+    def _hierarchical_supernet_with_loss(networks, target_count, enable_rir, rir_manager):
+        if len(networks) <= target_count:
+            return networks, 0.0
+        
+        working = sorted(networks, key=lambda n: (n.prefixlen, int(n.network_address)))
+        loss_count = 0
+        original_addresses = sum(n.num_addresses for n in networks)
+        
+        while len(working) > target_count and len(working) > 1:
+            merged = []
+            i = 0
+            made_progress = False
+            while i < len(working):
+                if i + 1 < len(working):
+                    current = working[i]
+                    next_net = working[i + 1]
+                    
+                    if current.prefixlen == next_net.prefixlen:
+                        supernet = current.supernet()
+                        if next_net.subnet_of(supernet):
+                            if not enable_rir or (rir_manager and rir_manager.can_merge(current, next_net)):
+                                if current.broadcast_address + 1 == next_net.network_address:
+                                    merged.append(supernet)
+                                    loss_count += supernet.num_addresses - current.num_addresses - next_net.num_addresses
+                                    i += 2
+                                    made_progress = True
+                                    continue
+                merged.append(working[i])
+                i += 1
+            
+            if not made_progress:
+                break
+            working = merged
+        
+        if len(working) > target_count:
+            working = working[:target_count]
+            current_addresses = sum(n.num_addresses for n in working)
+            if original_addresses > 0:
+                loss_count = original_addresses - current_addresses
+        
+        loss_rate = loss_count / original_addresses if original_addresses > 0 else 0.0
+        return working, loss_rate
+
     @classmethod
     def subtract(cls, base_nets: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]], 
                  exclude_nets: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]],
@@ -1956,7 +2034,9 @@ class SweepLineCIDRManager:
             total_result = v4_result + v6_result
 
             if enable_adjacent_merge:
-                total_result = cls._merge_adjacent_cidrs(total_result)
+                v4_merged = cls._merge_adjacent_cidrs([n for n in total_result if n.version == 4])
+                v6_merged = cls._merge_adjacent_cidrs([n for n in total_result if n.version == 6])
+                total_result = v4_merged + v6_merged
 
             if len(total_result) > max_fragments:
                 if enable_approximation and len(total_result) > approximation_threshold:
@@ -2041,10 +2121,10 @@ class SweepLineCIDRManager:
 
         cidrs = []
         for start, end in result_intervals:
-            cidrs.extend(cls._range_to_cidrs(start, end, width))
+            cidrs.extend(cls._range_to_cidrs(start, end, 4 if width == 32 else 6))
 
         return list(ipaddress.collapse_addresses(cidrs))
-
+        
     @classmethod
     def _hierarchical_supernet_with_loss(cls, networks: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]], 
                                          target_count: int,
