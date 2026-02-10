@@ -6,7 +6,6 @@ import concurrent.futures
 import re
 import shutil
 import ipaddress
-import requests
 import logging
 import tempfile
 import math
@@ -22,7 +21,6 @@ import array
 import unicodedata
 import weakref
 import binascii
-import psutil
 import random
 import string
 import collections
@@ -34,13 +32,21 @@ from typing import List, Dict, Set, Tuple, Optional, Any, Union, FrozenSet, Call
 from pathlib import Path
 from dataclasses import dataclass, field, asdict, fields
 from enum import IntEnum, auto
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from abc import ABC, abstractmethod
 from functools import lru_cache, total_ordering
 import contextlib
 
-# 可選依賴導入
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+    psutil = None
+
 try:
     import orjson
     USE_ORJSON = True
@@ -66,6 +72,7 @@ try:
         _tld_cache = None
 except ImportError:
     USE_TLDEXTRACT = False
+    _tld_cache_dir = None
     _tld_cache = None
 
 try:
@@ -108,12 +115,11 @@ try:
 except ImportError:
     HAS_GREENERY = False
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
 
 
 class CIDRFragmentationError(Exception):
-    __slots__ = ('processed_count', 'limit', 'loss_rate')
+    __slots__ = ('processed_count', 'limit', 'loss_rate', '__dict__')
     def __init__(self, processed_count: int, limit: int, loss_rate: float = 0.0):
         self.processed_count = processed_count
         self.limit = limit
@@ -122,7 +128,7 @@ class CIDRFragmentationError(Exception):
 
 
 class StrictVerificationError(Exception):
-    __slots__ = ('rule_type', 'rule_value', 'source_url', 'confidence')
+    __slots__ = ('rule_type', 'rule_value', 'source_url', 'confidence', '__dict__')
     def __init__(self, message: str, *, rule_type: Optional[str] = None, 
                  rule_value: Optional[str] = None, source_url: Optional[str] = None, 
                  confidence: float = 0.0):
@@ -265,17 +271,19 @@ class MergeConfig:
 
     @classmethod
     def from_dict(cls, d: Dict, base: 'MergeConfig') -> 'MergeConfig':
-        """安全地從字典更新配置，忽略無效鍵並進行類型轉換"""
         valid_fields = {f.name for f in fields(cls)}
-        filtered = {}
-        for k, v in d.items():
-            if k in valid_fields:
-                field_type = cls.__dataclass_fields__[k].type
-                if field_type == Path and isinstance(v, str):
-                    filtered[k] = Path(v)
+        merged = {}
+        for field_info in fields(cls):
+            name = field_info.name
+            if name in d:
+                value = d[name]
+                if field_info.type == Path and isinstance(value, str):
+                    merged[name] = Path(value)
                 else:
-                    filtered[k] = v
-        return cls(**{**asdict(base), **filtered})
+                    merged[name] = value
+            else:
+                merged[name] = getattr(base, name)
+        return cls(**merged)
 
 
 DEFAULT_CONFIG = MergeConfig()
@@ -287,8 +295,8 @@ RE_JSON_MAGIC = re.compile(rb'^\s*[\{\[]')
 RE_HTML_MAGIC = re.compile(rb'^\s*<(?:!DOCTYPE|html|head|body|div|span)', re.IGNORECASE)
 RE_DOMAIN_LABEL = re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
 RE_PUNYCODE = re.compile(r'^xn--[a-z0-9-]+$')
-RE_SYNTAX_SUGAR = re.compile(r'\([dwsDSW])|\\x([0-9a-fA-F]{2})')
-RE_UNCERTAIN_REGEX = re.compile(r'\[1-9]|\(\?P<|\(\?[=!]|\(\?<=!]|\(\?\#|\\g<|\\k<|(?<!\)\(\?\#')
+RE_SYNTAX_SUGAR = re.compile(r'\\[dwsDSW]|\\x[0-9a-fA-F]{2}')
+RE_UNCERTAIN_REGEX = re.compile(r'\[1-9]|\(\?P<|\(\?[=!]|\(\?<=!]|\(\?\#|\\g<|\\k<')
 RE_CATASTROPHIC_BACKTRACK = re.compile(r'(\w+\([\w\s|]+\)[*+])|(\([\w\s|]+\)\2*?)')
 
 
@@ -302,13 +310,12 @@ class DeterministicRandom:
         elif isinstance(seed_data, (tuple, list)):
             seed = int(hashlib.sha256(str(seed_data).encode()).hexdigest()[:16], 16)
         elif isinstance(seed_data, int):
-            # 修復：確保seed在有效範圍內
             seed = abs(seed) % (2 ** 32)
         else:
             seed = 0
         self._seed = seed
         self._rng = random.Random(seed)
-        self._history = deque(maxlen=10000)  # 限制歷史記錄大小
+        self._history = deque(maxlen=10000)
         self._lock = threading.Lock()
 
     def random(self):
@@ -345,7 +352,6 @@ class DeterministicRandom:
             return tuple(self._history)
 
     def get_state(self) -> Dict:
-        """獲取可序列化狀態，用於檢查點"""
         with self._lock:
             return {
                 'seed': self._seed,
@@ -354,17 +360,14 @@ class DeterministicRandom:
             }
 
     def set_state(self, state: Dict):
-        """從檢查點恢復"""
         with self._lock:
             self._seed = state['seed']
             self._rng.setstate(state['rng_state'])
 
 
 def fnv1a_64(data: Union[str, bytes], seed: int = 0xcbf29ce484222325) -> int:
-    """修復：強制歸一化seed到64位無符號整數"""
     if isinstance(data, str):
         data = data.encode('utf-8')
-    # 修復：確保seed為正數並在64位範圍內
     hash_val = seed & 0xffffffffffffffff
     for byte in data:
         hash_val ^= byte
@@ -388,36 +391,25 @@ def calculate_entropy(s: str) -> float:
 
 
 def calculate_js_divergence(p: Dict[str, float], q: Dict[str, float]) -> float:
-    """修復：添加平滑處理避免除零和空分佈問題"""
     if not p or not q:
         return float('inf')
-    
     all_keys = set(p.keys()) | set(q.keys())
     if not all_keys:
         return 0.0
-    
-    # 添加Laplace平滑
     epsilon = 1e-10
     p_smooth = {k: p.get(k, 0.0) + epsilon for k in all_keys}
     q_smooth = {k: q.get(k, 0.0) + epsilon for k in all_keys}
-    
-    # 重新歸一化
     total_p = sum(p_smooth.values())
     total_q = sum(q_smooth.values())
-    
     p_norm = {k: v / total_p for k, v in p_smooth.items()}
     q_norm = {k: v / total_q for k, v in q_smooth.items()}
-    
-    # 計算中間分佈
     m = {k: (p_norm[k] + q_norm[k]) / 2.0 for k in all_keys}
-    
     kl_pm = sum(p_norm[k] * math.log2(p_norm[k] / m[k]) for k in all_keys if p_norm[k] > 0 and m[k] > 0)
     kl_qm = sum(q_norm[k] * math.log2(q_norm[k] / m[k]) for k in all_keys if q_norm[k] > 0 and m[k] > 0)
     return (kl_pm + kl_qm) / 2.0
 
 
 def calculate_conditional_entropy(s: str, lag: int = 1) -> float:
-    """修復：添加lag參數驗證"""
     if lag <= 0 or len(s) <= lag:
         return 0.0
     pairs = defaultdict(lambda: defaultdict(int))
@@ -436,9 +428,8 @@ def calculate_conditional_entropy(s: str, lag: int = 1) -> float:
 
 
 def optimal_bloom_size(n: int, p: float = 0.001) -> Tuple[int, int]:
-    """修復：處理n=0的情況"""
     if n <= 0:
-        n = 100  # 默認最小值
+        n = 100
     m = int(-n * math.log(p) / (math.log(2) ** 2))
     m = max(m, 1024)
     m = (m + 7) // 8 * 8
@@ -465,7 +456,6 @@ class DomainRule:
     specificity_score: int = field(default=0)
     script_type: str = field(default="")
 
-    # 類級別常量：腳本白名單
     SCRIPT_WHITELIST = {'LATIN', 'CYRILLIC', 'GREEK', 'ARABIC', 'HEBREW', 'CJK', 'HANGUL', 'COMMON'}
 
     def __post_init__(self):
@@ -483,22 +473,20 @@ class DomainRule:
             object.__setattr__(self, 'specificity_score', score)
         if not self.script_type:
             scripts = set()
-            # 修復：性能優化，跳過ASCII字符和Punycode
             if not self.normalized.startswith('xn--'):
                 for char in self.normalized:
                     code = ord(char)
                     if code < 128:
-                        continue  # 跳過ASCII
+                        continue
                     try:
                         name = unicodedata.name(char)
                         parts = name.split()
                         base_script = parts[0]
-                        # 歸一化處理
                         if base_script in ('DIGIT', 'NUMBER', 'CIRCLED'):
                             scripts.add('COMMON')
-                        elif base_script in self.SCRIPT_WHITELIST:
+                        elif base_script in DomainRule.SCRIPT_WHITELIST:
                             scripts.add(base_script)
-                            if len(scripts) > 2:  # 提前退出
+                            if len(scripts) > 2:
                                 break
                     except (ValueError, AttributeError):
                         pass
@@ -506,7 +494,6 @@ class DomainRule:
                 object.__setattr__(self, 'script_type', ','.join(sorted(scripts)))
 
     def covers(self, other: 'DomainRule') -> bool:
-        """修復：完善covers語義，明確定義為'self是否涵蓋other'（other是self的子集）"""
         if self.match_type == MatchType.EXACT:
             return self.normalized == other.normalized
         elif self.match_type == MatchType.SUFFIX:
@@ -517,8 +504,10 @@ class DomainRule:
             else:
                 return other.normalized.endswith(self.normalized)
         elif self.match_type == MatchType.WILDCARD:
-            suffix = self.normalized.lstrip('*.')
-            return other.normalized.endswith(suffix)
+            if self.normalized.startswith('*.'):
+                suffix = self.normalized[2:]
+                return other.normalized.endswith(suffix)
+            return self.normalized == other.normalized
         return False
 
     def __hash__(self):
@@ -548,7 +537,6 @@ class IPCIDRRule:
         return other.network.subnet_of(self.network)
 
     def __hash__(self):
-        # 修復：確保不同prefixlen的相同address有不同的hash
         return hash((int(self.network.network_address), self.network.prefixlen, self.is_exclusion))
 
     def __eq__(self, other):
@@ -585,17 +573,11 @@ class RegexRule:
             object.__setattr__(self, 'antimirov_hash', int(h[:16], 16))
 
     def covers(self, other: 'RegexRule') -> bool:
-        """修復：添加複雜度檢查和超時保護"""
         if not HAS_GREENERY:
             return False
-        
-        # 預檢查：限制正則複雜度
         if len(self.pattern) > 200 or self.pattern.count('*') + self.pattern.count('+') > 5:
             return False
-        
         try:
-            # 使用線程超時替代信號
-            import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(self._check_coverage, other)
                 try:
@@ -619,14 +601,13 @@ class RegexRule:
     def __eq__(self, other):
         if not isinstance(other, RegexRule):
             return False
-        return self.pattern == other.pattern and self.is_exclusion == other.is_exclusion
+        return self.pattern == other.pattern and self.is_exclusion == other.is_exclusion)
 
 
 RuleType = Union[DomainRule, IPCIDRRule, KeywordRule, RegexRule]
 
 
 class RIRDataManager:
-    """RIR (Regional Internet Registry) 數據管理器 - 修復版"""
     __slots__ = ('_prefixes', '_cache_dir', '_cache_file', '_lock', '_last_update')
 
     BUILTIN_PREFIXES = {
@@ -703,66 +684,61 @@ class RIRDataManager:
         '154.0.0.0/8': 'AFRINIC', '196.0.0.0/8': 'AFRINIC', '197.0.0.0/8': 'AFRINIC',
     }
 
-    def __init__(self, config: MergeConfig = DEFAULT_CONFIG):
-        self._prefixes = {}
-        self._cache_dir = Path(tempfile.gettempdir()) / "rir_cache"
-        self._cache_file = self._cache_dir / "rir_data.json"
-        self._lock = threading.RLock()
-        self._last_update = 0
-        self._load_builtin()
-        if config.enable_rir_lookup:
-            self._try_load_cached()
+def __init__(self, config: MergeConfig = DEFAULT_CONFIG):
+    self._prefixes = {}
+    self._cache_dir = Path(tempfile.gettempdir()) / "rir_cache"
+    self._cache_file = self._cache_dir / "rir_data.json"
+    self._lock = threading.RLock()
+    self._last_update = 0
+    self._load_builtin()
+    if config.enable_rir_lookup:
+        self._try_load_cached()
 
-    def _load_builtin(self):
-        """惰性加載內置的 RIR 前綴數據"""
-        with self._lock:
-            for prefix_str, rir in self.BUILTIN_PREFIXES.items():
-                try:
-                    network = ipaddress.ip_network(prefix_str, strict=False)
-                    self._prefixes[network] = rir
-                except ValueError:
-                    continue
+def _load_builtin(self):
+    with self._lock:
+        for prefix_str, rir in self.BUILTIN_PREFIXES.items():
+            try:
+                network = ipaddress.ip_network(prefix_str, strict=False)
+                self._prefixes[network] = rir
+            except ValueError:
+                continue
 
-    def _try_load_cached(self):
-        """嘗試從緩存加載 RIR 數據"""
-        try:
-            if self._cache_file.exists():
-                mtime = self._cache_file.stat().st_mtime
-                if time.time() - mtime < 7 * 86400:
-                    with open(self._cache_file, 'r') as f:
-                        data = json.load(f)
-                        for prefix_str, rir in data.items():
-                            try:
-                                network = ipaddress.ip_network(prefix_str, strict=False)
-                                self._prefixes[network] = rir
-                            except ValueError:
-                                continue
-                        self._last_update = mtime
-        except Exception as e:
-            logger.warning(f"Failed to load RIR cache: {e}")
+def _try_load_cached(self):
+    try:
+        if self._cache_file.exists():
+            mtime = self._cache_file.stat().st_mtime
+            if time.time() - mtime < 7 * 86400:
+                with open(self._cache_file, 'r') as f:
+                    data = json.load(f)
+                    for prefix_str, rir in data.items():
+                        try:
+                            network = ipaddress.ip_network(prefix_str, strict=False)
+                            self._prefixes[network] = rir
+                        except ValueError:
+                            continue
+                    self._last_update = mtime
+    except Exception as e:
+        logger.warning(f"Failed to load RIR cache: {e}")
 
-    def get_owner(self, network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> Optional[str]:
-        """修復：使用最長匹配前綴（most specific prefix）"""
-        with self._lock:
-            best_match = None
-            best_len = -1
-            for prefix, rir in self._prefixes.items():
-                if prefix.version != network.version:
-                    continue
-                # 修復：只檢查network是否是prefix的子網
-                if network.subnet_of(prefix) and prefix.prefixlen > best_len:
-                    best_len = prefix.prefixlen
-                    best_match = rir
-            return best_match
+def get_owner(self, network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> Optional[str]:
+    with self._lock:
+        best_match = None
+        best_len = -1
+        for prefix, rir in self._prefixes.items():
+            if prefix.version != network.version:
+                continue
+            if network.subnet_of(prefix) and prefix.prefixlen > best_len:
+                best_len = prefix.prefixlen
+                best_match = rir
+        return best_match
 
-    def can_merge(self, net1: Union[ipaddress.IPv4Network, ipaddress.IPv6Network],
-                  net2: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> bool:
-        """檢查兩個網絡是否可以合併（屬於同一 RIR）"""
-        owner1 = self.get_owner(net1)
-        owner2 = self.get_owner(net2)
-        if owner1 is None or owner2 is None:
-            return True
-        return owner1 == owner2
+def can_merge(self, net1: Union[ipaddress.IPv4Network, ipaddress.IPv6Network],
+              net2: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> bool:
+    owner1 = self.get_owner(net1)
+    owner2 = self.get_owner(net2)
+    if owner1 is None or owner2 is None:
+        return True
+    return owner1 == owner2
 
 
 class ReadWriteLock:
@@ -818,7 +794,7 @@ class ResourceMonitor:
         self._lock = threading.Lock()
 
     def check_resources(self) -> Tuple[bool, float]:
-        if not self._enabled:
+        if not HAS_PSUTIL or not self._enabled:
             return True, 0.0
         with self._lock:
             self._check_count += 1
@@ -858,19 +834,15 @@ class TieredVerificationStrategy:
         self._lock = threading.Lock()
 
     def select_tier(self, rule_count: int, available_memory: float) -> int:
-        """修復：使用真實可用內存百分比"""
         with self._lock:
             if not self._config.tiered_verification:
                 return 1
-            
-            # 修復：確保使用真實內存數據
             if rule_count <= self._config.tier1_max_rules and available_memory > 50.0:
                 tier = 1
             elif rule_count <= self._config.tier2_max_rules and available_memory > 30.0:
                 tier = 2
             else:
                 tier = 3
-            
             self._current_tier = tier
             self._tier_stats[tier] += 1
             return tier
@@ -885,8 +857,7 @@ class TieredVerificationStrategy:
 
 
 class VersionedBDDNode:
-    """修復版：添加弱引用支持和跨代引用管理"""
-    __slots__ = ('var', 'low', 'high', 'hash_val', '_ref_count', '_generation', '_migrated_to', '_last_accessed_gen', '_low_is_weak', '_high_is_weak')
+    __slots__ = ('var', 'low', 'high', 'hash_val', '_generation', '_migrated_to', '_last_accessed_gen', '_low_is_weak', '_high_is_weak')
     _node_cache = OrderedDict()
     _cache_lock = threading.RLock()
     _instance_count = 0
@@ -897,9 +868,7 @@ class VersionedBDDNode:
     def __new__(cls, var: int, low: Optional['VersionedBDDNode'], high: Optional['VersionedBDDNode'], generation: int = 0):
         if low is high:
             return low
-        
         key = (var, id(low) if low else None, id(high) if high else None, generation)
-        
         with cls._cache_lock:
             if key in cls._node_cache:
                 existing = cls._node_cache[key]
@@ -907,15 +876,12 @@ class VersionedBDDNode:
                     return existing._migrated_to
                 existing._last_accessed_gen = generation
                 return existing
-            
             if cls._instance_count >= cls._max_cache_size:
                 cls._emergency_gc(generation)
-            
             instance = super().__new__(cls)
             cls._node_cache[key] = instance
             with cls._count_lock:
                 cls._instance_count += 1
-            
             weakref.finalize(instance, cls._decrement_count)
             return instance
 
@@ -930,7 +896,7 @@ class VersionedBDDNode:
         if cls._instance_count >= cls._max_cache_size * 0.95:
             with cls._cache_lock:
                 to_remove = [k for k, v in cls._node_cache.items() 
-                            if v._ref_count == 0 and current_gen - v._last_accessed_gen > 2]
+                            if current_gen - v._last_accessed_gen > 2]
                 for k in to_remove:
                     del cls._node_cache[k]
             gc.collect()
@@ -943,7 +909,6 @@ class VersionedBDDNode:
 
     @classmethod
     def remove_from_cache(cls, node_id: int, generation: int):
-        """從緩存中移除指定節點（用於事務回滾）"""
         with cls._cache_lock:
             to_remove = [k for k, v in cls._node_cache.items() 
                         if id(v) == node_id and v._generation == generation]
@@ -956,34 +921,27 @@ class VersionedBDDNode:
         self.var = var
         self._low_is_weak = False
         self._high_is_weak = False
-        
-        # 修復：對非當前generation的引用使用弱引用
         if low is not None and low._generation < generation:
             self.low = weakref.ref(low)
             self._low_is_weak = True
         else:
             self.low = low
-            
         if high is not None and high._generation < generation:
             self.high = weakref.ref(high)
             self._high_is_weak = True
         else:
             self.high = high
-            
         self.hash_val = hash((var, id(low), id(high), generation))
-        self._ref_count = 0
         self._generation = generation
         self._migrated_to = None
         self._last_accessed_gen = generation
 
     def get_low(self):
-        """安全獲取low引用"""
         if self._low_is_weak:
             return self.low() if self.low else None
         return self.low
 
     def get_high(self):
-        """安全獲取high引用"""
         if self._high_is_weak:
             return self.high() if self.high else None
         return self.high
@@ -1025,6 +983,8 @@ class TransactionalBDDEngine:
         with VersionedBDDNode._cache_lock:
             VersionedBDDNode._node_cache[(float('-inf'), None, None, 0)] = self.false_node
             VersionedBDDNode._node_cache[(float('inf'), None, None, 0)] = self.true_node
+            with VersionedBDDNode._count_lock:
+                VersionedBDDNode._instance_count += 2
 
     def begin_transaction(self):
         with self._rebuild_lock:
@@ -1040,7 +1000,6 @@ class TransactionalBDDEngine:
                 self._op_cache.clear()
 
     def rollback_transaction(self):
-        """修復：清理事務創建的節點"""
         with self._rebuild_lock:
             for node_id in self._txn_created_nodes:
                 VersionedBDDNode.remove_from_cache(node_id, self._generation)
@@ -1132,16 +1091,23 @@ class TransactionalBDDEngine:
             self._roots.add(result)
             return result
 
-    def sat_count(self, node: VersionedBDDNode, n_vars: int) -> int:
+    def sat_count(self, node: VersionedBDDNode, n_vars: int, memo: Optional[Dict[int, int]] = None) -> int:
+        if memo is None:
+            memo = {}
+        node_id = id(node)
+        if node_id in memo:
+            return memo[node_id]
         if node is self.false_node:
             return 0
         if node is self.true_node:
             return 1 << n_vars
         low = node.get_low()
         high = node.get_high()
-        count_low = self.sat_count(low, n_vars - 1)
-        count_high = self.sat_count(high, n_vars - 1)
-        return count_low + count_high
+        count_low = self.sat_count(low, n_vars - 1, memo)
+        count_high = self.sat_count(high, n_vars - 1, memo)
+        result = count_low + count_high
+        memo[node_id] = result
+        return result
 
     def implies(self, f: VersionedBDDNode, g: VersionedBDDNode) -> bool:
         result = self.apply_implies(f, g)
@@ -1161,9 +1127,7 @@ class BDDRuleVerifier:
         self._encoded_rules = weakref.WeakSet()
 
     def encode_domain_rule(self, rule: DomainRule) -> VersionedBDDNode:
-        """修復：使用路徑編碼策略，將域名層次結構編碼為布林變量合取"""
         with self._lock:
-            # 使用層次化編碼而非扁平化編碼
             parts = rule.normalized.lstrip('*.').split('.')
             result = self.engine.true_node
             
@@ -1175,9 +1139,7 @@ class BDDRuleVerifier:
                 node = self._domain_vars[var_name]
                 result = self.engine.apply_and(result, node)
             
-            # 對於wildcard，添加存在量詞語義
             if rule.match_type == MatchType.WILDCARD:
-                # 添加「任意子標籤」語義 - 使用額外變量表示
                 wildcard_var = f"wildcard_{rule.normalized}"
                 if wildcard_var not in self._domain_vars:
                     var_idx = self.engine.get_var(wildcard_var)
@@ -1188,16 +1150,14 @@ class BDDRuleVerifier:
             return result
 
     def encode_ip_rule(self, rule: IPCIDRRule) -> VersionedBDDNode:
-        """修復：正確處理prefix=0（默認路由）的情況"""
         with self._lock:
             addr = int(rule.network.network_address)
             prefix = rule.network.prefixlen
             version = rule.network.version
             width = 32 if version == 4 else 128
             
-            # 修復：處理prefix=0的情況
             if prefix == 0:
-                return self.engine.true_node  # 匹配所有
+                return self.engine.true_node
             
             var_name = f"ip_{version}_{addr}_{prefix}"
 
@@ -1293,7 +1253,7 @@ class SMTVerifier:
         self.enabled = self._z3_available
         self._solver_cache = OrderedDict()
         self._cache_lock = threading.RLock()
-        self._max_cache_size = 1000  # 限制緩存大小
+        self._max_cache_size = 1000
         self._timeout_stages = config.smt_progressive_timeout or (100, 500, 2000, 5000)
         self._pool_size = config.smt_process_pool_size
         self._process_pool = None
@@ -1344,7 +1304,6 @@ class SMTVerifier:
                 if self._pool_size == 0:
                     result = self._verify_impl(parent_strs, child_strs, timeout_ms)
                 else:
-                    # 修復：使用靜態方法並傳遞配置字典而非self
                     try:
                         config_dict = asdict(self._config)
                         future = self._process_pool.apply_async(
@@ -1356,7 +1315,6 @@ class SMTVerifier:
                         continue
 
                 with self._cache_lock:
-                    # 修復：LRU緩存淘汰
                     if len(self._solver_cache) >= self._max_cache_size:
                         self._solver_cache.popitem(last=False)
                     self._solver_cache[key] = result
@@ -1373,12 +1331,10 @@ class SMTVerifier:
             return False, 0.0, 0, f"exception:{str(e)}"
 
     def _verify_impl(self, parent_rules_str, child_rules_str, timeout_ms):
-        """實例方法實現（單進程模式使用）"""
         return SMTVerifier._verify_worker_static(parent_rules_str, child_rules_str, timeout_ms, asdict(self._config))
 
     @staticmethod
     def _verify_worker_static(parent_rules_str, child_rules_str, timeout_ms, config_dict):
-        """修復：靜態方法，避免捕獲self，使用線程超時替代信號"""
         if not HAS_Z3:
             return False, 0.0, timeout_ms, "z3_unavailable"
 
@@ -1604,7 +1560,6 @@ class StrictNgramSpectrumAnalyzer:
 
 
 class DomainTrie:
-    """修復版：添加缺失方法，使用COW策略避免死鎖"""
     __slots__ = ('root', '_cache', '_cache_limit', '_rwlock', '_depth_limit', '_version', '_cache_lock')
 
     class Node:
@@ -1625,9 +1580,7 @@ class DomainTrie:
         self._cache_lock = threading.RLock()
 
     def insert(self, domain: str, match_type: MatchType = MatchType.EXACT):
-        """修復：使用COW策略，創建新路徑而非修改現有節點"""
         with self._rwlock:
-            # 創建新的root副本
             new_root = self._copy_path(self.root, domain, match_type)
             self.root = new_root
             self._version += 1
@@ -1635,49 +1588,44 @@ class DomainTrie:
                 self._cache.clear()
 
     def _copy_path(self, node, domain: str, match_type: MatchType):
-        """複製路徑實現COW"""
         parts = domain.split('.')
         if len(parts) > self._depth_limit:
             parts = parts[-self._depth_limit:]
         
-        # 從底部開始構建新路徑
-        new_node = self.Node()
-        new_node.types = node.types.copy()
-        new_node.terminal = node.terminal
-        new_node.wildcard = node.wildcard
-        new_node.children = dict(node.children)
+        new_root = self.Node()
+        new_root.types = node.types.copy()
+        new_root.terminal = node.terminal
+        new_root.wildcard = node.wildcard
+        new_root.children = dict(node.children)
         
-        current = new_node
+        current = new_root
         for i, part in enumerate(reversed(parts)):
-            next_node = current.children.get(part)
-            if next_node is None:
-                next_node = self.Node()
-                current.children[part] = next_node
+            if part in current.children:
+                old_child = current.children[part]
+                new_child = self.Node()
+                new_child.types = old_child.types.copy()
+                new_child.terminal = old_child.terminal
+                new_child.wildcard = old_child.wildcard
+                new_child.children = dict(old_child.children)
+                current.children[part] = new_child
             else:
-                # 複製子節點
-                copied = self.Node()
-                copied.types = next_node.types.copy()
-                copied.terminal = next_node.terminal
-                copied.wildcard = next_node.wildcard
-                copied.children = dict(next_node.children)
-                current.children[part] = copied
-                next_node = copied
+                new_child = self.Node()
+                current.children[part] = new_child
             
             if match_type == MatchType.WILDCARD and i == len(parts) - 1:
-                next_node.wildcard = True
-                next_node.types.add(MatchType.WILDCARD)
+                new_child.wildcard = True
+                new_child.types.add(MatchType.WILDCARD)
             elif match_type == MatchType.SUFFIX and i == len(parts) - 1:
-                next_node.types.add(MatchType.SUFFIX)
+                new_child.types.add(MatchType.SUFFIX)
             
-            current = next_node
+            current = new_child
         
         current.terminal = True
         current.types.add(match_type)
-        return new_node
+        return new_root
 
     def is_covered(self, domain: str, match_type: MatchType = MatchType.EXACT) -> Tuple[bool, MatchType, int]:
-        """修復：無鎖讀取，使用版本號檢測一致性"""
-        current_root = self.root  # Python引用賦值是原子的
+        current_root = self.root
         current_version = self._version
         
         cache_key = f"{domain}:{match_type.value}:{current_version}"
@@ -1727,26 +1675,28 @@ class DomainTrie:
         return best_match
 
     def optimize(self) -> List[Tuple[str, MatchType]]:
-        """修復：添加缺失的optimize方法"""
         result = []
-        self._collect_domains(self.root, [], result)
+        stack = [(self.root, [])]
+        
+        while stack:
+            node, parts = stack.pop()
+            
+            if node.terminal:
+                domain = '.'.join(reversed(parts))
+                if MatchType.WILDCARD in node.types:
+                    result.append((f"*.{domain}" if domain else "*", MatchType.WILDCARD))
+                elif MatchType.EXACT in node.types:
+                    result.append((domain, MatchType.EXACT))
+                elif MatchType.SUFFIX in node.types:
+                    result.append((domain, MatchType.SUFFIX))
+            
+            if len(parts) < self._depth_limit:
+                for part, child in node.children.items():
+                    stack.append((child, parts + [part]))
+        
         return result
 
-    def _collect_domains(self, node, parts, result):
-        """遞迴收集域名"""
-        if node.terminal:
-            domain = '.'.join(reversed(parts))
-            if MatchType.WILDCARD in node.types:
-                result.append((f"*.{domain}" if domain else "*", MatchType.WILDCARD))
-            elif MatchType.EXACT in node.types:
-                result.append((domain, MatchType.EXACT))
-            elif MatchType.SUFFIX in node.types:
-                result.append((domain, MatchType.SUFFIX))
-        for part, child in node.children.items():
-            self._collect_domains(child, parts + [part], result)
-
     def get_specificity_score(self, domain: str) -> int:
-        """修復：添加缺失的get_specificity_score方法"""
         parts = domain.split('.')
         if len(parts) > self._depth_limit:
             parts = parts[-self._depth_limit:]
@@ -1765,7 +1715,6 @@ class DomainTrie:
 
 
 class StrictPatriciaTrie:
-    """修復版：處理prefixlen=0邊界"""
     __slots__ = ('root_v4', 'root_v6', '_lock')
 
     class Node:
@@ -1783,10 +1732,8 @@ class StrictPatriciaTrie:
         self._lock = threading.RLock()
 
     def insert(self, network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]):
-        """修復：處理prefixlen=0（默認路由）"""
         is_v4 = network.version == 4
         
-        # 修復：特殊處理默認路由
         if network.prefixlen == 0:
             root = self.root_v4 if is_v4 else self.root_v6
             with self._lock:
@@ -1834,7 +1781,6 @@ class StrictPatriciaTrie:
             return False
 
     def find_covering_networks(self, network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
-        """修復：返回所有覆蓋給定網絡的父網絡列表（按前綴長度降序）"""
         is_v4 = network.version == 4
         node = self.root_v4 if is_v4 else self.root_v6
         addr_int = int(network.network_address)
@@ -1861,9 +1807,7 @@ class StrictPatriciaTrie:
                         break
                     node = node.right
 
-        # 修復：確保排序穩定（按前綴長度降序）
         return sorted(covering, key=lambda x: (-x.prefixlen, int(x.network_address)))
-
 
 class IntervalTreeNode:
     __slots__ = ('center', 'intervals', 'left', 'right', 'by_start', 'by_end', '_lock', '_max_depth', '_current_depth')
@@ -1906,11 +1850,9 @@ class IntervalTreeNode:
                 self.right = IntervalTreeNode(right_intervals, depth + 1, max_depth)
 
     def find_overlapping(self, start: int, end: int) -> List[Any]:
-        """修復：使用嚴格重疊判斷（CIDR區間為閉區間）"""
         results = []
         with self._lock:
             for s, e, data in self.intervals:
-                # 修復：嚴格重疊判斷 - 非分離即重疊
                 if not (e < start or s > end):
                     results.append(data)
             if self.left and start <= self.center:
@@ -1923,7 +1865,7 @@ class IntervalTreeNode:
 class IntervalTree:
     __slots__ = ('root', '_intervals', '_rwlock', '_dirty', '_version', '_max_depth')
 
-    def __init__(self, max_depth: int = 128):  # 修復：支持IPv6的128位
+    def __init__(self, max_depth: int = 128):
         self.root = None
         self._intervals = []
         self._rwlock = ReadWriteLock()
@@ -1951,10 +1893,8 @@ class IntervalTree:
 
 
 class SweepLineCIDRManager:
-    """修復版：解決RIR檢查漏洞、事件排序非確定性、無限循環等問題"""
     __slots__ = ('_patricia', '_networks', '_lock', 'enable_adjacent_merge', '_interval_tree', '_version', '_rir_manager')
     
-    # 修復：使用類變量但確保只讀訪問
     PRIORITY = {'BS': 3, 'BE': 1, 'ES': 4, 'EE': 2}
 
     def __init__(self, enable_adjacent_merge: bool = True, use_interval_tree: bool = True, 
@@ -1963,7 +1903,6 @@ class SweepLineCIDRManager:
         self._networks = []
         self._lock = threading.RLock()
         self.enable_adjacent_merge = enable_adjacent_merge
-        # 修復：根據地址族動態調整深度
         self._interval_tree = IntervalTree(max_depth=128) if use_interval_tree else None
         self._version = 0
         self._rir_manager = rir_manager
@@ -2004,7 +1943,6 @@ class SweepLineCIDRManager:
                  max_loss_rate: float = 0.05,
                  strict_zero_loss: bool = True,
                  rir_manager: Optional[RIRDataManager] = None) -> List[str]:
-        """修復：使用類方法而非靜態方法，確保正確訪問類變量"""
 
         v4_base = [n for n in base_nets if n.version == 4]
         v6_base = [n for n in base_nets if n.version == 6]
@@ -2051,7 +1989,7 @@ class SweepLineCIDRManager:
 
         events = []
         max_addr = (1 << width) - 1
-        event_id = 0  # 修復：添加序列號確保排序穩定性
+        event_id = 0
 
         for net in base:
             start = int(net.network_address)
@@ -2071,7 +2009,6 @@ class SweepLineCIDRManager:
                 events.append((end + 1, cls.PRIORITY['EE'], 1, event_id, net))
                 event_id += 1
 
-        # 修復：使用序列號作為第三排序鍵確保確定性
         events.sort(key=lambda x: (x[0], -x[1], x[3]))
 
         result_intervals = []
@@ -2116,12 +2053,14 @@ class SweepLineCIDRManager:
         if len(networks) <= target_count:
             return networks, 0.0
 
-        # 修復：確保同版本網絡
         v4_networks = [n for n in networks if n.version == 4]
         v6_networks = [n for n in networks if n.version == 6]
         
-        v4_merged, v4_loss = cls._hierarchical_supernet_version(v4_networks, target_count // 2 + 1, enable_rir, rir_manager)
-        v6_merged, v6_loss = cls._hierarchical_supernet_version(v6_networks, target_count // 2 + 1, enable_rir, rir_manager)
+        v4_target = max(1, target_count // 2) if v4_networks and v6_networks else target_count
+        v6_target = max(1, target_count - v4_target) if v4_networks and v6_networks else target_count
+        
+        v4_merged, v4_loss = cls._hierarchical_supernet_version(v4_networks, v4_target, enable_rir, rir_manager)
+        v6_merged, v6_loss = cls._hierarchical_supernet_version(v6_networks, v6_target, enable_rir, rir_manager)
         
         merged = v4_merged + v6_merged
         original_hosts = sum(n.num_addresses for n in networks)
@@ -2179,25 +2118,29 @@ class SweepLineCIDRManager:
                     if net.prefixlen <= prefix_len:
                         aggregated.append(net)
                     else:
-                        super_addr = int(net.network_address) & ((1 << (width - prefix_len)) - 1 << (width - prefix_len))
-                        if width == 32:
-                            super_net = ipaddress.IPv4Network((super_addr, prefix_len), strict=False)
-                        else:
-                            super_net = ipaddress.IPv6Network((super_addr, prefix_len), strict=False)
+                        shift = width - prefix_len
+                        super_addr = (int(net.network_address) >> shift) << shift
+                        try:
+                            if width == 32:
+                                super_net = ipaddress.IPv4Network((super_addr, prefix_len), strict=False)
+                            else:
+                                super_net = ipaddress.IPv6Network((super_addr, prefix_len), strict=False)
+                        except ValueError:
+                            aggregated.append(net)
+                            continue
                         
-                        # 修復：檢查超網是否與所有子網同RIR
                         if enable_rir and rir_manager:
-                            subs = super_map.get(super_net, [])
-                            subs.append(net)
-                            if not all(rir_manager.can_merge(super_net, sub) for sub in subs):
-                                aggregated.extend(subs)
+                            if super_net not in super_map:
+                                super_map[super_net] = []
+                            super_map[super_net].append(net)
+                            if not all(rir_manager.can_merge(super_net, sub) for sub in super_map[super_net]):
+                                aggregated.extend(super_map[super_net])
+                                del super_map[super_net]
                                 continue
-                        
-                        if super_net not in super_map:
+                        else:
                             super_map[super_net] = []
-                        super_map[super_net].append(net)
                 
-                for super_net, subs in super_map.items():
+                for super_net in super_map.keys():
                     aggregated.append(super_net)
                 
                 merged = cls._merge_adjacent_cidrs(aggregated)
@@ -2226,52 +2169,53 @@ class SweepLineCIDRManager:
         if len(nets) < 2:
             return nets
 
-        merged = []
-        current = nets[0]
-        for next_net in nets[1:]:
-            if current.prefixlen != next_net.prefixlen:
-                merged.append(current)
-                current = next_net
-                continue
-
-            prefix_len = current.prefixlen
-            if prefix_len == 0:
-                merged.append(current)
-                current = next_net
-                continue
-
-            curr_int = int(current.network_address)
-            next_int = int(next_net.network_address)
-            block_size = 1 << (width - prefix_len)
-
-            if curr_int + block_size == next_int:
-                super_addr = curr_int & ~(block_size - 1)
-                try:
-                    if width == 32:
-                        current = ipaddress.IPv4Network((super_addr, prefix_len - 1), strict=False)
-                    else:
-                        current = ipaddress.IPv6Network((super_addr, prefix_len - 1), strict=False)
-                except ValueError:
+        changed = True
+        while changed:
+            changed = False
+            merged = []
+            current = nets[0]
+            for next_net in nets[1:]:
+                if current.prefixlen != next_net.prefixlen:
                     merged.append(current)
                     current = next_net
-            else:
-                merged.append(current)
-                current = next_net
+                    continue
 
-        merged.append(current)
+                prefix_len = current.prefixlen
+                if prefix_len == 0:
+                    merged.append(current)
+                    current = next_net
+                    continue
 
-        # 修復：使用迭代而非遞迴避免棧溢出
-        if len(merged) < len(nets):
-            return cls._merge_adjacent_version(merged, width)
-        return merged
+                curr_int = int(current.network_address)
+                next_int = int(next_net.network_address)
+                block_size = 1 << (width - prefix_len)
+
+                if curr_int + block_size == next_int:
+                    super_addr = curr_int & ~(block_size - 1)
+                    try:
+                        if width == 32:
+                            current = ipaddress.IPv4Network((super_addr, prefix_len - 1), strict=False)
+                        else:
+                            current = ipaddress.IPv6Network((super_addr, prefix_len - 1), strict=False)
+                        changed = True
+                    except ValueError:
+                        merged.append(current)
+                        current = next_net
+                else:
+                    merged.append(current)
+                    current = next_net
+
+            merged.append(current)
+            nets = merged
+
+        return nets
 
     @classmethod
     def _range_to_cidrs(cls, start: int, end: int, width: int) -> List:
-        """修復：添加無限循環防護"""
         cidrs = []
         current = start
         max_ip = (1 << width) - 1
-        max_iterations = 10000  # 安全上限
+        max_iterations = 10000
         iterations = 0
 
         while current <= end and current <= max_ip and iterations < max_iterations:
@@ -2281,10 +2225,9 @@ class SweepLineCIDRManager:
             else:
                 trailing_zeros = (current & -current).bit_length() - 1
 
-            max_size = 1 << trailing_zeros
+            max_size = 1 << min(trailing_zeros, width)
             remaining = end - current + 1
             
-            # 修復：防護remaining <= 0的情況
             if remaining <= 0:
                 break
                 
@@ -2311,7 +2254,6 @@ class SweepLineCIDRManager:
 
 
 class WALBackend:
-    """修復版：解決fsync時序和目錄同步問題"""
     __slots__ = ('db_path', 'wal_path', 'data', '_lock', '_flush_count', '_config')
 
     def __init__(self, db_path: Path, config: MergeConfig = DEFAULT_CONFIG):
@@ -2327,53 +2269,38 @@ class WALBackend:
         if self.wal_path.exists():
             try:
                 with open(self.wal_path, 'rb') as f:
-                    if USE_MSGPACK:
-                        content = f.read()
-                        if len(content) >= 16:
-                            stored_checksum = content[:16]
-                            data_bytes = content[16:]
-                            computed_checksum = hashlib.blake2b(data_bytes, digest_size=16).digest()
-                            if stored_checksum == computed_checksum:
+                    content = f.read()
+                    if len(content) >= 16:
+                        stored_checksum = content[:16]
+                        data_bytes = content[16:]
+                        computed_checksum = hashlib.blake2b(data_bytes, digest_size=16).digest()
+                        if stored_checksum == computed_checksum:
+                            if USE_MSGPACK:
                                 pending = msgpack.unpackb(data_bytes, raw=False)
-                                self.data.update(pending)
-                                self._snapshot()
-                    else:
-                        content = f.read()
-                        if len(content) >= 16:
-                            stored_checksum = content[:16]
-                            data_bytes = content[16:]
-                            computed_checksum = hashlib.blake2b(data_bytes, digest_size=16).digest()
-                            if stored_checksum == computed_checksum:
+                            else:
                                 pending = json.loads(data_bytes.decode('utf-8'))
-                                self.data.update(pending)
-                                self._snapshot()
+                            self.data.update(pending)
+                            self._snapshot()
             except Exception:
                 logger.error(f"Corrupted WAL at {self.wal_path}, discarding.")
 
         if self.db_path.exists():
             try:
                 with open(self.db_path, 'rb') as f:
-                    if USE_MSGPACK:
-                        content = f.read()
-                        if len(content) >= 16:
-                            stored_checksum = content[:16]
-                            data_bytes = content[16:]
-                            computed_checksum = hashlib.blake2b(data_bytes, digest_size=16).digest()
-                            if stored_checksum == computed_checksum:
+                    content = f.read()
+                    if len(content) >= 16:
+                        stored_checksum = content[:16]
+                        data_bytes = content[16:]
+                        computed_checksum = hashlib.blake2b(data_bytes, digest_size=16).digest()
+                        if stored_checksum == computed_checksum:
+                            if USE_MSGPACK:
                                 self.data = msgpack.unpackb(data_bytes, raw=False)
-                    else:
-                        content = f.read()
-                        if len(content) >= 16:
-                            stored_checksum = content[:16]
-                            data_bytes = content[16:]
-                            computed_checksum = hashlib.blake2b(data_bytes, digest_size=16).digest()
-                            if stored_checksum == computed_checksum:
+                            else:
                                 self.data = json.loads(data_bytes.decode('utf-8'))
             except Exception:
                 self.data = {}
 
     def _snapshot(self):
-        """修復：添加目錄同步確保崩潰一致性"""
         tmp = self.db_path.with_suffix('.tmp')
 
         if USE_MSGPACK:
@@ -2391,7 +2318,6 @@ class WALBackend:
         
         tmp.replace(self.db_path)
         
-        # 修復：同步目錄以確保目錄項持久化
         try:
             dir_fd = os.open(self.db_path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
@@ -2437,7 +2363,6 @@ class WALBackend:
 
 
 class AWSetCRDT:
-    """修復版：Add-Wins Set CRDT，添加向量時鐘合併"""
     __slots__ = ('_node_id', '_add_set', '_remove_set', '_lock', '_vector_clock', '_timestamp_precision')
 
     def __init__(self, node_id: str):
@@ -2446,7 +2371,6 @@ class AWSetCRDT:
         self._remove_set = {}
         self._lock = threading.RLock()
         self._vector_clock = {node_id: 0}
-        # 修復：使用更高精度的時間戳
         self._timestamp_precision = 1e-6
 
     def add(self, element: str, timestamp: float = None, vector_clock: Dict = None):
@@ -2488,7 +2412,6 @@ class AWSetCRDT:
             return max_add >= max_remove
 
     def merge(self, other: 'AWSetCRDT') -> 'AWSetCRDT':
-        """修復：正確合併向量時鐘"""
         with self._lock:
             for elem, timestamps in other._add_set.items():
                 if elem not in self._add_set:
@@ -2500,7 +2423,6 @@ class AWSetCRDT:
                     self._remove_set[elem] = set()
                 self._remove_set[elem].update(timestamps)
 
-            # 修復：正確合併向量時鐘（取每個節點的最大值）
             for node, count in other._vector_clock.items():
                 self._vector_clock[node] = max(self._vector_clock.get(node, 0), count)
 
@@ -2520,20 +2442,17 @@ class AWSetCRDT:
 
 
 class ProvenanceLogger:
-    """修復版：解決哈希鏈斷裂和內存無限增長"""
     __slots__ = ('_wal', '_activity_log', '_lock', '_config', '_hash_chain')
 
     def __init__(self, state_dir: Path, config: MergeConfig = DEFAULT_CONFIG):
         self._config = config
         self._wal = WALBackend(state_dir / 'provenance', config)
-        self._activity_log = deque(maxlen=1000)  # 修復：限制內存隊列大小
+        self._activity_log = deque(maxlen=1000)
         self._lock = threading.RLock()
-        # 修復：使用deque限制哈希鏈長度
         self._hash_chain = deque([hashlib.sha256(b'genesis').hexdigest()], maxlen=10000)
         self._load_state()
 
     def _load_state(self):
-        """從WAL重建哈希鏈"""
         try:
             all_entries = sorted(self._wal.data.values(), key=lambda x: x.get('timestamp', 0))
             self._hash_chain = deque([hashlib.sha256(b'genesis').hexdigest()], maxlen=10000)
@@ -2584,7 +2503,6 @@ class ProvenanceLogger:
 
 
 class MerkleClock:
-    """修復版：解決並發處理真空"""
     __slots__ = ('clock', '_merkle_tree', '_lock', '_hash_cache', '_had_conflict')
 
     def __init__(self, initial: Optional[Dict] = None, branching: int = 2):
@@ -2607,11 +2525,9 @@ class MerkleClock:
             return self
 
     def merge(self, other: 'MerkleClock'):
-        """修復：處理並發衝突"""
         with self._lock:
             relation = self.compare(other)
             if relation == "concurrent":
-                # 修復：使用Add-Wins策略解決衝突
                 for n, c in other.clock.items():
                     self.clock[n] = max(self.clock.get(n, 0), c)
                 self._had_conflict = True
@@ -2619,9 +2535,9 @@ class MerkleClock:
             elif relation == "before":
                 self.clock.update(other.clock)
             elif relation == "equal":
-                pass  # 無需更改
+                pass
             else:  # "after"
-                pass  # 無需更改
+                pass
             
             self._rebuild_merkle()
             self._hash_cache.clear()
@@ -2711,13 +2627,14 @@ class IncrementalMerkleTree:
             sorted_leaves = sorted(self.leaves.items())
             current_level = [h for _, h in sorted_leaves]
             level_num = 0
+            empty_hash = hashlib.sha256(b'').hexdigest()
 
             while len(current_level) > 1:
                 next_level = []
                 for i in range(0, len(current_level), self.branching):
                     chunk = current_level[i:i+self.branching]
                     if len(chunk) < self.branching:
-                        chunk.extend([hashlib.sha256(b'').hexdigest()] * (self.branching - len(chunk)))
+                        chunk.extend([empty_hash] * (self.branching - len(chunk)))
                     combined = ''.join(chunk).encode()
                     node_hash = hashlib.sha256(combined).hexdigest()
                     next_level.append(node_hash)
@@ -2808,11 +2725,10 @@ class LineageInfo:
     merkle_root: Optional[str] = None
     specificity_depth: int = 0
     verification_level: int = 3
-    mediation_proof: Optional[Dict] = None  # 修復：確保此字段被正確填充
+    mediation_proof: Optional[Dict] = None
 
 
 class StandardBloomFilter:
-    """修復版：動態分片避免極端碎片"""
     __slots__ = ('size', 'k', 'seed', 'bits', 'locks', 'shards')
 
     def __init__(self, size: int, k: int, seed: int):
@@ -2820,7 +2736,6 @@ class StandardBloomFilter:
         self.k = k
         self.seed = seed
         self.bits = bytearray(size // 8 + 1)
-        # 修復：動態分片，每個分片至少管理512字節
         self.shards = min(1024, max(1, size // 4096))
         self.locks = [threading.RLock() for _ in range(self.shards)]
 
@@ -2890,7 +2805,7 @@ class IndexedSource:
     ip_rules: List[IPCIDRRule]
     keyword_rules: List[KeywordRule]
     regex_rules: List[RegexRule]
-    etld_set: Set[str]  # 修復：填充此字段
+    etld_set: Set[str]
     merkle_clock: MerkleClock
     last_modified: float = field(default_factory=time.time)
     _crdt: Optional[AWSetCRDT] = None
@@ -2899,9 +2814,8 @@ class IndexedSource:
     def from_parsed(cls, parsed: ParsedRuleSet, config: MergeConfig, bdd_engine: Optional[TransactionalBDDEngine] = None):
         domain_trie = DomainTrie(cache_limit=5000, depth_limit=config.max_domain_depth)
         ip_trie = StrictPatriciaTrie()
-        interval_tree = IntervalTree(max_depth=128) if config.enable_interval_tree else None  # 修復：支持IPv6
+        interval_tree = IntervalTree(max_depth=128) if config.enable_interval_tree else None
         
-        # 修復：填充etld_set
         etld_set = set()
         if USE_TLDEXTRACT and _tld_cache:
             for rule in parsed.domain_rules:
@@ -2912,7 +2826,6 @@ class IndexedSource:
                 except Exception:
                     pass
 
-        # 修復：處理規則數為0的情況
         total_rules = len(parsed.domain_rules) + len(parsed.ip_rules)
         bloom_size, bloom_k = optimal_bloom_size(max(total_rules, 100), config.bloom_target_fpp)
         det_seed = int(hashlib.sha256((config.deterministic_seed + parsed.url).encode()).hexdigest()[:8], 16)
@@ -2955,21 +2868,20 @@ class IndexedSource:
             ip_rules=list(parsed.ip_rules),
             keyword_rules=list(parsed.keyword_rules),
             regex_rules=list(parsed.regex_rules),
-            etld_set=etld_set,  # 修復：填充etld_set
+            etld_set=etld_set,
             merkle_clock=MerkleClock(branching=config.merkle_tree_branching),
             last_modified=parsed.timestamp,
             _crdt=crdt
         )
 
 
-@dataclass
-class VerifiedSource:
-    url: str
+@dataclass(slots=True)
+class AcceptedRule:
     weight: float
-    content_hash: str
-    indexed: IndexedSource
-    lineage_info: LineageInfo
-    final_rules: Dict[str, List[str]]
+    source: VerifiedSource
+    is_exclusion: bool
+    specificity: int
+    rule_obj: RuleType
 
 
 class IterativeTarjanSCC:
@@ -3031,43 +2943,29 @@ class IterativeTarjanSCC:
                     self.sccs.append(scc)
 
 
-# 修復：添加AcceptedRule數據類統一數據結構
-@dataclass
-class AcceptedRule:
-    weight: float
-    source: VerifiedSource
-    is_exclusion: bool
-    specificity: int
-    rule_obj: RuleType
-
-
 class StrictConflictResolver:
-    """修復版：解決解包邏輯錯誤、_is_covered_by_exclusion不完整等問題"""
     __slots__ = ('config', '_entropy_cache', '_ngram_analyzer', '_policy_engine', '_tiered_strategy', '_rir_manager')
 
     def __init__(self, config: MergeConfig = DEFAULT_CONFIG, rir_manager: Optional[RIRDataManager] = None):
         self.config = config
-        self._entropy_cache = {}  # 保留，未來可能使用
+        self._entropy_cache = {}
         self._ngram_analyzer = StrictNgramSpectrumAnalyzer(config) if config.enable_ngram_analysis else None
         self._policy_engine = PolicyRuleEngine(config) if config.enable_policy_engine else None
         self._tiered_strategy = TieredVerificationStrategy(config)
         self._rir_manager = rir_manager
 
     def _temporal_compare(self, src_a: VerifiedSource, src_b: VerifiedSource) -> int:
-        """修復：解決向量時鐘與物理時間戳混合使用的邏輯矛盾"""
         vc_cmp = src_a.indexed.merkle_clock.compare(src_b.indexed.merkle_clock)
         if vc_cmp == "after":
             return 1
         elif vc_cmp == "before":
             return -1
         elif vc_cmp == "concurrent":
-            # 修復：並發時使用物理時間戳作為後備
             time_diff = src_a.indexed.last_modified - src_b.indexed.last_modified
             if abs(time_diff) > 86400:
                 return 1 if time_diff > 0 else -1
             return 0
         
-        # equal時使用物理時間戳
         time_diff = src_a.indexed.last_modified - src_b.indexed.last_modified
         if abs(time_diff) > 86400:
             return 1 if time_diff > 0 else -1
@@ -3077,11 +2975,13 @@ class StrictConflictResolver:
         all_rules = []
         current_time = time.time()
         
-        # 修復：獲取真實可用內存
-        try:
-            mem = psutil.virtual_memory()
-            available_memory = 100.0 - mem.percent
-        except Exception:
+        if HAS_PSUTIL:
+            try:
+                mem = psutil.virtual_memory()
+                available_memory = 100.0 - mem.percent
+            except Exception:
+                available_memory = 50.0
+        else:
             available_memory = 50.0
         
         monitor = ResourceMonitor(self.config.memory_threshold_percent) if self.config.enable_adaptive_degradation else None
@@ -3092,7 +2992,6 @@ class StrictConflictResolver:
             orig = src.lineage_info.originality if src.lineage_info else 1.0
             base_weight = src.weight * orig
 
-            # 修復：正確的時間衰減計算
             age_days = (current_time - src.indexed.last_modified) / 86400
             if age_days > self.config.max_source_age_days:
                 time_decay = math.exp(-(age_days - self.config.max_source_age_days) / 30)
@@ -3124,30 +3023,27 @@ class StrictConflictResolver:
             if monitor and monitor.should_degrade(2):
                 logger.warning("Resource pressure detected, continuing with current batch")
 
-        # 修復：確保確定性排序（當權重相同時，使用更穩定的排序鍵）
         if self.config.deterministic_output:
             det_rand = DeterministicRandom(self.config.deterministic_seed)
             det_rand.shuffle(all_rules)
-            # 使用元組排序確保完全確定性
             all_rules.sort(key=lambda x: (-x[0], x[1], x[2], x[3], x[4].url))
         else:
             all_rules.sort(key=lambda x: (-x[0], x[1], x[2]))
 
-        # 修復：使用AcceptedRule統一數據結構
         accepted_domains: Dict[str, AcceptedRule] = {}
         accepted_ips: Dict[str, AcceptedRule] = {}
         exclusions_map: Dict[str, AcceptedRule] = {}
         conflict_map = defaultdict(list)
 
         for weight, rtype, value, is_excl, src, rule_obj in all_rules:
-            key = (rtype, value)
-
             if is_excl:
                 spec = rule_obj.specificity_score if isinstance(rule_obj, DomainRule) else 0
-                exclusions_map[key] = AcceptedRule(weight, src, True, spec, rule_obj)
+                exclusions_map[value] = AcceptedRule(weight, src, True, spec, rule_obj)
+                conflict_map[(rtype, value)].append((src.url, weight, True))
             else:
-                if key in [(k[0], k[1]) for k in accepted_domains] or key in [(k[0], k[1]) for k in accepted_ips]:
-                    conflict_map[key].append((src.url, weight, False))
+                target_dict = accepted_domains if rtype == 'domain' else accepted_ips
+                if value in target_dict:
+                    conflict_map[(rtype, value)].append((src.url, weight, False))
                     continue
 
                 spec = rule_obj.specificity_score if isinstance(rule_obj, DomainRule) else 0
@@ -3155,26 +3051,28 @@ class StrictConflictResolver:
                 
                 if rtype == 'domain':
                     accepted_domains[value] = accepted_rule
-                    conflict_map[key].append((src.url, weight, False))
+                    conflict_map[(rtype, value)].append((src.url, weight, False))
                 elif rtype == 'ip_cidr':
                     try:
                         net = ipaddress.ip_network(value, strict=False)
                         accepted_ips[value] = accepted_rule
-                        conflict_map[key].append((src.url, weight, False))
+                        conflict_map[(rtype, value)].append((src.url, weight, False))
                     except ValueError:
                         continue
 
-        # 修復：填充mediation_proof
         mediation_results = {}
         if self._policy_engine:
             for key, sources_info in conflict_map.items():
                 if len(sources_info) > 1:
                     should_include, policy_type, proof = self._policy_engine.mediate_conflict(key[1], sources_info)
                     mediation_results[key] = (should_include, policy_type, proof)
-                    if not should_include and key[1] in accepted_domains:
-                        del accepted_domains[key[1]]
+                    rtype, value = key
+                    if not should_include:
+                        if rtype == 'domain' and value in accepted_domains:
+                            del accepted_domains[value]
+                        elif rtype == 'ip_cidr' and value in accepted_ips:
+                            del accepted_ips[value]
 
-        # 修復：傳遞mediation_proof到lineage_info
         self._propagate_exclusion(exclusions_map, accepted_domains)
         self._propagate_exclusion(exclusions_map, accepted_ips)
 
@@ -3220,7 +3118,7 @@ class StrictConflictResolver:
                         approximation_threshold=self.config.cidr_approximation_threshold,
                         max_loss_rate=self.config.cid_approximation_max_loss_rate,
                         strict_zero_loss=self.config.strict_zero_loss,
-                        enable_rir_lookup=self.config.enable_rir_lookup,
+                        enable_rir_lookup=self.config.enable_rir_lookup and self._rir_manager is not None,
                         rir_manager=self._rir_manager
                     )
                     result['ip_cidr'] = final_ips
@@ -3236,7 +3134,6 @@ class StrictConflictResolver:
         return dict(result)
 
     def _propagate_exclusion(self, exclusions: Dict[str, AcceptedRule], accepted: Dict[str, AcceptedRule]):
-        """修復：正確解包AcceptedRule"""
         to_remove = []
 
         for acc_key, acc_rule in list(accepted.items()):
@@ -3256,7 +3153,6 @@ class StrictConflictResolver:
 
     def _is_covered_by_exclusion(self, acc_key: str, acc_rule: AcceptedRule, 
                                  excl_key: str, excl_rule: AcceptedRule) -> bool:
-        """修復：處理domain和ip_cidr兩種類型的排除"""
         acc_type = 'domain' if isinstance(acc_rule.rule_obj, DomainRule) else 'ip_cidr'
         excl_type = 'domain' if isinstance(excl_rule.rule_obj, DomainRule) else 'ip_cidr'
         
@@ -3264,27 +3160,22 @@ class StrictConflictResolver:
             return False
             
         if acc_type == 'domain':
-            excl_val = excl_key
-            acc_val = acc_key
-            if excl_val.startswith('*.'):
-                suffix = excl_val[2:]
-                return acc_val.endswith(suffix)
+            if excl_key.startswith('*.'):
+                suffix = excl_key[2:]
+                return acc_key.endswith(suffix)
             else:
-                return acc_val == excl_val
+                return acc_key == excl_val
         elif acc_type == 'ip_cidr':
-            # 修復：處理IP CIDR排除
             try:
                 acc_net = ipaddress.ip_network(acc_key, strict=False)
                 excl_net = ipaddress.ip_network(excl_key, strict=False)
-                # 排除規則覆蓋接受規則當：排除網絡包含接受網絡
-                return acc_net.subnet_of(excl_net) or acc_net == excl_net
+                return acc_net.subnet_of(excl_net)
             except ValueError:
                 return False
         return False
 
 
 class PersistentLineageAnalyzer:
-    """修復版：解決SCC合併與CRDT脫節、hash碰撞等問題"""
     __slots__ = ('config', 'state_file', 'wal_backend', '_graph', '_cached_depths', 
                  '_format_version', '_lock', '_smt_verifier', '_source_versions', 
                  '_global_bdd', '_det_random', '_provenance', '_fuzzer', '_rir_manager')
@@ -3345,7 +3236,6 @@ class PersistentLineageAnalyzer:
             if not self._fuzzer.run_fuzzing_suite(self):
                 logger.warning("Fuzzing tests detected violations, proceeding with caution")
 
-        # 修復：使用複合鍵避免hash碰撞
         hash_to_parsed = {}
         for s in parsed_sources:
             key = (s.get_content_hash(), s.url, s.weight)
@@ -3389,6 +3279,8 @@ class PersistentLineageAnalyzer:
                     confidence_map[h_child] = min(confidence_map.get(h_child, 1.0), confidence)
                     if reason:
                         uncertainty_map[h_child] = reason
+                    
+                    causal_map[h_child] = str(h_parent)
 
                     self._provenance.log_activity(
                         'SUBSET_DETECTED',
@@ -3471,12 +3363,11 @@ class PersistentLineageAnalyzer:
         self.save_state()
         return redundant, final_sources
 
-    def _create_scc_unions(self, sources: List[IndexedSource], sccs: List[List[str]], 
-                          hash_to_parsed: Dict, max_depths: Dict, min_depths: Dict) -> Dict[int, Optional[VerifiedSource]]:
-        """修復：合併CRDT到SCC代表節點"""
+    def _create_scc_unions(self, sources: List[IndexedSource], sccs: List[List[Tuple[str, str, float]]], 
+                          hash_to_parsed: Dict[Tuple[str, str, float], ParsedRuleSet], 
+                          max_depths: Dict, min_depths: Dict) -> Dict[int, Optional[VerifiedSource]]:
         union_map = {}
         
-        # 修復：使用複合鍵查找
         hash_to_indexed = {(s.content_hash, s.url, s.weight): s for s in sources}
 
         for scc_idx, scc in enumerate(sccs):
@@ -3490,7 +3381,6 @@ class PersistentLineageAnalyzer:
             rep = scc[0]
             rep_src = hash_to_indexed[rep]
 
-            # 計算SCC特有的排除規則和衝突
             all_exclusions = set()
             all_domains = set()
             for m in members:
@@ -3502,7 +3392,6 @@ class PersistentLineageAnalyzer:
 
             conflicts = all_exclusions & all_domains
 
-            # 修復：合併CRDT
             merged_crdt = None
             for m in members:
                 if m._crdt:
@@ -3523,7 +3412,7 @@ class PersistentLineageAnalyzer:
                 confidence=0.9,
                 uncertainty_reason="scc_union_heuristic",
                 is_scc_union=True,
-                scc_exclusion_conflicts=frozenset(conflicts) if conflicts else frozenset(),  # 修復：使用空frozenset而非None
+                scc_exclusion_conflicts=frozenset(conflicts),
                 verification_level=2
             )
 
@@ -3536,7 +3425,6 @@ class PersistentLineageAnalyzer:
                 final_rules={}
             )
             
-            # 修復：將合併後的CRDT附加到VerifiedSource
             if merged_crdt:
                 verified.indexed._crdt = merged_crdt
 
@@ -3584,7 +3472,8 @@ class PersistentLineageAnalyzer:
         final_confidence = max(0.5, confidence)
         return True, final_confidence, reason
 
-    def _compute_depths_with_scc(self, nodes: Set, hash_to_parsed: Dict) -> Tuple[Dict, Dict, Dict, List]:
+    def _compute_depths_with_scc(self, nodes: Set[Tuple[str, str, float]], 
+                                hash_to_parsed: Dict[Tuple[str, str, float], ParsedRuleSet]) -> Tuple[Dict, Dict, Dict, List]:
         if not nodes:
             return {}, {}, {}, []
 
@@ -3698,7 +3587,7 @@ class ProgressiveFuzzingHarness:
         self._violation_count = 0
 
     def run_fuzzing_suite(self, lineage_analyzer, max_duration: int = 300):
-        if not self._config.enable_fuzzing_tests or not HAS_HYPOTHESIS:
+        if not self._config.enable_fuzzing_tests:
             return True
 
         start_time = time.time()
@@ -3734,7 +3623,7 @@ class ProgressiveFuzzingHarness:
     def _test_idempotence(self, lineage_analyzer):
         sources = self._generate_random_sources(10)
         _, proc1 = lineage_analyzer.compute_incremental(sources)
-        _, proc2 = lineage_analyzer.compute_incremental(proc1)
+        _, proc2 = lineage_analyzer.compute_incremental(sources)
         assert len(proc1) == len(proc2), "Idempotence violated"
 
     def _test_commutativity(self, lineage_analyzer):
@@ -3745,7 +3634,6 @@ class ProgressiveFuzzingHarness:
         assert len(proc_ab) == len(proc_ba), "Commutativity violated"
 
     def _test_cidr_roundtrip(self):
-        import random
         nets = []
         for _ in range(50):
             ip = random.randint(0, 2**32 - 1)
@@ -3755,26 +3643,43 @@ class ProgressiveFuzzingHarness:
         merged = list(ipaddress.collapse_addresses(nets))
         assert all(isinstance(n, ipaddress.IPv4Network) for n in merged)
 
-    def _generate_random_sources(self, count: int) -> List:
+    def _generate_random_sources(self, count: int) -> List[ParsedRuleSet]:
         sources = []
         for i in range(count):
             url = f"fuzz://source_{i}"
-            src = type('MockSource', (), {
-                'url': url,
-                'weight': 1.0,
-                'rule_count': i * 10,
-                'get_content_hash': lambda self, i=i: f"hash_{i}",
-                'merkle_clock': type('Clock', (), {'compare': lambda self, other: "concurrent"})(),
-                'build_indices': lambda self: None,
-                'rules_by_type': {'domain': {f"domain{j}.com" for j in range(i)}},
-                '_domain_rules': [],
-                '_ip_rules': [],
-                'verify_subset_with_bdd': lambda self, other: (False, 0.5),
-                'bloom_check': lambda self, other: True,
-                '_etld_set': set(),
-                '_domain_trie': None,
-                'get_rule_specificity': lambda self, t, v: 0
-            })()
+            
+            domain_rules = []
+            for j in range(i * 5):
+                domain = f"fuzz{j}domain{i}.com"
+                domain_rules.append(DomainRule(
+                    pattern=domain,
+                    match_type=MatchType.SUFFIX,
+                    normalized=domain,
+                    is_exclusion=False,
+                    original=domain,
+                    specificity_score=len(domain.split('.')) * 10
+                ))
+            
+            ip_rules = []
+            for j in range(i * 2):
+                ip_int = random.randint(0x0A000000, 0x0AFFFFFF)
+                network = ipaddress.IPv4Network((ip_int, 24), strict=False)
+                ip_rules.append(IPCIDRRule(
+                    network=network,
+                    original_str=str(network),
+                    is_exclusion=False
+                ))
+            
+            src = ParsedRuleSet(
+                url=url,
+                weight=1.0 + (i * 0.1),
+                domain_rules=tuple(domain_rules),
+                ip_rules=tuple(ip_rules),
+                keyword_rules=(),
+                regex_rules=(),
+                metadata={'fuzz_id': i},
+                timestamp=time.time()
+            )
             sources.append(src)
         return sources
 
@@ -3850,9 +3755,7 @@ class RuleParser:
         self._config = config
 
     def parse(self, content: bytes, url: str, weight: float) -> ParsedRuleSet:
-        """修復：添加長度限制和ReDoS防護"""
-        # 修復：限制內容大小
-        if len(content) > 10 * 1024 * 1024:  # 10MB限制
+        if len(content) > 10 * 1024 * 1024:
             raise ValueError("Content too large")
         
         domain_rules = []
@@ -3889,7 +3792,6 @@ class RuleParser:
             text = content.decode('utf-8-sig', errors='ignore')
             lines = text.splitlines()
             
-            # 修復：限制行數
             if len(lines) > 1_000_000:
                 raise ValueError("Too many lines")
             
@@ -4003,15 +3905,14 @@ class RuleParser:
 
 
 def cleanup_temp_dir(temp_dir: Path, max_retries: int = 3) -> bool:
-    """修復：顯式關閉與重試機制處理Windows句柄洩漏"""
     for i in range(max_retries):
         try:
             shutil.rmtree(temp_dir, ignore_errors=False)
             return True
         except PermissionError:
             if i < max_retries - 1:
-                time.sleep(0.1 * (2 ** i))  # 指數退避
-                gc.collect()  # 強制關閉未引用文件句柄
+                time.sleep(0.1 * (2 ** i))
+                gc.collect()
     return False
 
 
@@ -4026,7 +3927,6 @@ def worker(task: Dict, lineage_analyzer: Optional[PersistentLineageAnalyzer] = N
         try:
             temp_dir = Path(tempfile.mkdtemp())
             
-            # 修復：使用安全的配置合併
             task_config_dict = task.get('config', {})
             task_config = MergeConfig.from_dict(task_config_dict, global_config)
             min_score = float(task.get('min_score', 1.0))
@@ -4041,6 +3941,7 @@ def worker(task: Dict, lineage_analyzer: Optional[PersistentLineageAnalyzer] = N
 
             try:
                 for conf in task.get('sources', []):
+                    url = None
                     try:
                         url = conf if isinstance(conf, str) else conf.get('url')
                         weight = 1.0 if isinstance(conf, str) else float(conf.get('weight', 1.0))
@@ -4117,7 +4018,6 @@ def worker(task: Dict, lineage_analyzer: Optional[PersistentLineageAnalyzer] = N
                 raise
             finally:
                 session.close()
-                # 修復：避免頻繁調用gc.collect()
                 if retry_count > 0:
                     gc.collect()
 
@@ -4138,7 +4038,6 @@ def worker(task: Dict, lineage_analyzer: Optional[PersistentLineageAnalyzer] = N
 
         finally:
             if temp_dir and temp_dir.exists():
-                # 修復：使用cleanup_temp_dir處理Windows句柄問題
                 if not cleanup_temp_dir(temp_dir):
                     logger.error(f"Failed to cleanup {temp_dir}")
 
@@ -4167,20 +4066,29 @@ def main():
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_workers) as exe:
             futures = {exe.submit(worker, t, lineage, config): t for t in tasks}
-            for f in concurrent.futures.as_completed(futures):
-                try:
-                    r = f.result()
-                    logger.info(f"[{r[0]}] {r[1]} {r[2]} ({r[3]})")
-                except StrictVerificationError as e:
-                    logger.error(f"Critical verification error: {e}")
-                    if config.strict_zero_loss:
-                        logger.error("Strict zero loss mode enabled, terminating")
-                        break
-                except CIDRFragmentationError as e:
-                    logger.error(f"Critical CIDR error: {e}")
-                    if config.strict_zero_loss:
-                        logger.error("Strict zero loss mode enabled, terminating")
-                        break
+            try:
+                for f in concurrent.futures.as_completed(futures):
+                    try:
+                        r = f.result()
+                        logger.info(f"[{r[0]}] {r[1]} {r[2]} ({r[3]})")
+                    except StrictVerificationError as e:
+                        logger.error(f"Critical verification error: {e}")
+                        if config.strict_zero_loss:
+                            logger.error("Strict zero loss mode enabled, terminating")
+                            for future in futures:
+                                future.cancel()
+                            break
+                    except CIDRFragmentationError as e:
+                        logger.error(f"Critical CIDR error: {e}")
+                        if config.strict_zero_loss:
+                            logger.error("Strict zero loss mode enabled, terminating")
+                            for future in futures:
+                                future.cancel()
+                            break
+            finally:
+                for future in futures:
+                    if not future.done():
+                        future.cancel()
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
