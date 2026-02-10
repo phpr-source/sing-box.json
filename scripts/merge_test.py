@@ -30,7 +30,7 @@ import multiprocessing
 import heapq
 import signal
 from collections import defaultdict, deque, OrderedDict
-from typing import List, Dict, Set, Tuple, Optional, Any, Union, FrozenSet, Callable, Literal
+from typing import List, Dict, Set, Tuple, Optional, Any, Union, FrozenSet, Callable, Literal, get_type_hints
 from pathlib import Path
 from dataclasses import dataclass, field, asdict, fields
 from enum import IntEnum, auto
@@ -274,11 +274,13 @@ class MergeConfig:
     @classmethod
     def from_dict(cls, d: Dict, base: MergeConfig) -> MergeConfig:
         merged = {}
+        type_hints = get_type_hints(cls)
         for field_info in fields(cls):
             name = field_info.name
             if name in d:
                 value = d[name]
-                if isinstance(value, str) and (field_info.type == Path or field_info.type == 'Path'):
+                expected_type = type_hints.get(name)
+                if expected_type == Path and isinstance(value, str):
                     merged[name] = Path(value)
                 else:
                     merged[name] = value
@@ -362,8 +364,9 @@ class DeterministicRandom:
 
     def set_state(self, state: Dict):
         with self._lock:
-            self._seed = state['seed']
-            self._rng.setstate(state['rng_state'])
+            if 'seed' in state and 'rng_state' in state:
+                self._seed = state['seed']
+                self._rng.setstate(state['rng_state'])
 
 
 def fnv1a_64(data: Union[str, bytes], seed: int = 0xcbf29ce484222325) -> int:
@@ -402,6 +405,8 @@ def calculate_js_divergence(p: Dict[str, float], q: Dict[str, float]) -> float:
     q_smooth = {k: q.get(k, 0.0) + epsilon for k in all_keys}
     total_p = sum(p_smooth.values())
     total_q = sum(q_smooth.values())
+    if total_p == 0 or total_q == 0:
+        return float('inf')
     p_norm = {k: v / total_p for k, v in p_smooth.items()}
     q_norm = {k: v / total_q for k, v in q_smooth.items()}
     m = {k: (p_norm[k] + q_norm[k]) / 2.0 for k in all_keys}
@@ -423,8 +428,9 @@ def calculate_conditional_entropy(s: str, lag: int = 1) -> float:
     for a, inner in pairs.items():
         p_a = singles[a] / (len(s) - lag)
         for b, count in inner.items():
-            p_b_given_a = count / singles[a]
-            entropy -= p_a * p_b_given_a * math.log2(p_b_given_a)
+            if singles[a] > 0:
+                p_b_given_a = count / singles[a]
+                entropy -= p_a * p_b_given_a * math.log2(p_b_given_a)
     return entropy
 
 
@@ -498,12 +504,7 @@ class DomainRule:
         if self.match_type == MatchType.EXACT:
             return self.normalized == other.normalized
         elif self.match_type == MatchType.SUFFIX:
-            if other.match_type == MatchType.EXACT:
-                return other.normalized.endswith(self.normalized)
-            elif other.match_type == MatchType.SUFFIX:
-                return other.normalized.endswith(self.normalized)
-            else:
-                return other.normalized.endswith(self.normalized)
+            return other.normalized.endswith(self.normalized)
         elif self.match_type == MatchType.WILDCARD:
             if self.normalized.startswith('*.'):
                 suffix = self.normalized[2:]
@@ -579,12 +580,7 @@ class RegexRule:
         if len(self.pattern) > 200 or self.pattern.count('*') + self.pattern.count('+') > 5:
             return False
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(self._check_coverage, other)
-                try:
-                    return future.result(timeout=1.0)
-                except concurrent.futures.TimeoutError:
-                    return False
+            return self._check_coverage(other)
         except Exception:
             return False
 
@@ -1984,7 +1980,7 @@ class SweepLineCIDRManager:
                     current = working[i]
                     next_net = working[i + 1]
                     
-                    if current.prefixlen == next_net.prefixlen:
+                    if current.prefixlen == next_net.prefixlen and current.prefixlen > 0:
                         supernet = current.supernet()
                         if next_net.subnet_of(supernet):
                             if not enable_rir or (rir_manager and rir_manager.can_merge(current, next_net)):
