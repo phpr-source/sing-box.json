@@ -206,7 +206,7 @@ class MergeConfig:
     node_id: str = field(default_factory=lambda: f"node_{int(time.time() * 1000) % 100000}")
     enable_cidr_approximation: bool = True
     cidr_approximation_threshold: int = 1000
-    rir_data_url: str = 'https://ftp.apnic.net/stats/apnic/delegated-apnic-latest '
+    rir_data_url: str = 'https://ftp.apnic.net/stats/apnic/delegated-apnic-latest'
     rir_cache_ttl_days: int = 7
     regex_derivative_max_depth: int = 200
     enable_interval_tree: bool = True
