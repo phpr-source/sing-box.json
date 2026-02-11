@@ -28,6 +28,7 @@
         "adwordsexpress.com",
         "amazon-adsystem.com",
         "analytics-alv.google.com",
+        "analytics.facebook.com",
         "analytics.vpc.duolingo.com",
         "api-adservices.apple.com",
         "app-analytics-services-att.com",
@@ -44,6 +45,7 @@
         "doubleclick.cn",
         "doubleclick.com",
         "doubleclick.net",
+        "facebookads.com",
         "fcmatch.google.com",
         "gemini.yahoo.com",
         "google-analytics-cn.com",
@@ -82,6 +84,7 @@
         "nelreports.net",
         "pagead.l.google.com",
         "partnerad.l.google.com",
+        "pixel.facebook.com",
         "qwapi.com",
         "samsungads.com",
         "serving-sys.com",
@@ -89,8 +92,7 @@
         "tubemogul.com",
         "urchin.com",
         "ysm.yahoo.com"
-      ],
-      "domain_regex": "^adservice\\.google\\.([a-z]{2}|com?)(\\.[a-z]{2})?$"
+      ]
     }
   ]
 }

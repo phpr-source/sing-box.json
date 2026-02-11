@@ -3,6 +3,7 @@
   "rules": [
     {
       "domain_suffix": [
+        "adashx.ut.ele.me",
         "doservice.com",
         "ele.me",
         "ele.to",
@@ -10,7 +11,9 @@
         "eleme.io",
         "elemecdn.cn",
         "elemecdn.com",
-        "elenet.me"
+        "elenet.me",
+        "h-adashx.ut.ele.me",
+        "v6-adashx.ut.ele.me"
       ]
     }
   ]

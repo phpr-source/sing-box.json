@@ -10,6 +10,7 @@
         "roovza.skadsdk.appsflyersdk.com"
       ],
       "domain_suffix": [
+        "analytics.tiktok.com",
         "bytedapm.com",
         "byteoversea.com",
         "muscdn.com",
@@ -39,7 +40,8 @@
         "tiktokw.us",
         "ttlivecdn.com",
         "ttoverseaus.net",
-        "ttwstatic.com"
+        "ttwstatic.com",
+        "webnovel.com"
       ]
     }
   ]

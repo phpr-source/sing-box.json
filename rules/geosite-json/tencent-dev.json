@@ -3,6 +3,7 @@
   "rules": [
     {
       "domain_suffix": [
+        "badjs.weixinbridge.com",
         "cnb.cool",
         "coding.me",
         "coding.net",

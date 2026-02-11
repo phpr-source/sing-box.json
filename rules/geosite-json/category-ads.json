@@ -226,6 +226,7 @@
         "beacon.sina.com.cn",
         "beaconcdn.qq.com",
         "beizi.biz",
+        "bingads.com",
         "biz.weibo.com",
         "bluekai.com",
         "browser.events.data.msn.cn",
@@ -414,6 +415,8 @@
         "ladsp.com",
         "leanplum.com",
         "lianmeng.360.cn",
+        "log-upload-os.hoyoverse.com",
+        "log-upload.mihoyo.com",
         "log.hunantv.com",
         "log.mix.sina.com.cn",
         "log.sina.cn",
@@ -641,10 +644,7 @@
         "zxid-m.mobileservice.cn",
         "zz.bdstatic.com"
       ],
-      "domain_regex": [
-        "^speed\\.(coe|open)\\.ad\\.[a-z]{2,6}\\.prod\\.hosts\\.ooklaserver\\.net$",
-        "^adservice\\.google\\.([a-z]{2}|com?)(\\.[a-z]{2})?$"
-      ]
+      "domain_regex": "^speed\\.(coe|open)\\.ad\\.[a-z]{2,6}\\.prod\\.hosts\\.ooklaserver\\.net$"
     }
   ]
 }

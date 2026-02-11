@@ -1302,6 +1302,7 @@
         "amzndns.org",
         "amznl.com",
         "analytics-alv.google.com",
+        "analytics.facebook.com",
         "analytics.vpc.duolingo.com",
         "android.com",
         "androidify.com",
@@ -3507,6 +3508,7 @@
         "facebook30.net",
         "facebook30.org",
         "facebook4business.com",
+        "facebookads.com",
         "facebookadvertisingsecrets.com",
         "facebookappcenter.info",
         "facebookappcenter.net",
@@ -6133,6 +6135,7 @@
         "pivotalinitiative.com",
         "pixapp.net",
         "pixate.com",
+        "pixel.facebook.com",
         "pixlr-o-matic.com",
         "pixlromatic.com",
         "pixtronix.com",
@@ -7676,12 +7679,11 @@
         "zukunftswerkstatt.de"
       ],
       "domain_regex": [
-        "^github-production-release-asset-[0-9a-zA-Z]{6}\\.s3\\.amazonaws\\.com$",
         "^ewcdn[0-9]+\\.nowe\\.com$",
         ".+\\.awsdns-[0-9][0-9]\\.(co\\.uk|com|net|org)$",
+        "^github-production-release-asset-[0-9a-zA-Z]{6}\\.s3\\.amazonaws\\.com$",
         "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.xn--ngstr-lra8j\\.com$",
         "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.googlevideo\\.com$",
-        "^adservice\\.google\\.([a-z]{2}|com?)(\\.[a-z]{2})?$",
         ".+\\.awsdns-cn-[0-9][0-9]\\.(biz|com|net|top)$",
         ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$"
       ]
