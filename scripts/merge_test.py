@@ -272,18 +272,24 @@ class MergeConfig:
     wal_sync_interval: int = 10
 
     @classmethod
-    def from_dict(cls, d: Dict, base: MergeConfig) -> MergeConfig:
-        merged = {}
-        type_hints = get_type_hints(cls)
+    def from_dict(cls, d: Dict[str, Any], base: MergeConfig) -> MergeConfig:
+        merged: Dict[str, Any] = {}
+        try:
+            type_hints = get_type_hints(cls)
+        except Exception:
+            type_hints = {}
+        
         for field_info in fields(cls):
             name = field_info.name
             if name in d:
                 value = d[name]
                 expected_type = type_hints.get(name)
-                if expected_type == Path and isinstance(value, str):
-                    merged[name] = Path(value)
-                else:
-                    merged[name] = value
+                if expected_type is not None:
+                    if expected_type == Path or (isinstance(expected_type, type) and issubclass(expected_type, Path)):
+                        if isinstance(value, str):
+                            merged[name] = Path(value)
+                            continue
+                merged[name] = value
             else:
                 merged[name] = getattr(base, name)
         return cls(**merged)
@@ -305,7 +311,7 @@ RE_CATASTROPHIC_BACKTRACK = re.compile(r'(\w+\([\w\s|]+\)[*+])|(\([\w\s|]+\)\2*?
 
 class DeterministicRandom:
     __slots__ = ('_rng', '_seed', '_history', '_lock')
-    def __init__(self, seed_data: Union[str, bytes, int, Tuple[Any, ...]]):
+    def __init__(self, seed_data: Union[str, bytes, int, Tuple[Any, ...], List[Any]]):
         if isinstance(seed_data, (str, bytes)):
             if isinstance(seed_data, str):
                 seed_data = seed_data.encode('utf-8')
@@ -318,7 +324,7 @@ class DeterministicRandom:
             seed = 0
         self._seed = seed
         self._rng = random.Random(seed)
-        self._history = deque(maxlen=10000)
+        self._history: deque = deque(maxlen=10000)
         self._lock = threading.Lock()
 
     def random(self):
@@ -335,12 +341,16 @@ class DeterministicRandom:
 
     def choice(self, seq):
         with self._lock:
+            if not seq:
+                raise IndexError("Cannot choose from an empty sequence")
             val = self._rng.choice(seq)
             self._history.append(('choice', len(seq), val))
             return val
 
     def sample(self, population, k):
         with self._lock:
+            if k > len(population):
+                raise ValueError("Sample larger than population")
             val = self._rng.sample(population, k)
             self._history.append(('sample', len(population), k, val))
             return val
@@ -354,7 +364,7 @@ class DeterministicRandom:
         with self._lock:
             return tuple(self._history)
 
-    def get_state(self) -> Dict:
+    def get_state(self) -> Dict[str, Any]:
         with self._lock:
             return {
                 'seed': self._seed,
@@ -362,7 +372,7 @@ class DeterministicRandom:
                 'history_len': len(self._history)
             }
 
-    def set_state(self, state: Dict):
+    def set_state(self, state: Dict[str, Any]):
         with self._lock:
             if 'seed' in state and 'rng_state' in state:
                 self._seed = state['seed']
@@ -386,6 +396,8 @@ def calculate_entropy(s: str) -> float:
     for c in s:
         freq[c] += 1
     length = len(s)
+    if length == 0:
+        return 0.0
     entropy = 0.0
     for count in freq.values():
         p = count / length
@@ -425,8 +437,9 @@ def calculate_conditional_entropy(s: str, lag: int = 1) -> float:
         pairs[a][b] += 1
         singles[a] += 1
     entropy = 0.0
+    total = len(s) - lag
     for a, inner in pairs.items():
-        p_a = singles[a] / (len(s) - lag)
+        p_a = singles[a] / total if total > 0 else 0
         for b, count in inner.items():
             if singles[a] > 0:
                 p_b_given_a = count / singles[a]
@@ -437,6 +450,8 @@ def calculate_conditional_entropy(s: str, lag: int = 1) -> float:
 def optimal_bloom_size(n: int, p: float = 0.001) -> Tuple[int, int]:
     if n <= 0:
         n = 100
+    if p <= 0 or p >= 1:
+        p = 0.001
     m = int(-n * math.log(p) / (math.log(2) ** 2))
     m = max(m, 1024)
     m = (m + 7) // 8 * 8
@@ -501,10 +516,17 @@ class DomainRule:
                 object.__setattr__(self, 'script_type', ','.join(sorted(scripts)))
 
     def covers(self, other: DomainRule) -> bool:
+        if self.is_exclusion != other.is_exclusion:
+            return False
         if self.match_type == MatchType.EXACT:
             return self.normalized == other.normalized
         elif self.match_type == MatchType.SUFFIX:
-            return other.normalized.endswith(self.normalized)
+            if other.match_type == MatchType.EXACT:
+                return other.normalized.endswith(self.normalized)
+            elif other.match_type == MatchType.SUFFIX:
+                return other.normalized.endswith(self.normalized)
+            else:
+                return other.normalized.endswith(self.normalized)
         elif self.match_type == MatchType.WILDCARD:
             if self.normalized.startswith('*.'):
                 suffix = self.normalized[2:]
@@ -535,6 +557,8 @@ class IPCIDRRule:
 
     def covers(self, other: IPCIDRRule) -> bool:
         if self.network.version != other.network.version:
+            return False
+        if self.is_exclusion != other.is_exclusion:
             return False
         return other.network.subnet_of(self.network)
 
@@ -575,6 +599,8 @@ class RegexRule:
             object.__setattr__(self, 'antimirov_hash', int(h[:16], 16))
 
     def covers(self, other: RegexRule) -> bool:
+        if self.is_exclusion != other.is_exclusion:
+            return False
         if not HAS_GREENERY:
             return False
         if len(self.pattern) > 200 or self.pattern.count('*') + self.pattern.count('+') > 5:
@@ -683,7 +709,7 @@ class RIRDataManager:
 
     def __init__(self, config: MergeConfig = DEFAULT_CONFIG):
         self._config = config
-        self._prefixes = {}
+        self._prefixes: Dict[Union[ipaddress.IPv4Network, ipaddress.IPv6Network], str] = {}
         self._cache_dir = Path(tempfile.gettempdir()) / "rir_cache"
         self._cache_file = self._cache_dir / "rir_data.json"
         self._lock = threading.RLock()
@@ -706,7 +732,7 @@ class RIRDataManager:
             if self._cache_file.exists():
                 mtime = self._cache_file.stat().st_mtime
                 if time.time() - mtime < 7 * 86400:
-                    with open(self._cache_file, 'r') as f:
+                    with open(self._cache_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                         for prefix_str, rir in data.items():
                             try:
@@ -828,7 +854,7 @@ class TieredVerificationStrategy:
     def __init__(self, config: MergeConfig = DEFAULT_CONFIG):
         self._config = config
         self._current_tier = 1
-        self._tier_stats = {1: 0, 2: 0, 3: 0}
+        self._tier_stats: Dict[int, int] = {1: 0, 2: 0, 3: 0}
         self._lock = threading.Lock()
 
     def select_tier(self, rule_count: int, available_memory: float) -> int:
@@ -856,17 +882,25 @@ class TieredVerificationStrategy:
 
 class VersionedBDDNode:
     __slots__ = ('var', 'low', 'high', 'hash_val', '_generation', '_migrated_to', '_last_accessed_gen', '_low_is_weak', '_high_is_weak')
-    _node_cache = OrderedDict()
+    _node_cache: OrderedDict = OrderedDict()
     _cache_lock = threading.RLock()
     _instance_count = 0
     _count_lock = threading.Lock()
     _max_cache_size = 50000
     _current_generation = 0
+    _unique_counter = 0
+    _unique_lock = threading.Lock()
 
     def __new__(cls, var: int, low: Optional[VersionedBDDNode], high: Optional[VersionedBDDNode], generation: int = 0):
         if low is high:
             return low
-        key = (var, id(low) if low else None, id(high) if high else None, generation)
+        
+        with cls._unique_lock:
+            cls._unique_counter += 1
+            unique_id = cls._unique_counter
+        
+        key = (var, id(low) if low else None, id(high) if high else None, generation, unique_id)
+        
         with cls._cache_lock:
             if key in cls._node_cache:
                 existing = cls._node_cache[key]
@@ -875,19 +909,27 @@ class VersionedBDDNode:
                 existing._last_accessed_gen = generation
                 cls._node_cache.move_to_end(key)
                 return existing
+            
             if cls._instance_count >= cls._max_cache_size:
                 cls._emergency_gc(generation)
+            
             instance = super().__new__(cls)
             cls._node_cache[key] = instance
+            instance._cache_key = key
+            
             with cls._count_lock:
                 cls._instance_count += 1
-            weakref.finalize(instance, cls._decrement_count)
+            
+            weakref.finalize(instance, cls._decrement_count, key)
             return instance
 
     @classmethod
-    def _decrement_count(cls):
+    def _decrement_count(cls, key):
         with cls._count_lock:
             cls._instance_count = max(0, cls._instance_count - 1)
+        with cls._cache_lock:
+            if key in cls._node_cache:
+                del cls._node_cache[key]
 
     @classmethod
     def _emergency_gc(cls, current_gen):
@@ -937,12 +979,14 @@ class VersionedBDDNode:
 
     def get_low(self):
         if self._low_is_weak:
-            return self.low() if self.low else None
+            ref = self.low
+            return ref() if ref is not None else None
         return self.low
 
     def get_high(self):
         if self._high_is_weak:
-            return self.high() if self.high else None
+            ref = self.high
+            return ref() if ref is not None else None
         return self.high
 
     def mark_migrated(self, new_node: VersionedBDDNode):
@@ -961,27 +1005,27 @@ class TransactionalBDDEngine:
                  '_rebuild_lock', '_reordering_active', '_generation', '_transaction_active', '_txn_created_nodes')
 
     def __init__(self, gc_threshold: int = 50000):
-        self.var_map = {}
+        self.var_map: Dict[str, int] = {}
         self.var_counter = 0
         self._lock = threading.Lock()
-        self._op_cache = OrderedDict()
+        self._op_cache: OrderedDict = OrderedDict()
         self._op_cache_lock = threading.RLock()
         self._node_count = 0
         self._gc_threshold = gc_threshold
         self.false_node = VersionedBDDNode(-2, None, None, 0)
         self.true_node = VersionedBDDNode(-1, None, None, 0)
-        self._var_order = []
+        self._var_order: List[str] = []
         self._var_order_lock = threading.RLock()
         self._roots = weakref.WeakSet()
         self._rebuild_lock = threading.Lock()
         self._reordering_active = False
         self._generation = 0
         self._transaction_active = False
-        self._txn_created_nodes = []
+        self._txn_created_nodes: List[int] = []
 
         with VersionedBDDNode._cache_lock:
-            VersionedBDDNode._node_cache[(-2, None, None, 0)] = self.false_node
-            VersionedBDDNode._node_cache[(-1, None, None, 0)] = self.true_node
+            VersionedBDDNode._node_cache[(-2, None, None, 0, 0)] = self.false_node
+            VersionedBDDNode._node_cache[(-1, None, None, 0, 0)] = self.true_node
             with VersionedBDDNode._count_lock:
                 VersionedBDDNode._instance_count += 2
 
@@ -1099,12 +1143,17 @@ class TransactionalBDDEngine:
         if node is self.false_node:
             return 0
         if node is self.true_node:
-            return 1 << n_vars
+            return 1 << n_vars if n_vars < 63 else float('inf')
         low = node.get_low()
         high = node.get_high()
+        if low is None or high is None:
+            return 0
         count_low = self.sat_count(low, n_vars - 1, memo)
         count_high = self.sat_count(high, n_vars - 1, memo)
-        result = count_low + count_high
+        if isinstance(count_low, float) or isinstance(count_high, float):
+            result = float('inf')
+        else:
+            result = count_low + count_high
         memo[node_id] = result
         return result
 
@@ -1120,8 +1169,8 @@ class BDDRuleVerifier:
     __slots__ = ('engine', '_domain_vars', '_ip_vars', '_lock', '_encoded_rules')
     def __init__(self, engine: TransactionalBDDEngine):
         self.engine = engine
-        self._domain_vars = {}
-        self._ip_vars = {}
+        self._domain_vars: Dict[str, VersionedBDDNode] = {}
+        self._ip_vars: Dict[str, VersionedBDDNode] = {}
         self._lock = threading.RLock()
         self._encoded_rules = weakref.WeakSet()
 
@@ -1131,6 +1180,8 @@ class BDDRuleVerifier:
             result = self.engine.true_node
             
             for i, part in enumerate(reversed(parts)):
+                if not part:
+                    continue
                 var_name = f"label_{i}_{part}"
                 if var_name not in self._domain_vars:
                     var_idx = self.engine.get_var(var_name)
@@ -1226,7 +1277,7 @@ class BDDRuleVerifier:
             sat_count_parent = self.engine.sat_count(parent_bdd, len(self.engine.var_map))
             sat_count_child = self.engine.sat_count(child_bdd, len(self.engine.var_map))
 
-            if sat_count_child == 0:
+            if sat_count_child == 0 or isinstance(sat_count_child, float):
                 return True, 1.0
 
             intersection = self.engine.apply_and(child_bdd, self.engine.neg(parent_bdd))
@@ -1235,32 +1286,42 @@ class BDDRuleVerifier:
             if sat_count_diff == 0:
                 return True, 1.0
 
-            confidence = 1.0 - (sat_count_diff / sat_count_child)
-            return False, max(0.0, confidence)
+            if isinstance(sat_count_diff, float) or sat_count_child == 0:
+                confidence = 0.0
+            else:
+                confidence = 1.0 - (sat_count_diff / sat_count_child)
+            return False, max(0.0, min(1.0, confidence))
         finally:
             self.engine.commit_transaction()
 
 
 class SMTVerifier:
     __slots__ = ('enabled', '_z3_available', '_solver_cache', '_config', '_timeout_stages', 
-                 '_process_pool', '_pool_size', '_stop_event', '_cache_lock', '_max_cache_size')
+                 '_process_pool', '_pool_size', '_stop_event', '_cache_lock', '_max_cache_size', '_initialized')
 
     def __init__(self, config: MergeConfig = DEFAULT_CONFIG):
         self._config = config
         self._z3_available = HAS_Z3 and config.enable_smt_verification
         self.enabled = self._z3_available
-        self._solver_cache = OrderedDict()
+        self._solver_cache: OrderedDict = OrderedDict()
         self._cache_lock = threading.RLock()
         self._max_cache_size = 1000
         self._timeout_stages = config.smt_progressive_timeout or (100, 500, 2000, 5000)
         self._pool_size = config.smt_process_pool_size
         self._process_pool = None
         self._stop_event = None
-        if self._z3_available and self._pool_size > 0:
+        self._initialized = False
+
+    def _ensure_pool(self):
+        if self._initialized:
+            return
+        if self._z3_available and self._pool_size > 0 and self._process_pool is None:
             self._stop_event = multiprocessing.Event()
             self._process_pool = multiprocessing.Pool(processes=self._pool_size, maxtasksperchild=100)
+            self._initialized = True
 
     def __enter__(self):
+        self._ensure_pool()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -1273,6 +1334,7 @@ class SMTVerifier:
             self._process_pool.terminate()
             self._process_pool.join()
             self._process_pool = None
+        self._initialized = False
 
     def verify_subset(self, parent_rules: List[DomainRule], child_rules: List[DomainRule], 
                      monitor: Optional[ResourceMonitor] = None) -> Tuple[bool, float, int, str]:
@@ -1280,6 +1342,8 @@ class SMTVerifier:
             return False, 0.0, 0, "disabled"
         if not parent_rules or not child_rules:
             return True, 1.0, 0, "trivial"
+
+        self._ensure_pool()
 
         try:
             key = (tuple(sorted(r.normalized for r in parent_rules)), 
@@ -1291,6 +1355,9 @@ class SMTVerifier:
 
             parent_strs = [f"dom:{r.normalized}" for r in parent_rules if r.match_type != MatchType.WILDCARD]
             child_strs = [f"dom:{r.normalized}" for r in child_rules if r.match_type != MatchType.WILDCARD]
+
+            if not parent_strs or not child_strs:
+                return True, 1.0, 0, "trivial"
 
             for timeout_ms in self._timeout_stages:
                 if monitor and monitor.should_degrade(3):
@@ -1310,6 +1377,9 @@ class SMTVerifier:
                         result = future.get(timeout=timeout_ms/1000.0 + 1.0)
                     except multiprocessing.TimeoutError:
                         continue
+                    except Exception as e:
+                        logger.warning(f"SMT pool error: {e}")
+                        result = (False, 0.0, timeout_ms, f"pool_error:{str(e)}")
 
                 with self._cache_lock:
                     if len(self._solver_cache) >= self._max_cache_size:
@@ -1380,7 +1450,7 @@ class SMTVerifier:
         if thread.is_alive():
             return False, 0.0, timeout_ms, "timeout"
         
-        return result_container[0] if result_container[0] else (False, 0.0, timeout_ms, "unknown")
+        return result_container[0] if result_container[0] is not None else (False, 0.0, timeout_ms, "unknown")
 
 
 class StrictNgramSpectrumAnalyzer:
@@ -1394,7 +1464,7 @@ class StrictNgramSpectrumAnalyzer:
         self._lock = threading.RLock()
         self._det_rand = DeterministicRandom(config.deterministic_seed + "_ngram")
         self._script_whitelist = set(config.idn_allowed_scripts) if config.enable_idn_script_whitelist else set()
-        self._baseline_freq = {}
+        self._baseline_freq: Dict[int, Dict[str, int]] = {}
         self._build_baseline()
 
     def _build_baseline(self):
@@ -1528,7 +1598,7 @@ class StrictNgramSpectrumAnalyzer:
         total_observed = len(test_ngrams)
         total_expected = sum(self._baseline_freq[n].values())
 
-        if total_observed == 0:
+        if total_observed == 0 or total_expected == 0:
             return 0.0, 1.0
 
         chi2 = 0.0
@@ -1542,7 +1612,7 @@ class StrictNgramSpectrumAnalyzer:
         return chi2, p_value
 
     def _approximate_p_value(self, chi2: float, df: int) -> float:
-        if chi2 < 0 or df == 0:
+        if chi2 < 0 or df <= 0:
             return 1.0
         return math.exp(-chi2 / (2 * df))
 
@@ -1564,14 +1634,14 @@ class DomainTrie:
     class Node:
         __slots__ = ('children', 'types', 'terminal', 'wildcard')
         def __init__(self):
-            self.children = {}
+            self.children: Dict[str, DomainTrie.Node] = {}
             self.types = set()
             self.terminal = False
             self.wildcard = False
 
     def __init__(self, cache_limit: int = 10000, depth_limit: int = 128):
         self.root = self.Node()
-        self._cache = OrderedDict()
+        self._cache: OrderedDict = OrderedDict()
         self._cache_limit = cache_limit
         self._rwlock = ReadWriteLock()
         self._depth_limit = depth_limit
@@ -1599,6 +1669,8 @@ class DomainTrie:
         
         current = new_root
         for i, part in enumerate(reversed(parts)):
+            if not part:
+                continue
             if part in current.children:
                 old_child = current.children[part]
                 new_child = self.Node()
@@ -1644,6 +1716,8 @@ class DomainTrie:
             depth = 0
 
             for i, part in enumerate(reversed(parts)):
+                if not part:
+                    continue
                 if MatchType.WILDCARD in node.types and match_type == MatchType.EXACT:
                     best_match = (True, MatchType.WILDCARD, depth)
                 if node.terminal and MatchType.SUFFIX in node.types:
@@ -1712,6 +1786,8 @@ class DomainTrie:
             node = self.root
             score = 0
             for part in reversed(parts):
+                if not part:
+                    continue
                 score += 10
                 if MatchType.EXACT in node.types:
                     score += 5
@@ -1731,11 +1807,11 @@ class StrictPatriciaTrie:
     class Node:
         __slots__ = ('left', 'right', 'is_terminal', 'prefix_len', 'network')
         def __init__(self):
-            self.left = None
-            self.right = None
+            self.left: Optional[StrictPatriciaTrie.Node] = None
+            self.right: Optional[StrictPatriciaTrie.Node] = None
             self.is_terminal = False
             self.prefix_len = -1
-            self.network = None
+            self.network: Optional[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]] = None
 
     def __init__(self):
         self.root_v4 = self.Node()
@@ -1825,11 +1901,11 @@ class IntervalTreeNode:
     __slots__ = ('center', 'intervals', 'left', 'right', 'by_start', 'by_end', '_lock', '_max_depth', '_current_depth')
 
     def __init__(self, intervals: List[Tuple[int, int, Any]], depth: int = 0, max_depth: int = 128):
-        self.intervals = []
-        self.left = None
-        self.right = None
-        self.by_start = []
-        self.by_end = []
+        self.intervals: List[Tuple[int, int, Any]] = []
+        self.left: Optional[IntervalTreeNode] = None
+        self.right: Optional[IntervalTreeNode] = None
+        self.by_start: List[Tuple[int, int, Any]] = []
+        self.by_end: List[Tuple[int, int, Any]] = []
         self._lock = threading.RLock()
         self._max_depth = max_depth
         self._current_depth = depth
@@ -1878,14 +1954,16 @@ class IntervalTree:
     __slots__ = ('root', '_intervals', '_rwlock', '_dirty', '_version', '_max_depth')
 
     def __init__(self, max_depth: int = 128):
-        self.root = None
-        self._intervals = []
+        self.root: Optional[IntervalTreeNode] = None
+        self._intervals: List[Tuple[int, int, Any]] = []
         self._rwlock = ReadWriteLock()
         self._dirty = False
         self._version = 0
         self._max_depth = max_depth
 
     def insert(self, start: int, end: int, data: Any):
+        if start > end:
+            start, end = end, start
         with self._rwlock:
             self._intervals.append((start, end, data))
             self._dirty = True
@@ -1898,6 +1976,8 @@ class IntervalTree:
                 self._dirty = False
 
     def find_overlapping(self, start: int, end: int) -> List[Any]:
+        if start > end:
+            start, end = end, start
         self._ensure_built()
         if not self.root:
             return []
@@ -1912,7 +1992,7 @@ class SweepLineCIDRManager:
     def __init__(self, enable_adjacent_merge: bool = True, use_interval_tree: bool = True, 
                  enable_rir: bool = False, rir_manager: Optional[RIRDataManager] = None):
         self._patricia = StrictPatriciaTrie()
-        self._networks = []
+        self._networks: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]] = []
         self._lock = threading.RLock()
         self.enable_adjacent_merge = enable_adjacent_merge
         self._interval_tree = IntervalTree(max_depth=128) if use_interval_tree else None
@@ -1948,19 +2028,22 @@ class SweepLineCIDRManager:
     def _range_to_cidrs(start: int, end: int, version: int):
         if start > end:
             return []
-        if version == 4:
-            first = ipaddress.IPv4Address(start)
-            last = ipaddress.IPv4Address(end)
-        else:
-            first = ipaddress.IPv6Address(start)
-            last = ipaddress.IPv6Address(end)
-        return list(ipaddress.summarize_address_range(first, last))
+        try:
+            if version == 4:
+                first = ipaddress.IPv4Address(start)
+                last = ipaddress.IPv4Address(end)
+            else:
+                first = ipaddress.IPv6Address(start)
+                last = ipaddress.IPv6Address(end)
+            return list(ipaddress.summarize_address_range(first, last))
+        except ValueError:
+            return []
 
     @staticmethod
     def _merge_adjacent_cidrs(networks):
         if not networks:
             return []
-        return list(ipaddress.collapse_addresses(networks))
+        return list(ipaddress.collapse_addresses(sorted(networks, key=lambda x: (int(x.network_address), x.prefixlen))))
 
     @staticmethod
     def _hierarchical_supernet_with_loss(networks, target_count, enable_rir, rir_manager):
@@ -1971,7 +2054,11 @@ class SweepLineCIDRManager:
         loss_count = 0
         original_addresses = sum(n.num_addresses for n in networks)
         
-        while len(working) > target_count and len(working) > 1:
+        iteration = 0
+        max_iterations = len(networks) * 2
+        
+        while len(working) > target_count and len(working) > 1 and iteration < max_iterations:
+            iteration += 1
             merged = []
             i = 0
             made_progress = False
@@ -1981,15 +2068,18 @@ class SweepLineCIDRManager:
                     next_net = working[i + 1]
                     
                     if current.prefixlen == next_net.prefixlen and current.prefixlen > 0:
-                        supernet = current.supernet()
-                        if next_net.subnet_of(supernet):
-                            if not enable_rir or (rir_manager and rir_manager.can_merge(current, next_net)):
-                                if current.broadcast_address + 1 == next_net.network_address:
-                                    merged.append(supernet)
-                                    loss_count += supernet.num_addresses - current.num_addresses - next_net.num_addresses
-                                    i += 2
-                                    made_progress = True
-                                    continue
+                        try:
+                            supernet = current.supernet()
+                            if next_net.subnet_of(supernet):
+                                if not enable_rir or (rir_manager is None) or (rir_manager and rir_manager.can_merge(current, next_net)):
+                                    if current.broadcast_address + 1 == next_net.network_address:
+                                        merged.append(supernet)
+                                        loss_count += supernet.num_addresses - current.num_addresses - next_net.num_addresses
+                                        i += 2
+                                        made_progress = True
+                                        continue
+                        except ValueError:
+                            pass
                 merged.append(working[i])
                 i += 1
             
@@ -2001,7 +2091,7 @@ class SweepLineCIDRManager:
             working = working[:target_count]
             current_addresses = sum(n.num_addresses for n in working)
             if original_addresses > 0:
-                loss_count = original_addresses - current_addresses
+                loss_count = max(0, original_addresses - current_addresses)
         
         loss_rate = loss_count / original_addresses if original_addresses > 0 else 0.0
         return working, loss_rate
@@ -2025,7 +2115,7 @@ class SweepLineCIDRManager:
 
         try:
             v4_result = cls._subtract_version(v4_base, v4_excl, 32, max_fragments // 2)
-            remaining = max_fragments - len(v4_result)
+            remaining = max(0, max_fragments - len(v4_result))
             v6_result = cls._subtract_version(v6_base, v6_excl, 128, remaining)
             total_result = v4_result + v6_result
 
@@ -2057,7 +2147,9 @@ class SweepLineCIDRManager:
             raise
 
     @classmethod
-    def _subtract_version(cls, base: List, exclude: List, width: int, max_frag: int) -> List:
+    def _subtract_version(cls, base: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]], 
+                         exclude: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]], 
+                         width: int, max_frag: int) -> List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
         if not base:
             return []
         if not exclude:
