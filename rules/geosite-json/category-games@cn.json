@@ -44,7 +44,8 @@
         "supersmashbros.com.cn",
         "wmsjsteam.com",
         "xboxlive.cn",
-        "xn--mts47c3w9b1qr.cn"
+        "xn--mts47c3w9b1qr.cn",
+        "yostar.cn"
       ],
       "domain_regex": [
         "^.+-mihayo\\.akamaized\\.net$",
