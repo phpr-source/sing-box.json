@@ -3,8 +3,8 @@
   "rules": [
     {
       "domain_suffix": [
-        "restream-media.net",
-        "wink.ru"
+        "kinopoisk-ru.clstorage.net",
+        "kinopoisk.ru"
       ]
     }
   ]
