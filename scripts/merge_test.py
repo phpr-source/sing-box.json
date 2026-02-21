@@ -1,89 +1,69 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import sys
+import bisect
 import concurrent.futures
+import hashlib
+import io
+import ipaddress
+import itertools
+import json
+import logging
+import os
 import re
 import shutil
-import ipaddress
-import logging
-import tempfile
-import math
-import gc
-import hashlib
-import time
-import threading
-import zlib
-import copy
-import bisect
+import socket
 import struct
-import array
-import unicodedata
-import weakref
-import binascii
-import random
-import string
-import collections
-import multiprocessing
-import heapq
-import signal
-from collections import defaultdict, deque, OrderedDict
-from typing import List, Dict, Set, Tuple, Optional, Any, Union, FrozenSet, Callable, Literal, get_type_hints
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from collections import defaultdict, OrderedDict
+from enum import IntEnum
 from pathlib import Path
-from dataclasses import dataclass, field, asdict, fields
-from enum import IntEnum, auto
-from abc import ABC, abstractmethod
-from functools import lru_cache, total_ordering
-import contextlib
+from typing import Any, Iterable, Optional, Union
+from urllib.parse import urljoin, urlparse
 
 import requests
+import urllib3
+import urllib3.util.connection
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-try:
-    import psutil
-    HAS_PSUTIL = True
-except ImportError:
-    HAS_PSUTIL = False
-    psutil = None
+if sys.version_info < (3, 9):
+    print("Error: Python 3.9 or higher is required", file=sys.stderr)
+    sys.exit(1)
+
+_orig_create_connection = urllib3.util.connection.create_connection
+_dns_context = threading.local()
+
+def _patched_create_connection(address: tuple[str, int], *args: Any, **kwargs: Any) -> socket.socket:
+    host, port = address
+    forced_ip = getattr(_dns_context, 'forced_ip', None)
+    forced_host = getattr(_dns_context, 'forced_host', None)
+    if forced_ip and forced_host and host == forced_host:
+        address = (forced_ip, port)
+    return _orig_create_connection(address, *args, **kwargs)
+
+urllib3.util.connection.create_connection = _patched_create_connection
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 try:
     import orjson
     USE_ORJSON = True
+    JSONDecodeErrorType = orjson.JSONDecodeError
 except ImportError:
-    orjson = None
     USE_ORJSON = False
+    JSONDecodeErrorType = json.JSONDecodeError
 
 try:
     import msgpack
     USE_MSGPACK = True
 except ImportError:
-    msgpack = None
     USE_MSGPACK = False
-
-try:
-    import tldextract
-    USE_TLDEXTRACT = True
-    _tld_cache_dir = Path(tempfile.gettempdir()) / "tld_cache_strict"
-    try:
-        _tld_cache_dir.mkdir(parents=True, exist_ok=True)
-        _tld_cache = tldextract.TLDExtract(cache_dir=str(_tld_cache_dir))
-    except Exception:
-        _tld_cache = None
-except ImportError:
-    USE_TLDEXTRACT = False
-    _tld_cache_dir = None
-    _tld_cache = None
-
-try:
-    import lmdb
-    USE_LMDB = True
-    LMDB_MAP_FULL = lmdb.MapFullError
-except ImportError:
-    USE_LMDB = False
-    LMDB_MAP_FULL = Exception
 
 try:
     import z3
@@ -91,4184 +71,1898 @@ try:
 except ImportError:
     HAS_Z3 = False
 
-try:
-    import numpy as np
-    HAS_NUMPY = True
-except ImportError:
-    HAS_NUMPY = False
-
-try:
-    from sklearn.ensemble import IsolationForest
-    from sklearn.preprocessing import StandardScaler
-    HAS_SKLEARN = True
-except ImportError:
-    HAS_SKLEARN = False
-
-try:
-    from hypothesis import given, strategies as st, settings, Phase, example, assume
-    from hypothesis.stateful import RuleBasedStateMachine, rule, precondition, invariant
-    HAS_HYPOTHESIS = True
-except ImportError:
-    HAS_HYPOTHESIS = False
-
-try:
-    from greenery import parse
-    HAS_GREENERY = True
-except ImportError:
-    HAS_GREENERY = False
-
 logger = logging.getLogger(__name__)
 
+CACHE_VERSION: int = 12
+MAX_LINE_LENGTH: int = 10000
+MAX_DOMAIN_LABELS: int = 127
+MAX_DOMAIN_LENGTH: int = 253
+MAX_TASK_NAME_LENGTH: int = 100
+DEFAULT_RETRIES: int = 3
+MAX_DOWNLOAD_RETRIES: int = 3
+SMALL_FILE_THRESHOLD: int = 5 * 1024 * 1024
+MAX_BDD_DEPTH: int = 500
+MAX_BACKOFF_SECONDS: int = 60
+HTML_CHECK_THRESHOLD: int = 3
+MAX_DNS_CACHE: int = 1024
+
+OP_NEG = 0
+OP_AND = 1
+OP_OR = 2
+
+RE_DOMAIN_LABEL = re.compile(r'^[a-z0-9_](?:[a-z0-9-_]{0,61}[a-z0-9_])?$', re.ASCII)
+RE_HTML_STRICT = re.compile(rb'(?:^[\s]*<(?:!DOCTYPE\s+html|html|head|body))', re.IGNORECASE | re.MULTILINE)
+RE_TASK_NAME = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+IPNetworkType = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
+
+_DNS_CACHE: OrderedDict[str, tuple[float, list[str]]] = OrderedDict()
+_DNS_PENDING: dict[str, threading.Event] = {}
+_DNS_LOCK = threading.Lock()
+
+class BDDDepthExceededError(Exception):
+    pass
+
+def parse_version(ver: str) -> tuple[int, int, int]:
+    parts = list(map(int, re.findall(r'\d+', ver))) + [0, 0, 0]
+    return (parts[0], parts[1], parts[2])
 
 class CIDRFragmentationError(Exception):
-    __slots__ = ('processed_count', 'limit', 'loss_rate')
-    def __init__(self, processed_count: int, limit: int, loss_rate: float = 0.0):
+    def __init__(self, processed_count: int, limit: int, loss_rate: float = 0.0, cidrs: Optional[list[IPNetworkType]] = None) -> None:
         self.processed_count = processed_count
         self.limit = limit
         self.loss_rate = loss_rate
-        super().__init__(f"CIDR fragmentation exceeded limit: {processed_count} > {limit}, loss: {loss_rate:.4%}")
-
-
-class StrictVerificationError(Exception):
-    __slots__ = ('rule_type', 'rule_value', 'source_url', 'confidence')
-    def __init__(self, message: str, *, rule_type: Optional[str] = None, 
-                 rule_value: Optional[str] = None, source_url: Optional[str] = None, 
-                 confidence: float = 0.0):
-        super().__init__(message)
-        self.rule_type = rule_type
-        self.rule_value = rule_value
-        self.source_url = source_url
-        self.confidence = confidence
-
-
-class LineageAnalysisError(Exception):
-    pass
-
-
-class PolicyViolationError(Exception):
-    pass
-
+        self.cidrs = cidrs or []
+        super().__init__(f"CIDR fragmentation > {limit} ({processed_count}), loss {self.loss_rate:.2%}")
 
 class TransientError(Exception):
     pass
 
-
-class ResourceExhaustedError(Exception):
+class SecurityViolationError(Exception):
     pass
 
-
-class InvalidRuleError(Exception):
-    pass
-
-
-class AnomalyDetectionError(Exception):
-    pass
-
-
-class SMTUnknownResult(Exception):
-    pass
-
-
-class AbstractDomainError(Exception):
-    pass
-
-
-class BDDReorderingError(Exception):
-    pass
-
-
-class TieredVerificationError(Exception):
-    pass
-
-
-@dataclass(frozen=True, slots=True)
 class MergeConfig:
-    config_file: str = 'scripts/custom_merge.json'
-    output_dir: Path = field(default_factory=lambda: Path('rules'))
-    core_bin_path: str = field(default_factory=lambda: os.getenv("SB_CORE_PATH", "./sb-core"))
-    max_workers: int = field(default_factory=lambda: (os.cpu_count() or 4) * 2)
-    max_download_size: int = 150 * 1024 * 1024
-    originality_decay_rate: float = 0.15
-    enable_union_inclusion: bool = True
-    union_inclusion_threshold: int = 3
-    max_cidr_fragmentation: int = 5000
-    strict_cidr_arithmetic: bool = True
-    enable_ipv6: bool = True
-    bloom_target_fpp: float = 0.001
-    weighted_exclusion: bool = True
-    exclusion_weight_threshold: float = 0.1
-    deterministic_output: bool = True
-    strict_idn_normalization: bool = True
-    strict_html_detection: bool = True
-    strict_zero_loss: bool = True
-    max_domain_depth: int = 128
-    lmdb_initial_map_size: int = 256 * 1024 * 1024
-    lmdb_max_map_size: int = 8 * 1024 * 1024 * 1024
-    max_index_builders: int = 4
-    enable_cidr_adjacent_merge: bool = True
-    safety_override_threshold: float = 2.0
-    domain_specificity_threshold: float = 0.3
-    temporal_override_factor: float = 1.5
-    max_source_age_days: int = 30
-    enable_rir_lookup: bool = False
-    node_id: str = field(default_factory=lambda: f"node_{int(time.time() * 1000) % 100000}")
-    enable_cidr_approximation: bool = True
-    cidr_approximation_threshold: int = 1000
-    rir_data_url: str = 'https://ftp.apnic.net/stats/apnic/delegated-apnic-latest'
-    rir_cache_ttl_days: int = 7
-    regex_derivative_max_depth: int = 200
-    enable_interval_tree: bool = True
-    strict_rule_ordering: bool = True
-    rule_specificity_boost: float = 0.1
-    enable_merkle_tree: bool = True
-    merkle_tree_branching: int = 2
-    cidr_approximation_max_loss_rate: float = 0.05
-    enable_smt_verification: bool = True
-    smt_timeout_ms: int = 5000
-    smt_progressive_timeout: Tuple[int, ...] = (100, 500, 2000, 5000)
-    smt_process_pool_size: int = 2
-    enable_adaptive_degradation: bool = True
-    memory_threshold_percent: float = 85.0
-    incremental_update: bool = True
-    verification_level: int = 3
-    entropy_threshold: float = 4.5
-    enable_entropy_check: bool = True
-    enable_bdd_verification: bool = True
-    bdd_node_limit: int = 100000
-    bdd_reordering_threshold: int = 10000
-    enable_fuzzing_tests: bool = True
-    enable_grammar_fuzzing: bool = True
-    enable_differential_testing: bool = True
-    enable_ngram_analysis: bool = True
-    ngram_threshold: float = 0.3
-    ngram_scales: Tuple[int, ...] = (2, 3, 4, 5)
-    ngram_js_divergence_threshold: float = 0.5
-    enable_semantic_embedding: bool = True
-    semantic_model: str = "distilbert-base-uncased"
-    enable_isolation_forest: bool = True
-    isolation_forest_contamination: float = 0.01
-    enable_compression_ratio_check: bool = True
-    compression_ratio_threshold: float = 0.3
-    deterministic_seed: str = "hyperaccurate_v9_strict"
-    bdd_lru_cache_size: int = 50000
-    enable_abstract_interpretation: bool = True
-    enable_crdt: bool = True
-    smt_three_valued_logic: bool = True
-    pca_ngram_range: Tuple[int, int] = (2, 4)
-    pca_n_components: int = 16
-    enable_pca_anomaly_detection: bool = True
-    enable_hypothesis_testing: bool = True
-    hypothesis_max_examples: int = 1000
-    hypothesis_deadline_ms: int = 5000
-    enable_idn_script_whitelist: bool = True
-    idn_allowed_scripts: Tuple[str, ...] = ('LATIN', 'CYRILLIC', 'GREEK', 'ARABIC', 'HEBREW', 'CJK', 'HANGUL')
-    enable_provenance_logging: bool = True
-    provenance_format: str = 'w3c-prov'
-    enable_policy_engine: bool = True
-    default_policy: str = 'WEIGHTED'
-    tiered_verification: bool = True
-    tier1_max_rules: int = 1000
-    tier2_max_rules: int = 10000
-    wal_sync_interval: int = 10
+    __slots__ = (
+        'config_file', 'output_dir', 'core_bin_path', 'max_workers', 'max_download_size',
+        'max_cidr_fragmentation', 'enable_ipv6', 'strict_zero_loss', 'max_domain_depth',
+        'enable_cidr_approximation', 'cidr_approximation_max_loss_rate', 'enable_smt_verification',
+        'smt_progressive_timeout', 'enable_bdd_verification', 'bdd_node_limit', 'url_allow_private_ips',
+        'max_concurrent_downloads', 'download_timeout_connect', 'download_timeout_read',
+        'compile_timeout_seconds', 'max_bdd_var_cache_size', 'max_source_age_days',
+        'allow_local_core', 'enable_cache', 'bdd_lru_cache_size', 'max_verification_sources',
+        'smt_unknown_default', 'conflict_resolution', 'output_format', 'allow_policy',
+        'deny_policy', 'verify_ssl', 'max_cache_entries'
+    )
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.config_file = kwargs.get('config_file', 'scripts/custom_merge.json')
+        self.output_dir = Path(kwargs.get('output_dir', 'rules'))
+        self.core_bin_path = kwargs.get('core_bin_path', "")
+        self.max_workers = int(kwargs.get('max_workers', 0))
+        self.max_download_size = int(kwargs.get('max_download_size', 150 * 1024 * 1024))
+        self.max_cidr_fragmentation = int(kwargs.get('max_cidr_fragmentation', 5000))
+        self.enable_ipv6 = bool(kwargs.get('enable_ipv6', True))
+        self.strict_zero_loss = bool(kwargs.get('strict_zero_loss', True))
+        self.max_domain_depth = int(kwargs.get('max_domain_depth', MAX_DOMAIN_LABELS))
+        self.enable_cidr_approximation = bool(kwargs.get('enable_cidr_approximation', True))
+        self.cidr_approximation_max_loss_rate = float(kwargs.get('cidr_approximation_max_loss_rate', 0.05))
+        self.enable_smt_verification = bool(kwargs.get('enable_smt_verification', False))
+        self.smt_progressive_timeout = tuple(kwargs.get('smt_progressive_timeout', (100, 500, 2000, 5000)))
+        self.enable_bdd_verification = bool(kwargs.get('enable_bdd_verification', True))
+        self.bdd_node_limit = int(kwargs.get('bdd_node_limit', 100000))
+        self.url_allow_private_ips = bool(kwargs.get('url_allow_private_ips', False))
+        self.max_concurrent_downloads = int(kwargs.get('max_concurrent_downloads', 0))
+        self.download_timeout_connect = int(kwargs.get('download_timeout_connect', 10))
+        self.download_timeout_read = int(kwargs.get('download_timeout_read', 60))
+        self.compile_timeout_seconds = int(kwargs.get('compile_timeout_seconds', 180))
+        self.max_bdd_var_cache_size = int(kwargs.get('max_bdd_var_cache_size', 10000))
+        self.max_source_age_days = int(kwargs.get('max_source_age_days', 30))
+        self.allow_local_core = bool(kwargs.get('allow_local_core', False))
+        self.enable_cache = bool(kwargs.get('enable_cache', True))
+        self.bdd_lru_cache_size = int(kwargs.get('bdd_lru_cache_size', 50000))
+        self.max_verification_sources = int(kwargs.get('max_verification_sources', 20))
+        self.smt_unknown_default = bool(kwargs.get('smt_unknown_default', False))
+        self.conflict_resolution = str(kwargs.get('conflict_resolution', 'first')).lower()
+        self.output_format = str(kwargs.get('output_format', 'json')).lower()
+        self.allow_policy = str(kwargs.get('allow_policy', 'PROXY'))
+        self.deny_policy = str(kwargs.get('deny_policy', 'REJECT'))
+        self.verify_ssl = bool(kwargs.get('verify_ssl', True))
+        self.max_cache_entries = int(kwargs.get('max_cache_entries', 500))
+        self._validate()
+
+    def _validate(self) -> None:
+        if self.max_cidr_fragmentation < 5000:
+            logger.warning(f"max_cidr_fragmentation ({self.max_cidr_fragmentation}) is below recommended 5000")
+        if self.max_download_size < 150 * 1024 * 1024:
+            logger.warning(f"max_download_size ({self.max_download_size}) is below recommended 150MB")
+        if self.max_source_age_days < 1:
+            self.max_source_age_days = 1
+        if self.compile_timeout_seconds < 30:
+            self.compile_timeout_seconds = 30
+        
+        self.max_workers = max(0, self.max_workers)
+        if self.max_workers == 0:
+            self.max_workers = min(max(1, os.cpu_count() or 4) * 2, 16)
+        if self.max_concurrent_downloads <= 0:
+            self.max_concurrent_downloads = max(10, self.max_workers)
+
+        self.max_domain_depth = max(1, min(MAX_DOMAIN_LABELS, self.max_domain_depth))
+        self.max_verification_sources = max(1, self.max_verification_sources)
+        self.bdd_node_limit = max(10000, self.bdd_node_limit)
+        self.bdd_lru_cache_size = max(5000, self.bdd_lru_cache_size)
+        self.max_cache_entries = max(10, self.max_cache_entries)
+
+        if not self.smt_progressive_timeout or not all(isinstance(t, int) and t > 0 for t in self.smt_progressive_timeout):
+            self.smt_progressive_timeout = (100, 500, 2000, 5000)
+
+        self.cidr_approximation_max_loss_rate = max(0.0, min(1.0, self.cidr_approximation_max_loss_rate))
+        if self.conflict_resolution not in ('first', 'specificity'):
+            self.conflict_resolution = 'first'
+        if self.output_format not in ('json', 'surge', 'clash'):
+            self.output_format = 'json'
+
+        self.allow_policy = self.allow_policy or 'PROXY'
+        self.deny_policy = self.deny_policy or 'REJECT'
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any], base: MergeConfig) -> MergeConfig:
-        merged: Dict[str, Any] = {}
-        try:
-            type_hints = get_type_hints(cls)
-        except Exception:
-            type_hints = {}
-        
-        for field_info in fields(cls):
-            name = field_info.name
-            if name in d:
-                value = d[name]
-                expected_type = type_hints.get(name)
-                if expected_type is not None:
-                    if expected_type == Path or (isinstance(expected_type, type) and issubclass(expected_type, Path)):
-                        if isinstance(value, str):
-                            merged[name] = Path(value)
-                            continue
-                merged[name] = value
+    def from_dict(cls, d: dict[str, Any], base: MergeConfig) -> MergeConfig:
+        merged: dict[str, Any] = {}
+        for key in cls.__slots__:
+            if key in d and d[key] is not None:
+                val = d[key]
+                if key == 'output_dir' and isinstance(val, str):
+                    val = Path(val)
+                elif key == 'smt_progressive_timeout' and isinstance(val, (list, tuple)):
+                    val = tuple(int(item) for item in val)
+                merged[key] = val
             else:
-                merged[name] = getattr(base, name)
+                merged[key] = getattr(base, key)
         return cls(**merged)
 
+    def validate_core_path(self) -> bool:
+        if not self.core_bin_path:
+            return True
+        if not self.allow_local_core:
+            return False
+        path = Path(self.core_bin_path).expanduser()
+        if not path.is_file() or not os.access(str(path), os.X_OK):
+            logger.error(f"Core binary invalid or not executable: {path}")
+            return False
+        return True
+
+    def is_url_allowed(self, url: str) -> tuple[bool, str]:
+        try:
+            parsed = urlparse(url)
+            scheme = parsed.scheme.lower()
+            if scheme not in ('http', 'https'):
+                return False, f"Scheme '{scheme}' not allowed"
+            if not parsed.netloc:
+                return False, "Empty netloc"
+            hostname = parsed.hostname
+            if not hostname:
+                return False, "Empty or invalid hostname"
+            if not self.url_allow_private_ips:
+                try:
+                    ip = ipaddress.ip_address(hostname)
+                    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                        return False, f"Private/reserved IP not allowed: {hostname}"
+                except ValueError:
+                    pass
+            return True, "OK"
+        except Exception as e:
+            return False, str(e)
 
 DEFAULT_CONFIG = MergeConfig()
-
-RE_HASH_LIKE = re.compile(r'\b[a-f0-9]{32,64}\b')
-RE_EXCLUSION_PREFIX = re.compile(r'^\s*!')
-RE_IPV4_STRICT = re.compile(r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(?:/\d+)?$')
-RE_JSON_MAGIC = re.compile(rb'^\s*[\{\[]')
-RE_HTML_MAGIC = re.compile(rb'^\s*<(?:!DOCTYPE|html|head|body|div|span)', re.IGNORECASE)
-RE_DOMAIN_LABEL = re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
-RE_PUNYCODE = re.compile(r'^xn--[a-z0-9-]+$')
-RE_SYNTAX_SUGAR = re.compile(r'\\[dwsDSW]|\\x[0-9a-fA-F]{2}')
-RE_UNCERTAIN_REGEX = re.compile(r'\[1-9]|\(\?P<|\(\?[=!]|\(\?<!|\(\?\#|\\g<|\\k<')
-RE_CATASTROPHIC_BACKTRACK = re.compile(r'(\w+\([\w\s|]+\)[*+])|(\([\w\s|]+\)\2*?)')
-
-
-class DeterministicRandom:
-    __slots__ = ('_rng', '_seed', '_history', '_lock')
-    def __init__(self, seed_data: Union[str, bytes, int, Tuple[Any, ...], List[Any]]):
-        if isinstance(seed_data, (str, bytes)):
-            if isinstance(seed_data, str):
-                seed_data = seed_data.encode('utf-8')
-            seed = int(hashlib.sha256(seed_data).hexdigest()[:16], 16)
-        elif isinstance(seed_data, (tuple, list)):
-            seed = int(hashlib.sha256(str(seed_data).encode()).hexdigest()[:16], 16)
-        elif isinstance(seed_data, int):
-            seed = abs(seed) % (2 ** 32)
-        else:
-            seed = 0
-        self._seed = seed
-        self._rng = random.Random(seed)
-        self._history: deque = deque(maxlen=10000)
-        self._lock = threading.Lock()
-
-    def random(self):
-        with self._lock:
-            val = self._rng.random()
-            self._history.append(('random', val))
-            return val
-
-    def randint(self, a: int, b: int) -> int:
-        with self._lock:
-            val = self._rng.randint(a, b)
-            self._history.append(('randint', a, b, val))
-            return val
-
-    def choice(self, seq):
-        with self._lock:
-            if not seq:
-                raise IndexError("Cannot choose from an empty sequence")
-            val = self._rng.choice(seq)
-            self._history.append(('choice', len(seq), val))
-            return val
-
-    def sample(self, population, k):
-        with self._lock:
-            if k > len(population):
-                raise ValueError("Sample larger than population")
-            val = self._rng.sample(population, k)
-            self._history.append(('sample', len(population), k, val))
-            return val
-
-    def shuffle(self, x):
-        with self._lock:
-            self._rng.shuffle(x)
-            self._history.append(('shuffle', len(x)))
-
-    def get_history(self):
-        with self._lock:
-            return tuple(self._history)
-
-    def get_state(self) -> Dict[str, Any]:
-        with self._lock:
-            return {
-                'seed': self._seed,
-                'rng_state': self._rng.getstate(),
-                'history_len': len(self._history)
-            }
-
-    def set_state(self, state: Dict[str, Any]):
-        with self._lock:
-            if 'seed' in state and 'rng_state' in state:
-                self._seed = state['seed']
-                self._rng.setstate(state['rng_state'])
-
-
-def fnv1a_64(data: Union[str, bytes], seed: int = 0xcbf29ce484222325) -> int:
-    if isinstance(data, str):
-        data = data.encode('utf-8')
-    hash_val = seed & 0xffffffffffffffff
-    for byte in data:
-        hash_val ^= byte
-        hash_val = (hash_val * 0x100000001b3) & 0xffffffffffffffff
-    return hash_val
-
-
-def calculate_entropy(s: str) -> float:
-    if not s:
-        return 0.0
-    freq = defaultdict(int)
-    for c in s:
-        freq[c] += 1
-    length = len(s)
-    if length == 0:
-        return 0.0
-    entropy = 0.0
-    for count in freq.values():
-        p = count / length
-        if p > 0:
-            entropy -= p * math.log2(p)
-    return entropy
-
-
-def calculate_js_divergence(p: Dict[str, float], q: Dict[str, float]) -> float:
-    if not p or not q:
-        return float('inf')
-    all_keys = set(p.keys()) | set(q.keys())
-    if not all_keys:
-        return 0.0
-    epsilon = 1e-10
-    p_smooth = {k: p.get(k, 0.0) + epsilon for k in all_keys}
-    q_smooth = {k: q.get(k, 0.0) + epsilon for k in all_keys}
-    total_p = sum(p_smooth.values())
-    total_q = sum(q_smooth.values())
-    if total_p == 0 or total_q == 0:
-        return float('inf')
-    p_norm = {k: v / total_p for k, v in p_smooth.items()}
-    q_norm = {k: v / total_q for k, v in q_smooth.items()}
-    m = {k: (p_norm[k] + q_norm[k]) / 2.0 for k in all_keys}
-    kl_pm = sum(p_norm[k] * math.log2(p_norm[k] / m[k]) for k in all_keys if p_norm[k] > 0 and m[k] > 0)
-    kl_qm = sum(q_norm[k] * math.log2(q_norm[k] / m[k]) for k in all_keys if q_norm[k] > 0 and m[k] > 0)
-    return (kl_pm + kl_qm) / 2.0
-
-
-def calculate_conditional_entropy(s: str, lag: int = 1) -> float:
-    if lag <= 0 or len(s) <= lag:
-        return 0.0
-    pairs = defaultdict(lambda: defaultdict(int))
-    singles = defaultdict(int)
-    for i in range(len(s) - lag):
-        a, b = s[i], s[i + lag]
-        pairs[a][b] += 1
-        singles[a] += 1
-    entropy = 0.0
-    total = len(s) - lag
-    for a, inner in pairs.items():
-        p_a = singles[a] / total if total > 0 else 0
-        for b, count in inner.items():
-            if singles[a] > 0:
-                p_b_given_a = count / singles[a]
-                entropy -= p_a * p_b_given_a * math.log2(p_b_given_a)
-    return entropy
-
-
-def optimal_bloom_size(n: int, p: float = 0.001) -> Tuple[int, int]:
-    if n <= 0:
-        n = 100
-    if p <= 0 or p >= 1:
-        p = 0.001
-    m = int(-n * math.log(p) / (math.log(2) ** 2))
-    m = max(m, 1024)
-    m = (m + 7) // 8 * 8
-    k = max(1, int(m / n * math.log(2)))
-    return m, k
-
 
 class MatchType(IntEnum):
     EXACT = 1
     SUFFIX = 2
     WILDCARD = 3
-    REGEX = 4
-    CIDR = 5
-    KEYWORD = 6
 
-
-@dataclass(frozen=True, slots=True)
 class DomainRule:
-    pattern: str
-    match_type: MatchType
-    normalized: str
-    is_exclusion: bool = False
-    original: str = field(default="")
-    specificity_score: int = field(default=0)
-    script_type: str = field(default="")
+    __slots__ = ('pattern', 'match_type', 'normalized', 'is_exclusion', 'specificity_score', '_hash')
 
-    SCRIPT_WHITELIST = {'LATIN', 'CYRILLIC', 'GREEK', 'ARABIC', 'HEBREW', 'CJK', 'HANGUL', 'COMMON'}
+    def __init__(self, pattern: str, match_type: MatchType, normalized: str, is_exclusion: bool = False, specificity_score: int = 0):
+        self.pattern = pattern
+        self.match_type = match_type
+        self.normalized = normalized or pattern
+        self.is_exclusion = is_exclusion
 
-    def __post_init__(self):
-        if not self.normalized:
-            object.__setattr__(self, 'normalized', self.pattern)
-        if not self.original:
-            object.__setattr__(self, 'original', self.pattern)
-        if self.specificity_score == 0:
-            parts = self.normalized.split('.')
-            score = len(parts) * 10
+        if specificity_score == 0:
+            score = self.normalized.count('.') * 10
             if self.match_type == MatchType.EXACT:
-                score += 5
+                score += 8
             elif self.match_type == MatchType.SUFFIX:
-                score += 2
-            object.__setattr__(self, 'specificity_score', score)
-        if not self.script_type:
-            scripts = set()
-            if not self.normalized.startswith('xn--'):
-                for char in self.normalized:
-                    code = ord(char)
-                    if code < 128:
-                        continue
-                    try:
-                        name = unicodedata.name(char)
-                        parts = name.split()
-                        base_script = parts[0]
-                        if base_script in ('DIGIT', 'NUMBER', 'CIRCLED'):
-                            scripts.add('COMMON')
-                        elif base_script in DomainRule.SCRIPT_WHITELIST:
-                            scripts.add(base_script)
-                            if len(scripts) > 2:
-                                break
-                    except (ValueError, AttributeError):
-                        pass
-            if scripts:
-                object.__setattr__(self, 'script_type', ','.join(sorted(scripts)))
+                score += 3
+            elif self.match_type == MatchType.WILDCARD:
+                score += 1
+            self.specificity_score = score
+        else:
+            self.specificity_score = specificity_score
 
-    def covers(self, other: DomainRule) -> bool:
-        if self.is_exclusion != other.is_exclusion:
-            return False
-        if self.match_type == MatchType.EXACT:
-            return self.normalized == other.normalized
-        elif self.match_type == MatchType.SUFFIX:
-            if other.match_type == MatchType.EXACT:
-                return other.normalized.endswith(self.normalized)
-            elif other.match_type == MatchType.SUFFIX:
-                return other.normalized.endswith(self.normalized)
-            else:
-                return other.normalized.endswith(self.normalized)
-        elif self.match_type == MatchType.WILDCARD:
-            if self.normalized.startswith('*.'):
-                suffix = self.normalized[2:]
-                return other.normalized.endswith(suffix)
-            return self.normalized == other.normalized
-        return False
+        self._hash = hash((self.normalized, self.match_type, self.is_exclusion))
 
-    def __hash__(self):
-        return hash((self.normalized, self.match_type, self.is_exclusion))
+    def __hash__(self) -> int:
+        return self._hash
 
-    def __eq__(self, other):
-        if not isinstance(other, DomainRule):
-            return False
-        return (self.normalized == other.normalized and 
-                self.match_type == other.match_type and 
-                self.is_exclusion == other.is_exclusion)
+    def __eq__(self, other: Any) -> bool:
+        if type(self) is not type(other): return NotImplemented
+        return (self._hash == other._hash and
+                self.match_type == other.match_type and
+                self.is_exclusion == other.is_exclusion and
+                self.normalized == other.normalized)
 
-
-@dataclass(frozen=True, slots=True)
 class IPCIDRRule:
-    network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
-    original_str: str
-    is_exclusion: bool = False
+    __slots__ = ('network', 'original_str', 'is_exclusion', 'version', 'start_int', 'end_int', 'prefixlen', '_hash')
 
-    def __post_init__(self):
-        if not self.original_str:
-            object.__setattr__(self, 'original_str', str(self.network))
+    def __init__(self, network: IPNetworkType, original_str: str = "", is_exclusion: bool = False):
+        self.network = network
+        self.original_str = original_str or str(network)
+        self.is_exclusion = is_exclusion
+        self.version = network.version
+        self.start_int = int(network.network_address)
+        self.end_int = int(network.broadcast_address)
+        self.prefixlen = network.prefixlen
+        self._hash = hash((self.version, self.start_int, self.prefixlen, self.is_exclusion))
 
-    def covers(self, other: IPCIDRRule) -> bool:
-        if self.network.version != other.network.version:
-            return False
-        if self.is_exclusion != other.is_exclusion:
-            return False
-        return other.network.subnet_of(self.network)
+    def __hash__(self) -> int:
+        return self._hash
 
-    def __hash__(self):
-        return hash((int(self.network.network_address), self.network.prefixlen, self.is_exclusion))
+    def __eq__(self, other: Any) -> bool:
+        if type(self) is not type(other): return NotImplemented
+        return (self._hash == other._hash and
+                self.is_exclusion == other.is_exclusion and
+                self.version == other.version and
+                self.prefixlen == other.prefixlen and
+                self.start_int == other.start_int)
 
-    def __eq__(self, other):
-        if not isinstance(other, IPCIDRRule):
-            return False
-        return (self.network.network_address == other.network.network_address and 
-                self.network.prefixlen == other.network.prefixlen and
-                self.is_exclusion == other.is_exclusion)
+RuleType = Union[DomainRule, IPCIDRRule]
 
-
-@dataclass(frozen=True, slots=True)
-class KeywordRule:
-    keyword: str
-    is_exclusion: bool = False
-
-    def __hash__(self):
-        return hash((self.keyword, self.is_exclusion))
-
-    def __eq__(self, other):
-        if not isinstance(other, KeywordRule):
-            return False
-        return self.keyword == other.keyword and self.is_exclusion == other.is_exclusion
-
-
-@dataclass(frozen=True, slots=True)
-class RegexRule:
-    pattern: str
-    is_exclusion: bool = False
-    antimirov_hash: int = field(default=0)
-
-    def __post_init__(self):
-        if self.antimirov_hash == 0:
-            h = hashlib.sha256(self.pattern.encode()).hexdigest()
-            object.__setattr__(self, 'antimirov_hash', int(h[:16], 16))
-
-    def covers(self, other: RegexRule) -> bool:
-        if self.is_exclusion != other.is_exclusion:
-            return False
-        if not HAS_GREENERY:
-            return False
-        if len(self.pattern) > 200 or self.pattern.count('*') + self.pattern.count('+') > 5:
-            return False
-        try:
-            return self._check_coverage(other)
-        except Exception:
-            return False
-
-    def _check_coverage(self, other: RegexRule) -> bool:
-        try:
-            fsm_self = parse(self.pattern).to_fsm()
-            fsm_other = parse(other.pattern).to_fsm()
-            return fsm_other <= fsm_self
-        except Exception:
-            return False
-
-    def __hash__(self):
-        return hash((self.pattern, self.is_exclusion))
-
-    def __eq__(self, other):
-        if not isinstance(other, RegexRule):
-            return False
-        return self.pattern == other.pattern and self.is_exclusion == other.is_exclusion)
-
-
-RuleType = Union[DomainRule, IPCIDRRule, KeywordRule, RegexRule]
-
-
-class RIRDataManager:
-    __slots__ = ('_config', '_prefixes', '_cache_dir', '_cache_file', '_lock', '_last_update')
-
-    BUILTIN_PREFIXES = {
-        '1.0.0.0/8': 'APNIC', '1.1.1.0/24': 'APNIC', '14.0.0.0/8': 'APNIC',
-        '27.0.0.0/8': 'APNIC', '36.0.0.0/8': 'APNIC', '39.0.0.0/8': 'APNIC',
-        '42.0.0.0/8': 'APNIC', '43.0.0.0/8': 'APNIC', '49.0.0.0/8': 'APNIC',
-        '58.0.0.0/8': 'APNIC', '59.0.0.0/8': 'APNIC', '60.0.0.0/8': 'APNIC',
-        '61.0.0.0/8': 'APNIC', '101.0.0.0/8': 'APNIC', '103.0.0.0/8': 'APNIC',
-        '106.0.0.0/8': 'APNIC', '110.0.0.0/8': 'APNIC', '111.0.0.0/8': 'APNIC',
-        '112.0.0.0/8': 'APNIC', '113.0.0.0/8': 'APNIC', '114.0.0.0/8': 'APNIC',
-        '115.0.0.0/8': 'APNIC', '116.0.0.0/8': 'APNIC', '117.0.0.0/8': 'APNIC',
-        '118.0.0.0/8': 'APNIC', '119.0.0.0/8': 'APNIC', '120.0.0.0/8': 'APNIC',
-        '121.0.0.0/8': 'APNIC', '122.0.0.0/8': 'APNIC', '123.0.0.0/8': 'APNIC',
-        '124.0.0.0/8': 'APNIC', '125.0.0.0/8': 'APNIC', '126.0.0.0/8': 'APNIC',
-        '175.0.0.0/8': 'APNIC', '180.0.0.0/8': 'APNIC', '182.0.0.0/8': 'APNIC',
-        '183.0.0.0/8': 'APNIC', '202.0.0.0/8': 'APNIC', '203.0.0.0/8': 'APNIC',
-        '210.0.0.0/8': 'APNIC', '211.0.0.0/8': 'APNIC', '218.0.0.0/8': 'APNIC',
-        '219.0.0.0/8': 'APNIC', '220.0.0.0/8': 'APNIC', '221.0.0.0/8': 'APNIC',
-        '222.0.0.0/8': 'APNIC', '223.0.0.0/8': 'APNIC',
-        '2.0.0.0/8': 'RIPE', '5.0.0.0/8': 'RIPE', '31.0.0.0/8': 'RIPE',
-        '37.0.0.0/8': 'RIPE', '46.0.0.0/8': 'RIPE', '62.0.0.0/8': 'RIPE',
-        '77.0.0.0/8': 'RIPE', '78.0.0.0/8': 'RIPE', '79.0.0.0/8': 'RIPE',
-        '80.0.0.0/8': 'RIPE', '81.0.0.0/8': 'RIPE', '82.0.0.0/8': 'RIPE',
-        '83.0.0.0/8': 'RIPE', '84.0.0.0/8': 'RIPE', '85.0.0.0/8': 'RIPE',
-        '86.0.0.0/8': 'RIPE', '87.0.0.0/8': 'RIPE', '88.0.0.0/8': 'RIPE',
-        '89.0.0.0/8': 'RIPE', '90.0.0.0/8': 'RIPE', '91.0.0.0/8': 'RIPE',
-        '92.0.0.0/8': 'RIPE', '93.0.0.0/8': 'RIPE', '94.0.0.0/8': 'RIPE',
-        '95.0.0.0/8': 'RIPE', '109.0.0.0/8': 'RIPE', '141.0.0.0/8': 'RIPE',
-        '145.0.0.0/8': 'RIPE', '151.0.0.0/8': 'RIPE', '176.0.0.0/8': 'RIPE',
-        '178.0.0.0/8': 'RIPE', '185.0.0.0/8': 'RIPE', '188.0.0.0/8': 'RIPE',
-        '193.0.0.0/8': 'RIPE', '194.0.0.0/8': 'RIPE', '195.0.0.0/8': 'RIPE',
-        '212.0.0.0/8': 'RIPE', '213.0.0.0/8': 'RIPE', '217.0.0.0/8': 'RIPE',
-        '3.0.0.0/8': 'ARIN', '6.0.0.0/8': 'ARIN', '7.0.0.0/8': 'ARIN',
-        '8.0.0.0/8': 'ARIN', '9.0.0.0/8': 'ARIN', '11.0.0.0/8': 'ARIN',
-        '12.0.0.0/8': 'ARIN', '17.0.0.0/8': 'ARIN', '18.0.0.0/8': 'ARIN',
-        '19.0.0.0/8': 'ARIN', '20.0.0.0/8': 'ARIN', '21.0.0.0/8': 'ARIN',
-        '22.0.0.0/8': 'ARIN', '23.0.0.0/8': 'ARIN', '24.0.0.0/8': 'ARIN',
-        '25.0.0.0/8': 'ARIN', '26.0.0.0/8': 'ARIN', '28.0.0.0/8': 'ARIN',
-        '29.0.0.0/8': 'ARIN', '30.0.0.0/8': 'ARIN', '32.0.0.0/8': 'ARIN',
-        '33.0.0.0/8': 'ARIN', '34.0.0.0/8': 'ARIN', '35.0.0.0/8': 'ARIN',
-        '38.0.0.0/8': 'ARIN', '40.0.0.0/8': 'ARIN', '44.0.0.0/8': 'ARIN',
-        '45.0.0.0/8': 'ARIN', '47.0.0.0/8': 'ARIN', '48.0.0.0/8': 'ARIN',
-        '50.0.0.0/8': 'ARIN', '52.0.0.0/8': 'ARIN', '54.0.0.0/8': 'ARIN',
-        '55.0.0.0/8': 'ARIN', '56.0.0.0/8': 'ARIN', '63.0.0.0/8': 'ARIN',
-        '64.0.0.0/8': 'ARIN', '65.0.0.0/8': 'ARIN', '66.0.0.0/8': 'ARIN',
-        '67.0.0.0/8': 'ARIN', '68.0.0.0/8': 'ARIN', '69.0.0.0/8': 'ARIN',
-        '70.0.0.0/8': 'ARIN', '71.0.0.0/8': 'ARIN', '72.0.0.0/8': 'ARIN',
-        '73.0.0.0/8': 'ARIN', '74.0.0.0/8': 'ARIN', '75.0.0.0/8': 'ARIN',
-        '76.0.0.0/8': 'ARIN', '96.0.0.0/8': 'ARIN', '97.0.0.0/8': 'ARIN',
-        '98.0.0.0/8': 'ARIN', '99.0.0.0/8': 'ARIN', '100.0.0.0/8': 'ARIN',
-        '128.0.0.0/8': 'ARIN', '129.0.0.0/8': 'ARIN', '130.0.0.0/8': 'ARIN',
-        '131.0.0.0/8': 'ARIN', '132.0.0.0/8': 'ARIN', '134.0.0.0/8': 'ARIN',
-        '135.0.0.0/8': 'ARIN', '136.0.0.0/8': 'ARIN', '137.0.0.0/8': 'ARIN',
-        '138.0.0.0/8': 'ARIN', '139.0.0.0/8': 'ARIN', '140.0.0.0/8': 'ARIN',
-        '142.0.0.0/8': 'ARIN', '143.0.0.0/8': 'ARIN', '144.0.0.0/8': 'ARIN',
-        '146.0.0.0/8': 'ARIN', '147.0.0.0/8': 'ARIN', '148.0.0.0/8': 'ARIN',
-        '149.0.0.0/8': 'ARIN', '150.0.0.0/8': 'ARIN', '152.0.0.0/8': 'ARIN',
-        '155.0.0.0/8': 'ARIN', '156.0.0.0/8': 'ARIN', '157.0.0.0/8': 'ARIN',
-        '158.0.0.0/8': 'ARIN', '159.0.0.0/8': 'ARIN', '160.0.0.0/8': 'ARIN',
-        '161.0.0.0/8': 'ARIN', '162.0.0.0/8': 'ARIN', '163.0.0.0/8': 'ARIN',
-        '164.0.0.0/8': 'ARIN', '165.0.0.0/8': 'ARIN', '166.0.0.0/8': 'ARIN',
-        '167.0.0.0/8': 'ARIN', '168.0.0.0/8': 'ARIN', '169.0.0.0/8': 'ARIN',
-        '170.0.0.0/8': 'ARIN', '171.0.0.0/8': 'ARIN', '172.0.0.0/8': 'ARIN',
-        '173.0.0.0/8': 'ARIN', '174.0.0.0/8': 'ARIN', '184.0.0.0/8': 'ARIN',
-        '192.0.0.0/8': 'ARIN', '198.0.0.0/8': 'ARIN', '199.0.0.0/8': 'ARIN',
-        '204.0.0.0/8': 'ARIN', '205.0.0.0/8': 'ARIN', '206.0.0.0/8': 'ARIN',
-        '207.0.0.0/8': 'ARIN', '208.0.0.0/8': 'ARIN', '209.0.0.0/8': 'ARIN',
-        '216.0.0.0/8': 'ARIN',
-        '177.0.0.0/8': 'LACNIC', '179.0.0.0/8': 'LACNIC', '181.0.0.0/8': 'LACNIC',
-        '186.0.0.0/8': 'LACNIC', '187.0.0.0/8': 'LACNIC', '189.0.0.0/8': 'LACNIC',
-        '190.0.0.0/8': 'LACNIC', '191.0.0.0/8': 'LACNIC', '200.0.0.0/8': 'LACNIC',
-        '201.0.0.0/8': 'LACNIC',
-        '41.0.0.0/8': 'AFRINIC', '102.0.0.0/8': 'AFRINIC', '105.0.0.0/8': 'AFRINIC',
-        '154.0.0.0/8': 'AFRINIC', '196.0.0.0/8': 'AFRINIC', '197.0.0.0/8': 'AFRINIC',
-    }
-
-    def __init__(self, config: MergeConfig = DEFAULT_CONFIG):
-        self._config = config
-        self._prefixes: Dict[Union[ipaddress.IPv4Network, ipaddress.IPv6Network], str] = {}
-        self._cache_dir = Path(tempfile.gettempdir()) / "rir_cache"
-        self._cache_file = self._cache_dir / "rir_data.json"
-        self._lock = threading.RLock()
-        self._last_update = 0
-        self._load_builtin()
-        if config.enable_rir_lookup:
-            self._try_load_cached()
-
-    def _load_builtin(self):
-        with self._lock:
-            for prefix_str, rir in self.BUILTIN_PREFIXES.items():
-                try:
-                    network = ipaddress.ip_network(prefix_str, strict=False)
-                    self._prefixes[network] = rir
-                except ValueError:
-                    continue
-
-    def _try_load_cached(self):
-        try:
-            if self._cache_file.exists():
-                mtime = self._cache_file.stat().st_mtime
-                if time.time() - mtime < 7 * 86400:
-                    with open(self._cache_file, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        for prefix_str, rir in data.items():
-                            try:
-                                network = ipaddress.ip_network(prefix_str, strict=False)
-                                self._prefixes[network] = rir
-                            except ValueError:
-                                continue
-                        self._last_update = mtime
-        except Exception as e:
-            logger.warning(f"Failed to load RIR cache: {e}")
-
-    def get_owner(self, network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> Optional[str]:
-        with self._lock:
-            best_match = None
-            best_len = -1
-            for prefix, rir in self._prefixes.items():
-                if prefix.version != network.version:
-                    continue
-                if network.subnet_of(prefix) and prefix.prefixlen > best_len:
-                    best_len = prefix.prefixlen
-                    best_match = rir
-            return best_match
-
-    def can_merge(self, net1: Union[ipaddress.IPv4Network, ipaddress.IPv6Network],
-                  net2: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> bool:
-        owner1 = self.get_owner(net1)
-        owner2 = self.get_owner(net2)
-        if owner1 is None or owner2 is None:
-            return True
-        return owner1 == owner2
-
-
-class ReadWriteLock:
-    __slots__ = ('_read_ready', '_readers', '_writers_waiting', '_writer_active', '_lock')
-    def __init__(self):
-        self._lock = threading.RLock()
-        self._read_ready = threading.Condition(self._lock)
-        self._readers = 0
-        self._writers_waiting = 0
-        self._writer_active = False
-
-    def acquire_read(self):
-        with self._lock:
-            while self._writer_active or self._writers_waiting > 0:
-                self._read_ready.wait()
-            self._readers += 1
-
-    def release_read(self):
-        with self._lock:
-            self._readers -= 1
-            if self._readers == 0:
-                self._read_ready.notify_all()
-
-    def acquire_write(self):
-        with self._lock:
-            self._writers_waiting += 1
-            while self._readers > 0 or self._writer_active:
-                self._read_ready.wait()
-            self._writers_waiting -= 1
-            self._writer_active = True
-
-    def release_write(self):
-        with self._lock:
-            self._writer_active = False
-            self._read_ready.notify_all()
-
-    def __enter__(self):
-        self.acquire_write()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.release_write()
-
-
-class ResourceMonitor:
-    __slots__ = ('_threshold', '_enabled', '_start_time', '_max_duration', '_check_count', '_lock')
-    def __init__(self, threshold_percent: float = 85.0, max_duration: Optional[float] = None):
-        self._threshold = threshold_percent
-        self._enabled = True
-        self._start_time = time.time()
-        self._max_duration = max_duration
-        self._check_count = 0
-        self._lock = threading.Lock()
-
-    def check_resources(self) -> Tuple[bool, float]:
-        if not HAS_PSUTIL or not self._enabled:
-            return True, 0.0
-        with self._lock:
-            self._check_count += 1
-            if self._check_count % 100 != 0:
-                return True, 0.0
-        try:
-            mem = psutil.virtual_memory()
-            mem_usage = mem.percent
-            if mem_usage > self._threshold:
-                return False, mem_usage
-            if self._max_duration and (time.time() - self._start_time) > self._max_duration:
-                return False, mem_usage
-            return True, mem_usage
-        except Exception:
-            return True, 0.0
-
-    def should_degrade(self, current_level: int) -> bool:
-        ok, usage = self.check_resources()
-        if not ok:
-            return True
-        if current_level > 1 and usage > self._threshold * 0.9:
-            logger.warning(f"Degrading from level {current_level} to {current_level-1} due to memory pressure {usage:.1f}%")
-            return True
-        if current_level > 2 and usage > self._threshold * 0.95:
-            return True
-        return False
-
-
-class TieredVerificationStrategy:
-    __slots__ = ('_config', '_current_tier', '_tier_stats', '_lock')
-    TIER_NAMES = {1: 'STRICT', 2: 'STANDARD', 3: 'FAST'}
-
-    def __init__(self, config: MergeConfig = DEFAULT_CONFIG):
-        self._config = config
-        self._current_tier = 1
-        self._tier_stats: Dict[int, int] = {1: 0, 2: 0, 3: 0}
-        self._lock = threading.Lock()
-
-    def select_tier(self, rule_count: int, available_memory: float) -> int:
-        with self._lock:
-            if not self._config.tiered_verification:
-                return 1
-            if rule_count <= self._config.tier1_max_rules and available_memory > 50.0:
-                tier = 1
-            elif rule_count <= self._config.tier2_max_rules and available_memory > 30.0:
-                tier = 2
-            else:
-                tier = 3
-            self._current_tier = tier
-            self._tier_stats[tier] += 1
-            return tier
-
-    def get_current_tier(self) -> int:
-        with self._lock:
-            return self._current_tier
-
-    def get_stats(self) -> Dict[int, int]:
-        with self._lock:
-            return dict(self._tier_stats)
-
+def rules_digest(rules: Iterable[RuleType]) -> int:
+    fs = frozenset(r._hash for r in rules)
+    return hash(fs) if fs else 0
 
 class VersionedBDDNode:
-    __slots__ = ('var', 'low', 'high', 'hash_val', '_generation', '_migrated_to', '_last_accessed_gen', '_low_is_weak', '_high_is_weak')
-    _node_cache: OrderedDict = OrderedDict()
-    _cache_lock = threading.RLock()
-    _instance_count = 0
-    _count_lock = threading.Lock()
-    _max_cache_size = 50000
-    _current_generation = 0
-    _unique_counter = 0
-    _unique_lock = threading.Lock()
+    __slots__ = ('var', 'low', 'high', '_node_id')
 
-    def __new__(cls, var: int, low: Optional[VersionedBDDNode], high: Optional[VersionedBDDNode], generation: int = 0):
-        if low is high:
-            return low
-        
-        with cls._unique_lock:
-            cls._unique_counter += 1
-            unique_id = cls._unique_counter
-        
-        key = (var, id(low) if low else None, id(high) if high else None, generation, unique_id)
-        
-        with cls._cache_lock:
-            if key in cls._node_cache:
-                existing = cls._node_cache[key]
-                if existing._migrated_to is not None:
-                    return existing._migrated_to
-                existing._last_accessed_gen = generation
-                cls._node_cache.move_to_end(key)
-                return existing
-            
-            if cls._instance_count >= cls._max_cache_size:
-                cls._emergency_gc(generation)
-            
-            instance = super().__new__(cls)
-            cls._node_cache[key] = instance
-            instance._cache_key = key
-            
-            with cls._count_lock:
-                cls._instance_count += 1
-            
-            weakref.finalize(instance, cls._decrement_count, key)
-            return instance
-
-    @classmethod
-    def _decrement_count(cls, key):
-        with cls._count_lock:
-            cls._instance_count = max(0, cls._instance_count - 1)
-        with cls._cache_lock:
-            if key in cls._node_cache:
-                del cls._node_cache[key]
-
-    @classmethod
-    def _emergency_gc(cls, current_gen):
-        gc.collect()
-        if cls._instance_count >= cls._max_cache_size * 0.95:
-            with cls._cache_lock:
-                to_remove = [k for k, v in cls._node_cache.items() 
-                            if current_gen - v._last_accessed_gen > 2]
-                for k in to_remove:
-                    del cls._node_cache[k]
-            gc.collect()
-
-    @classmethod
-    def increment_generation(cls):
-        with cls._cache_lock:
-            cls._current_generation += 1
-            return cls._current_generation
-
-    @classmethod
-    def remove_from_cache(cls, node_id: int, generation: int):
-        with cls._cache_lock:
-            to_remove = [k for k, v in cls._node_cache.items() 
-                        if id(v) == node_id and v._generation == generation]
-            for k in to_remove:
-                del cls._node_cache[k]
-
-    def __init__(self, var: int, low: Optional[VersionedBDDNode], high: Optional[VersionedBDDNode], generation: int = 0):
-        if hasattr(self, 'var'):
-            return
+    def __init__(self, node_id: int, var: Any, low: Optional[VersionedBDDNode], high: Optional[VersionedBDDNode]) -> None:
         self.var = var
-        self._low_is_weak = False
-        self._high_is_weak = False
-        if low is not None and low._generation < generation:
-            self.low = weakref.ref(low)
-            self._low_is_weak = True
-        else:
-            self.low = low
-        if high is not None and high._generation < generation:
-            self.high = weakref.ref(high)
-            self._high_is_weak = True
-        else:
-            self.high = high
-        self.hash_val = hash((var, id(low), id(high), generation))
-        self._generation = generation
-        self._migrated_to = None
-        self._last_accessed_gen = generation
+        self.low = low
+        self.high = high
+        self._node_id = node_id
 
-    def get_low(self):
-        if self._low_is_weak:
-            ref = self.low
-            return ref() if ref is not None else None
-        return self.low
+    def __hash__(self) -> int:
+        return self._node_id
 
-    def get_high(self):
-        if self._high_is_weak:
-            ref = self.high
-            return ref() if ref is not None else None
-        return self.high
+    def __eq__(self, other: Any) -> bool:
+        return self._node_id == getattr(other, '_node_id', -3)
 
-    def mark_migrated(self, new_node: VersionedBDDNode):
-        self._migrated_to = new_node
+class BDDEngine:
+    __slots__ = ('var_map', 'var_counter', 'true_node', 'false_node',
+                 '_op_cache', '_op_cache_max', '_node_cache', '_node_cache_max',
+                 '_var_nodes', '_node_id_counter')
 
-    def __hash__(self):
-        return self.hash_val
-
-    def __eq__(self, other):
-        return self is other
-
-
-class TransactionalBDDEngine:
-    __slots__ = ('var_map', 'var_counter', 'true_node', 'false_node', '_lock', '_op_cache', '_node_count', 
-                 '_gc_threshold', '_op_cache_lock', '_var_order', '_var_order_lock', '_roots', 
-                 '_rebuild_lock', '_reordering_active', '_generation', '_transaction_active', '_txn_created_nodes')
-
-    def __init__(self, gc_threshold: int = 50000):
-        self.var_map: Dict[str, int] = {}
+    def __init__(self, node_cache_max: int = 50000, op_cache_max: int = 50000) -> None:
+        self.var_map: dict[Any, int] = {}
         self.var_counter = 0
-        self._lock = threading.Lock()
-        self._op_cache: OrderedDict = OrderedDict()
-        self._op_cache_lock = threading.RLock()
-        self._node_count = 0
-        self._gc_threshold = gc_threshold
-        self.false_node = VersionedBDDNode(-2, None, None, 0)
-        self.true_node = VersionedBDDNode(-1, None, None, 0)
-        self._var_order: List[str] = []
-        self._var_order_lock = threading.RLock()
-        self._roots = weakref.WeakSet()
-        self._rebuild_lock = threading.Lock()
-        self._reordering_active = False
-        self._generation = 0
-        self._transaction_active = False
-        self._txn_created_nodes: List[int] = []
+        self._op_cache: OrderedDict[tuple[int, int, int], VersionedBDDNode] = OrderedDict()
+        self._op_cache_max = op_cache_max
+        self._node_cache: dict[tuple[int, int, int], VersionedBDDNode] = {}
+        self._node_cache_max = node_cache_max
+        self._node_id_counter = 0
+        self.false_node = VersionedBDDNode(self._next_node_id(), -2, None, None)
+        self.true_node = VersionedBDDNode(self._next_node_id(), -1, None, None)
+        self._var_nodes: dict[int, VersionedBDDNode] = {}
+        self._cache_node(self.false_node)
+        self._cache_node(self.true_node)
 
-        with VersionedBDDNode._cache_lock:
-            VersionedBDDNode._node_cache[(-2, None, None, 0, 0)] = self.false_node
-            VersionedBDDNode._node_cache[(-1, None, None, 0, 0)] = self.true_node
-            with VersionedBDDNode._count_lock:
-                VersionedBDDNode._instance_count += 2
+    def _next_node_id(self) -> int:
+        nid = self._node_id_counter
+        self._node_id_counter += 1
+        return nid
 
-    def begin_transaction(self):
-        with self._rebuild_lock:
-            self._transaction_active = True
-            self._generation = VersionedBDDNode.increment_generation()
-            self._txn_created_nodes = []
+    def _get_cached_node(self, var: int, low_id: int, high_id: int) -> Optional[VersionedBDDNode]:
+        return self._node_cache.get((var, low_id, high_id))
 
-    def commit_transaction(self):
-        with self._rebuild_lock:
-            self._transaction_active = False
-            self._txn_created_nodes = []
-            with self._op_cache_lock:
-                self._op_cache.clear()
+    def _cache_node(self, node: Optional[VersionedBDDNode]) -> None:
+        if node is None:
+            return
+        key = (node.var, node.low._node_id if node.low else -1, node.high._node_id if node.high else -1)
+        if key not in self._node_cache:
+            if len(self._node_cache) >= self._node_cache_max:
+                raise BDDDepthExceededError(f"BDD node limit reached ({self._node_cache_max})")
+            self._node_cache[key] = node
 
-    def rollback_transaction(self):
-        with self._rebuild_lock:
-            for node_id in self._txn_created_nodes:
-                VersionedBDDNode.remove_from_cache(node_id, self._generation)
-            self._txn_created_nodes = []
-            self._transaction_active = False
-            self._generation = max(0, self._generation - 1)
-            with self._op_cache_lock:
-                self._op_cache.clear()
-
-    def get_var(self, name: str) -> int:
-        with self._lock:
-            if name not in self.var_map:
-                self.var_map[name] = self.var_counter
-                self._var_order.append(name)
-                self.var_counter += 1
-                self._node_count += 1
-            return self.var_map[name]
+    def get_var(self, name: Any) -> int:
+        if name not in self.var_map:
+            self.var_map[name] = self.var_counter
+            self.var_counter += 1
+        return self.var_map[name]
 
     def ith_var(self, i: int) -> VersionedBDDNode:
-        node = VersionedBDDNode(i, self.false_node, self.true_node, self._generation)
-        if self._transaction_active:
-            self._txn_created_nodes.append(id(node))
-        self._roots.add(node)
-        return node
+        if i not in self._var_nodes:
+            node = VersionedBDDNode(self._next_node_id(), i, self.false_node, self.true_node)
+            self._var_nodes[i] = node
+            self._cache_node(node)
+        return self._var_nodes[i]
 
-    def neg(self, node: VersionedBDDNode) -> VersionedBDDNode:
-        if node is self.true_node:
-            return self.false_node
-        if node is self.false_node:
-            return self.true_node
-        key = ('neg', id(node), self._generation)
-        with self._op_cache_lock:
-            result = self._op_cache.get(key)
-            if result is not None:
-                return result
-            low = node.get_low()
-            high = node.get_high()
-            result = VersionedBDDNode(node.var, self.neg(low), self.neg(high), self._generation)
-            if self._transaction_active:
-                self._txn_created_nodes.append(id(result))
-            self._op_cache[key] = result
-            self._roots.add(result)
-            return result
+    def neg(self, node: VersionedBDDNode, depth: int = 0) -> VersionedBDDNode:
+        if depth > MAX_BDD_DEPTH: raise BDDDepthExceededError(f"BDD recursion depth exceeded ({MAX_BDD_DEPTH})")
+        if node is self.true_node: return self.false_node
+        if node is self.false_node: return self.true_node
 
-    def apply_and(self, f: VersionedBDDNode, g: VersionedBDDNode) -> VersionedBDDNode:
-        return self._apply_op(f, g, 'and')
+        cache_key = (OP_NEG, node._node_id, -1)
+        if cache_key in self._op_cache:
+            self._op_cache.move_to_end(cache_key)
+            return self._op_cache[cache_key]
 
-    def apply_or(self, f: VersionedBDDNode, g: VersionedBDDNode) -> VersionedBDDNode:
-        return self._apply_op(f, g, 'or')
+        res = self._create_node(node.var, self.neg(node.low, depth + 1) if node.low else None,
+                                self.neg(node.high, depth + 1) if node.high else None)
+        self._op_cache[cache_key] = res
+        if len(self._op_cache) > self._op_cache_max:
+            self._op_cache.popitem(last=False)
+        return res
 
-    def apply_implies(self, f: VersionedBDDNode, g: VersionedBDDNode) -> VersionedBDDNode:
-        return self.apply_or(self.neg(f), g)
+    def apply_and(self, f: VersionedBDDNode, g: VersionedBDDNode, depth: int = 0) -> VersionedBDDNode:
+        return self._apply_op(f, g, OP_AND, depth)
 
-    def _apply_op(self, f: VersionedBDDNode, g: VersionedBDDNode, op: str) -> VersionedBDDNode:
+    def apply_or(self, f: VersionedBDDNode, g: VersionedBDDNode, depth: int = 0) -> VersionedBDDNode:
+        return self._apply_op(f, g, OP_OR, depth)
+
+    def apply_implies(self, f: VersionedBDDNode, g: VersionedBDDNode, depth: int = 0) -> VersionedBDDNode:
+        return self.apply_or(self.neg(f, depth), g, depth)
+
+    def _apply_op(self, f: VersionedBDDNode, g: VersionedBDDNode, op: int, depth: int = 0) -> VersionedBDDNode:
+        if depth > MAX_BDD_DEPTH: raise BDDDepthExceededError(f"BDD recursion depth exceeded ({MAX_BDD_DEPTH})")
+
         if f is self.false_node or g is self.false_node:
-            return self.false_node if op == 'and' else (g if f is self.false_node else f)
+            return self.false_node if op == OP_AND else (g if f is self.false_node else f)
         if f is self.true_node:
-            return g if op == 'and' else self.true_node
+            return g if op == OP_AND else self.true_node
         if g is self.true_node:
-            return f if op == 'and' else self.true_node
+            return f if op == OP_AND else self.true_node
         if f is g:
             return f
 
-        key = (op, min(id(f), id(g)), max(id(f), id(g)), self._generation)
-        with self._op_cache_lock:
-            result = self._op_cache.get(key)
-            if result is not None:
-                return result
+        cache_key = (op, min(f._node_id, g._node_id), max(f._node_id, g._node_id))
+        if cache_key in self._op_cache:
+            self._op_cache.move_to_end(cache_key)
+            return self._op_cache[cache_key]
 
-            f_low, f_high = f.get_low(), f.get_high()
-            g_low, g_high = g.get_low(), g.get_high()
-            
-            if f.var == g.var:
-                result = VersionedBDDNode(f.var, 
-                              self._apply_op(f_low, g_low, op),
-                              self._apply_op(f_high, g_high, op), self._generation)
-            elif f.var < g.var:
-                result = VersionedBDDNode(f.var,
-                              self._apply_op(f_low, g, op),
-                              self._apply_op(f_high, g, op), self._generation)
-            else:
-                result = VersionedBDDNode(g.var,
-                              self._apply_op(f, g_low, op),
-                              self._apply_op(f, g_high, op), self._generation)
-
-            if self._transaction_active:
-                self._txn_created_nodes.append(id(result))
-            self._op_cache[key] = result
-            self._roots.add(result)
-            return result
-
-    def sat_count(self, node: VersionedBDDNode, n_vars: int, memo: Optional[Dict[int, int]] = None) -> int:
-        if memo is None:
-            memo = {}
-        node_id = id(node)
-        if node_id in memo:
-            return memo[node_id]
-        if node is self.false_node:
-            return 0
-        if node is self.true_node:
-            return 1 << n_vars if n_vars < 63 else float('inf')
-        low = node.get_low()
-        high = node.get_high()
-        if low is None or high is None:
-            return 0
-        count_low = self.sat_count(low, n_vars - 1, memo)
-        count_high = self.sat_count(high, n_vars - 1, memo)
-        if isinstance(count_low, float) or isinstance(count_high, float):
-            result = float('inf')
+        if f.var == g.var:
+            res = self._create_node(f.var, self._apply_op(f.low, g.low, op, depth + 1),
+                                    self._apply_op(f.high, g.high, op, depth + 1))
+        elif f.var < g.var:
+            res = self._create_node(f.var, self._apply_op(f.low, g, op, depth + 1),
+                                    self._apply_op(f.high, g, op, depth + 1))
         else:
-            result = count_low + count_high
-        memo[node_id] = result
-        return result
+            res = self._create_node(g.var, self._apply_op(f, g.low, op, depth + 1),
+                                    self._apply_op(f, g.high, op, depth + 1))
+
+        self._op_cache[cache_key] = res
+        if len(self._op_cache) > self._op_cache_max:
+            self._op_cache.popitem(last=False)
+        return res
+
+    def _create_node(self, var: int, low: Optional[VersionedBDDNode], high: Optional[VersionedBDDNode]) -> VersionedBDDNode:
+        if low is high and low is not None:
+            return low
+        cached = self._get_cached_node(var, low._node_id if low else -1, high._node_id if high else -1)
+        if cached:
+            return cached
+        node = VersionedBDDNode(self._next_node_id(), var, low, high)
+        self._cache_node(node)
+        return node
+
+    def sat_ratio(self, node: VersionedBDDNode) -> float:
+        if node is self.false_node: return 0.0
+        if node is self.true_node: return 1.0
+        cache: dict[VersionedBDDNode, float] = {}
+
+        def _ratio(n: Optional[VersionedBDDNode], depth: int) -> float:
+            if n is None: return 0.0
+            if depth > MAX_BDD_DEPTH: raise BDDDepthExceededError(f"BDD sat_ratio depth exceeded ({MAX_BDD_DEPTH})")
+            if n is self.false_node: return 0.0
+            if n is self.true_node: return 1.0
+            if n in cache: return cache[n]
+            res = 0.5 * _ratio(n.low, depth + 1) + 0.5 * _ratio(n.high, depth + 1)
+            cache[n] = res
+            return res
+
+        return _ratio(node, 0)
 
     def implies(self, f: VersionedBDDNode, g: VersionedBDDNode) -> bool:
-        result = self.apply_implies(f, g)
-        return result is self.true_node
+        return self.apply_implies(f, g) is self.true_node
 
-    def equivalent(self, f: VersionedBDDNode, g: VersionedBDDNode) -> bool:
-        return self.implies(f, g) and self.implies(g, f)
+    def clear(self) -> None:
+        self._op_cache.clear()
+        self._node_cache.clear()
+        self._var_nodes.clear()
+        self.var_map.clear()
+        self.var_counter = 0
+        self._node_id_counter = 0
+        self.false_node = VersionedBDDNode(self._next_node_id(), -2, None, None)
+        self.true_node = VersionedBDDNode(self._next_node_id(), -1, None, None)
+        self._cache_node(self.false_node)
+        self._cache_node(self.true_node)
+
+
+def split_ip_by_version(rules: list[IPCIDRRule]) -> tuple[list[IPCIDRRule], list[IPCIDRRule]]:
+    return [r for r in rules if r.version == 4], [r for r in rules if r.version == 6]
+
+
+def split_networks_by_version(nets: list[IPNetworkType]) -> tuple[list[IPNetworkType], list[IPNetworkType]]:
+    return [n for n in nets if n.version == 4], [n for n in nets if n.version == 6]
 
 
 class BDDRuleVerifier:
-    __slots__ = ('engine', '_domain_vars', '_ip_vars', '_lock', '_encoded_rules')
-    def __init__(self, engine: TransactionalBDDEngine):
-        self.engine = engine
-        self._domain_vars: Dict[str, VersionedBDDNode] = {}
-        self._ip_vars: Dict[str, VersionedBDDNode] = {}
-        self._lock = threading.RLock()
-        self._encoded_rules = weakref.WeakSet()
+    __slots__ = ('engine', '_ip_vars', '_max_cache_size')
 
-    def encode_domain_rule(self, rule: DomainRule) -> VersionedBDDNode:
-        with self._lock:
-            parts = rule.normalized.lstrip('*.').split('.')
-            result = self.engine.true_node
-            
-            for i, part in enumerate(reversed(parts)):
-                if not part:
-                    continue
-                var_name = f"label_{i}_{part}"
-                if var_name not in self._domain_vars:
-                    var_idx = self.engine.get_var(var_name)
-                    self._domain_vars[var_name] = self.engine.ith_var(var_idx)
-                node = self._domain_vars[var_name]
-                result = self.engine.apply_and(result, node)
-            
-            if rule.match_type == MatchType.WILDCARD:
-                wildcard_var = f"wildcard_{rule.normalized}"
-                if wildcard_var not in self._domain_vars:
-                    var_idx = self.engine.get_var(wildcard_var)
-                    self._domain_vars[wildcard_var] = self.engine.ith_var(var_idx)
-                result = self.engine.apply_and(result, self._domain_vars[wildcard_var])
-            
-            self._encoded_rules.add(result)
-            return result
+    def __init__(self, engine: BDDEngine, max_cache_size: int = 10000) -> None:
+        self.engine = engine
+        self._ip_vars: OrderedDict[tuple[int, int], VersionedBDDNode] = OrderedDict()
+        self._max_cache_size = max_cache_size
+
+    def _get_ip_var(self, ver: int, bp: int) -> VersionedBDDNode:
+        key = (ver, bp)
+        if key in self._ip_vars:
+            self._ip_vars.move_to_end(key)
+            return self._ip_vars[key]
+        node = self.engine.ith_var(self.engine.get_var(('ip', ver, bp)))
+        self._ip_vars[key] = node
+        if len(self._ip_vars) > self._max_cache_size:
+            self._ip_vars.popitem(last=False)
+        return node
+
+    def _preallocate_vars(self, rules: list[IPCIDRRule]) -> None:
+        for r in rules:
+            for bp in range(r.prefixlen):
+                self._get_ip_var(r.version, bp)
 
     def encode_ip_rule(self, rule: IPCIDRRule) -> VersionedBDDNode:
-        with self._lock:
-            addr = int(rule.network.network_address)
-            prefix = rule.network.prefixlen
-            version = rule.network.version
-            width = 32 if version == 4 else 128
-            
-            if prefix == 0:
-                return self.engine.true_node
-            
-            var_name = f"ip_{version}_{addr}_{prefix}"
+        addr = rule.start_int
+        plen = rule.prefixlen
+        ver = rule.version
+        width = 32 if ver == 4 else 128
+        if plen == 0:
+            return self.engine.true_node
+        res = self.engine.true_node
+        for bp in range(min(plen, width)):
+            bit = (addr >> (width - 1 - bp)) & 1
+            bv_node = self._get_ip_var(ver, bp)
+            if bit == 0:
+                bv_node = self.engine.neg(bv_node)
+            res = self.engine.apply_and(res, bv_node)
+        return res
 
-            if var_name not in self._ip_vars:
-                result = self.engine.true_node
-                for bit_pos in range(prefix):
-                    bit_val = (addr >> (width - 1 - bit_pos)) & 1
-                    bit_var_name = f"ip_bit_{version}_{bit_pos}"
-                    bit_idx = self.engine.get_var(bit_var_name)
-                    bit_node = self.engine.ith_var(bit_idx)
-                    if bit_val == 0:
-                        bit_node = self.engine.neg(bit_node)
-                    result = self.engine.apply_and(result, bit_node)
-                self._ip_vars[var_name] = result
-
-            self._encoded_rules.add(self._ip_vars[var_name])
-            return self._ip_vars[var_name]
-
-    def build_rule_set_expression(self, rules: List[RuleType]) -> VersionedBDDNode:
-        allow_rules = [r for r in rules if not r.is_exclusion]
-        exclude_rules = [r for r in rules if r.is_exclusion]
+    def build_rule_set_expression(self, allow_rules: list[IPCIDRRule], deny_rules: list[IPCIDRRule]) -> VersionedBDDNode:
+        if not allow_rules and not deny_rules:
+            return self.engine.false_node
+        self._preallocate_vars(allow_rules + deny_rules)
 
         allow_bdd = self.engine.false_node
-        for rule in allow_rules:
-            if isinstance(rule, DomainRule):
-                rule_bdd = self.encode_domain_rule(rule)
-            elif isinstance(rule, IPCIDRRule):
-                rule_bdd = self.encode_ip_rule(rule)
-            else:
-                continue
-            allow_bdd = self.engine.apply_or(allow_bdd, rule_bdd)
+        for r in allow_rules:
+            allow_bdd = self.engine.apply_or(allow_bdd, self.encode_ip_rule(r))
 
-        if not exclude_rules:
+        if not deny_rules:
             return allow_bdd
 
-        exclude_bdd = self.engine.false_node
-        for rule in exclude_rules:
-            if isinstance(rule, DomainRule):
-                rule_bdd = self.encode_domain_rule(rule)
-            elif isinstance(rule, IPCIDRRule):
-                rule_bdd = self.encode_ip_rule(rule)
-            else:
-                continue
-            exclude_bdd = self.engine.apply_or(exclude_bdd, rule_bdd)
+        deny_bdd = self.engine.false_node
+        for r in deny_rules:
+            deny_bdd = self.engine.apply_or(deny_bdd, self.encode_ip_rule(r))
 
-        exclude_neg = self.engine.neg(exclude_bdd)
-        return self.engine.apply_and(allow_bdd, exclude_neg)
+        return self.engine.apply_and(allow_bdd, self.engine.neg(deny_bdd))
 
-    def check_equivalence(self, rules_a: List[RuleType], rules_b: List[RuleType]) -> bool:
-        bdd_a = self.build_rule_set_expression(rules_a)
-        bdd_b = self.build_rule_set_expression(rules_b)
-        return self.engine.equivalent(bdd_a, bdd_b)
+    def verify_subset_strict(self, p_allow: list[IPCIDRRule], p_deny: list[IPCIDRRule], c_allow: list[IPCIDRRule]) -> tuple[bool, float]:
+        if not c_allow: return True, 1.0
 
-    def verify_subset_strict(self, parent_rules: List[RuleType], child_rules: List[RuleType]) -> Tuple[bool, float]:
-        if not parent_rules or not child_rules:
-            return True, 1.0
+        def _verify_ver(p_v_allow: list[IPCIDRRule], p_v_deny: list[IPCIDRRule], c_v_allow: list[IPCIDRRule]) -> tuple[bool, float]:
+            if not c_v_allow: return True, 1.0
+            if not p_v_allow: return False, 0.0
+            try:
+                p_bdd = self.build_rule_set_expression(p_v_allow, p_v_deny)
+                c_bdd = self.build_rule_set_expression(c_v_allow, [])
+                if self.engine.implies(c_bdd, p_bdd): return True, 1.0
+                c_ratio = self.engine.sat_ratio(c_bdd)
+                if c_ratio == 0.0: return True, 1.0
+                diff = self.engine.apply_and(c_bdd, self.engine.neg(p_bdd))
+                d_ratio = self.engine.sat_ratio(diff)
+                if d_ratio == 0.0: return True, 1.0
+                return False, max(0.0, min(1.0, 1.0 - (d_ratio / c_ratio)))
+            except BDDDepthExceededError as e:
+                logger.error(f"BDD verification depth exceeded: {e}")
+                return False, 0.0
 
-        self.engine.begin_transaction()
-        try:
-            parent_bdd = self.build_rule_set_expression(parent_rules)
-            child_bdd = self.build_rule_set_expression(child_rules)
+        v4_p_a, v6_p_a = split_ip_by_version(p_allow)
+        v4_p_d, v6_p_d = split_ip_by_version(p_deny)
+        v4_c_a, v6_c_a = split_ip_by_version(c_allow)
 
-            is_subset = self.engine.implies(child_bdd, parent_bdd)
-            if is_subset:
-                return True, 1.0
+        ok_v4, conf_v4 = _verify_ver(v4_p_a, v4_p_d, v4_c_a)
+        ok_v6, conf_v6 = _verify_ver(v6_p_a, v6_p_d, v6_c_a)
 
-            sat_count_parent = self.engine.sat_count(parent_bdd, len(self.engine.var_map))
-            sat_count_child = self.engine.sat_count(child_bdd, len(self.engine.var_map))
+        conf = min(conf_v4 if v4_c_a and not ok_v4 else 1.0, conf_v6 if v6_c_a and not ok_v6 else 1.0)
+        return (ok_v4 and ok_v6), conf
 
-            if sat_count_child == 0 or isinstance(sat_count_child, float):
-                return True, 1.0
+    def verify_deny_subset(self, p_deny: list[IPCIDRRule], c_deny: list[IPCIDRRule]) -> tuple[bool, float]:
+        if not c_deny: return True, 1.0
 
-            intersection = self.engine.apply_and(child_bdd, self.engine.neg(parent_bdd))
-            sat_count_diff = self.engine.sat_count(intersection, len(self.engine.var_map))
+        def _verify_ver(p_v_deny: list[IPCIDRRule], c_v_deny: list[IPCIDRRule]) -> tuple[bool, float]:
+            if not c_v_deny: return True, 1.0
+            if not p_v_deny: return False, 0.0
+            try:
+                parent_bdd = self.build_rule_set_expression(p_v_deny, [])
+                child_bdd = self.build_rule_set_expression(c_v_deny, [])
+                diff = self.engine.apply_and(child_bdd, self.engine.neg(parent_bdd))
+                if diff is self.engine.false_node: return True, 1.0
+                c_ratio = self.engine.sat_ratio(child_bdd)
+                if c_ratio == 0.0: return True, 1.0
+                d_ratio = self.engine.sat_ratio(diff)
+                return False, max(0.0, min(1.0, 1.0 - (d_ratio / c_ratio)))
+            except BDDDepthExceededError as e:
+                logger.error(f"BDD deny verification depth exceeded: {e}")
+                return False, 0.0
 
-            if sat_count_diff == 0:
-                return True, 1.0
+        v4_p_d, v6_p_d = split_ip_by_version(p_deny)
+        v4_c_d, v6_c_d = split_ip_by_version(c_deny)
 
-            if isinstance(sat_count_diff, float) or sat_count_child == 0:
-                confidence = 0.0
-            else:
-                confidence = 1.0 - (sat_count_diff / sat_count_child)
-            return False, max(0.0, min(1.0, confidence))
-        finally:
-            self.engine.commit_transaction()
+        ok_v4, conf_v4 = _verify_ver(v4_p_d, v4_c_d)
+        ok_v6, conf_v6 = _verify_ver(v6_p_d, v6_c_d)
 
+        conf = min(conf_v4 if v4_c_d and not ok_v4 else 1.0, conf_v6 if v6_c_d and not ok_v6 else 1.0)
+        return (ok_v4 and ok_v6), conf
+
+    def clear(self) -> None:
+        self._ip_vars.clear()
+        self.engine.clear()
 
 class SMTVerifier:
-    __slots__ = ('enabled', '_z3_available', '_solver_cache', '_config', '_timeout_stages', 
-                 '_process_pool', '_pool_size', '_stop_event', '_cache_lock', '_max_cache_size', '_initialized')
+    __slots__ = ('enabled', '_z3_available', '_solver_cache', '_config',
+                 '_timeout_stages', '_cache_lock', '_max_cache_size', '_solver_pool')
+    _SMT_CACHE_VERSION = 15
 
-    def __init__(self, config: MergeConfig = DEFAULT_CONFIG):
+    def __init__(self, config: MergeConfig) -> None:
         self._config = config
         self._z3_available = HAS_Z3 and config.enable_smt_verification
         self.enabled = self._z3_available
-        self._solver_cache: OrderedDict = OrderedDict()
+        self._solver_cache: OrderedDict[tuple[int, int, int], tuple[bool, float, str]] = OrderedDict()
         self._cache_lock = threading.RLock()
-        self._max_cache_size = 1000
-        self._timeout_stages = config.smt_progressive_timeout or (100, 500, 2000, 5000)
-        self._pool_size = config.smt_process_pool_size
-        self._process_pool = None
-        self._stop_event = None
-        self._initialized = False
+        self._max_cache_size = config.max_bdd_var_cache_size
+        self._timeout_stages = config.smt_progressive_timeout
+        self._solver_pool = threading.local()
 
-    def _ensure_pool(self):
-        if self._initialized:
-            return
-        if self._z3_available and self._pool_size > 0 and self._process_pool is None:
-            self._stop_event = multiprocessing.Event()
-            self._process_pool = multiprocessing.Pool(processes=self._pool_size, maxtasksperchild=100)
-            self._initialized = True
+    def _get_z3_context(self) -> Any:
+        if not hasattr(self._solver_pool, 'ctx'):
+            self._solver_pool.ctx = z3.Context()
+        return getattr(self._solver_pool, 'ctx')
 
-    def __enter__(self):
-        self._ensure_pool()
-        return self
+    def _get_solver(self) -> Any:
+        if not hasattr(self._solver_pool, 'solver'):
+            self._solver_pool.solver = z3.Solver(ctx=self._get_z3_context())
+        return getattr(self._solver_pool, 'solver')
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+    def _reset_solver(self) -> None:
+        if hasattr(self._solver_pool, 'solver'):
+            delattr(self._solver_pool, 'solver')
+        if hasattr(self._solver_pool, 'ctx'):
+            delattr(self._solver_pool, 'ctx')
 
-    def close(self):
-        if self._stop_event:
-            self._stop_event.set()
-        if self._process_pool:
-            self._process_pool.terminate()
-            self._process_pool.join()
-            self._process_pool = None
-        self._initialized = False
+    def clear_thread_state(self) -> None:
+        """清除当前线程的 Z3 上下文和求解器，防止内存泄漏"""
+        self._reset_solver()
 
-    def verify_subset(self, parent_rules: List[DomainRule], child_rules: List[DomainRule], 
-                     monitor: Optional[ResourceMonitor] = None) -> Tuple[bool, float, int, str]:
-        if not self.enabled:
-            return False, 0.0, 0, "disabled"
-        if not parent_rules or not child_rules:
-            return True, 1.0, 0, "trivial"
-
-        self._ensure_pool()
-
+    def _verify_with_timeouts(self, s: Any, child_expr: Any, parent_expr: Any, label: str) -> tuple[bool, float, str]:
+        ctx = self._get_z3_context()
+        solver_broken = False
         try:
-            key = (tuple(sorted(r.normalized for r in parent_rules)), 
-                   tuple(sorted(r.normalized for r in child_rules)))
-
-            with self._cache_lock:
-                if key in self._solver_cache:
-                    return self._solver_cache[key]
-
-            parent_strs = [f"dom:{r.normalized}" for r in parent_rules if r.match_type != MatchType.WILDCARD]
-            child_strs = [f"dom:{r.normalized}" for r in child_rules if r.match_type != MatchType.WILDCARD]
-
-            if not parent_strs or not child_strs:
-                return True, 1.0, 0, "trivial"
-
-            for timeout_ms in self._timeout_stages:
-                if monitor and monitor.should_degrade(3):
-                    return False, 0.0, 0, "resource_pressure"
-
-                if self._stop_event and self._stop_event.is_set():
-                    return False, 0.0, 0, "shutdown"
-
-                if self._pool_size == 0:
-                    result = self._verify_impl(parent_strs, child_strs, timeout_ms)
-                else:
-                    try:
-                        future = self._process_pool.apply_async(
-                            SMTVerifier._verify_worker_static, 
-                            (parent_strs, child_strs, timeout_ms)
-                        )
-                        result = future.get(timeout=timeout_ms/1000.0 + 1.0)
-                    except multiprocessing.TimeoutError:
-                        continue
-                    except Exception as e:
-                        logger.warning(f"SMT pool error: {e}")
-                        result = (False, 0.0, timeout_ms, f"pool_error:{str(e)}")
-
-                with self._cache_lock:
-                    if len(self._solver_cache) >= self._max_cache_size:
-                        self._solver_cache.popitem(last=False)
-                    self._solver_cache[key] = result
-                return result
-
-            final_result = (False, 0.5, 0, "unknown")
-            with self._cache_lock:
-                if len(self._solver_cache) >= self._max_cache_size:
-                    self._solver_cache.popitem(last=False)
-                self._solver_cache[key] = final_result
-            return final_result
+            for timeout in self._timeout_stages:
+                s.push()
+                s.set("timeout", timeout)
+                s.add(child_expr)
+                s.add(z3.Not(parent_expr, ctx=ctx))
+                res = s.check()
+                s.pop()
+                if res == z3.unsat:
+                    return True, 1.0, f"{label}unsat"
+                elif res == z3.sat:
+                    return False, 0.0, f"{label}sat"
+            return False, 0.0, f"{label}unknown"
         except Exception as e:
-            logger.warning(f"SMT verification failed: {e}")
-            return False, 0.0, 0, f"exception:{str(e)}"
+            solver_broken = True
+            logger.error(f"SMT {label} error: {e}")
+            return False, 0.0, f"{label}z3_error"
+        finally:
+            if solver_broken:
+                self._reset_solver()
 
-    def _verify_impl(self, parent_rules_str, child_rules_str, timeout_ms):
-        return SMTVerifier._verify_worker_static(parent_rules_str, child_rules_str, timeout_ms)
+    def _build_domain_expr(self, rules: list[DomainRule], var_name: str = 'x_domain') -> Optional[Any]:
+        if not rules: return None
+        ctx = self._get_z3_context()
+        x_domain = z3.String(var_name, ctx=ctx)
+        terms = []
+        for r in rules:
+            if r.match_type == MatchType.EXACT:
+                terms.append(x_domain == z3.StringVal(r.normalized, ctx=ctx))
+            elif r.match_type == MatchType.SUFFIX:
+                terms.append(z3.Or(
+                    x_domain == z3.StringVal(r.normalized, ctx=ctx),
+                    z3.And(z3.Length(x_domain) > len(r.normalized),
+                           z3.SuffixOf(z3.StringVal('.' + r.normalized, ctx=ctx), x_domain), ctx=ctx), ctx=ctx))
+            elif r.match_type == MatchType.WILDCARD:
+                terms.append(z3.And(z3.Length(x_domain) > len(r.normalized) + 1,
+                                    z3.SuffixOf(z3.StringVal('.' + r.normalized, ctx=ctx), x_domain), ctx=ctx))
+        if not terms: return None
+        return z3.Or(*terms, ctx=ctx) if len(terms) > 1 else terms[0]
+
+    def _build_ip_expr(self, rules: list[IPCIDRRule], version: int, var_name: str) -> Optional[Any]:
+        if not rules: return None
+        ctx = self._get_z3_context()
+        width = 32 if version == 4 else 128
+        x_ip = z3.BitVec(var_name, width, ctx=ctx)
+        terms = []
+        for rule in rules:
+            addr, plen = rule.start_int, rule.prefixlen
+            if plen == 0: return z3.BoolVal(True, ctx=ctx)
+            shifted = z3.LShR(x_ip, width - plen)
+            target = addr >> (width - plen)
+            terms.append(shifted == target)
+        return z3.Or(*terms, ctx=ctx) if terms else None
+
+    def _build_parent_expr(self, allow_expr: Optional[Any], deny_expr: Optional[Any], ctx: Any) -> Any:
+        if allow_expr is None:
+            return z3.BoolVal(False, ctx=ctx)
+        elif deny_expr is None:
+            return allow_expr
+        return z3.And(allow_expr, z3.Not(deny_expr, ctx=ctx), ctx=ctx)
+
+    def verify_allow_subset(self,
+                            p_dom_allow: list[DomainRule], p_dom_deny: list[DomainRule], c_dom_allow: list[DomainRule],
+                            p_ip_allow: list[IPCIDRRule], p_ip_deny: list[IPCIDRRule], c_ip_allow: list[IPCIDRRule],
+                            parent_digest: int) -> tuple[bool, float, str]:
+        if not self.enabled: return False, 0.0, "smt_disabled"
+        if not c_dom_allow and not c_ip_allow: return True, 1.0, "trivial"
+
+        c_digest = rules_digest(itertools.chain(c_dom_allow, c_ip_allow))
+        key = (self._SMT_CACHE_VERSION, parent_digest, c_digest)
+
+        with self._cache_lock:
+            if key in self._solver_cache:
+                self._solver_cache.move_to_end(key)
+                return self._solver_cache[key]
+
+        domain_ok, domain_conf, domain_msg = self._verify_domain_allow_subset(p_dom_allow, p_dom_deny, c_dom_allow)
+        ip_ok, ip_conf, ip_msg = self._verify_ip_allow_subset(p_ip_allow, p_ip_deny, c_ip_allow)
+
+        overall_ok = (not c_dom_allow or domain_ok) and (not c_ip_allow or ip_ok)
+        conf = min(domain_conf if c_dom_allow and not domain_ok else 1.0, ip_conf if c_ip_allow and not ip_ok else 1.0)
+        res = (overall_ok, conf, f"domain:{domain_msg},ip:{ip_msg}")
+
+        with self._cache_lock:
+            self._solver_cache[key] = res
+            if len(self._solver_cache) > self._max_cache_size:
+                self._solver_cache.popitem(last=False)
+
+        if not overall_ok and self._config.smt_unknown_default and ("unknown" in domain_msg or "unknown" in ip_msg):
+            return True, 0.5, "unknown"
+        return res
+
+    def _verify_domain_allow_subset(self, p_allow: list[DomainRule], p_deny: list[DomainRule], c_allow: list[DomainRule]) -> tuple[bool, float, str]:
+        if not c_allow: return True, 1.0, "trivial"
+        s, ctx = self._get_solver(), self._get_z3_context()
+        child_expr = self._build_domain_expr(c_allow, 'x_domain')
+        if child_expr is None: return True, 1.0, "trivial"
+        
+        parent_expr = self._build_parent_expr(
+            self._build_domain_expr(p_allow, 'x_domain'),
+            self._build_domain_expr(p_deny, 'x_domain'),
+            ctx
+        )
+        return self._verify_with_timeouts(s, child_expr, parent_expr, "")
+
+    def _verify_ip_version_allow_subset(self, p_allow: list[IPCIDRRule], p_deny: list[IPCIDRRule], c_allow: list[IPCIDRRule], version: int) -> tuple[bool, float, str]:
+        if not c_allow: return True, 1.0, f"v{version}_trivial"
+        s, ctx = self._get_solver(), self._get_z3_context()
+        child_expr = self._build_ip_expr(c_allow, version, f'x_ipv{version}')
+        if child_expr is None: return True, 1.0, f"v{version}_trivial"
+        
+        parent_expr = self._build_parent_expr(
+            self._build_ip_expr(p_allow, version, f'x_ipv{version}'),
+            self._build_ip_expr(p_deny, version, f'x_ipv{version}'),
+            ctx
+        )
+        return self._verify_with_timeouts(s, child_expr, parent_expr, f"v{version}_")
+
+    def _verify_ip_allow_subset(self, p_allow: list[IPCIDRRule], p_deny: list[IPCIDRRule], c_allow: list[IPCIDRRule]) -> tuple[bool, float, str]:
+        if not c_allow: return True, 1.0, "trivial,trivial"
+        v4_p_a, v6_p_a = split_ip_by_version(p_allow)
+        v4_p_d, v6_p_d = split_ip_by_version(p_deny)
+        v4_c_a, v6_c_a = split_ip_by_version(c_allow)
+
+        v4_ok, v4_conf, v4_msg = self._verify_ip_version_allow_subset(v4_p_a, v4_p_d, v4_c_a, 4)
+        v6_ok, v6_conf, v6_msg = self._verify_ip_version_allow_subset(v6_p_a, v6_p_d, v6_c_a, 6)
+        return (v4_ok and v6_ok), min(v4_conf, v6_conf), f"{v4_msg},{v6_msg}"
+
+    def verify_deny_subset(self, p_dom_deny: list[DomainRule], c_dom_deny: list[DomainRule], p_ip_deny: list[IPCIDRRule], c_ip_deny: list[IPCIDRRule], parent_digest: int) -> tuple[bool, float, str]:
+        if not self.enabled: return False, 0.0, "smt_disabled"
+        if not c_dom_deny and not c_ip_deny: return True, 1.0, "trivial"
+
+        c_digest = rules_digest(itertools.chain(c_dom_deny, c_ip_deny))
+        key = (self._SMT_CACHE_VERSION, parent_digest, c_digest)
+
+        with self._cache_lock:
+            if key in self._solver_cache:
+                self._solver_cache.move_to_end(key)
+                return self._solver_cache[key]
+
+        domain_ok, domain_conf, domain_msg = self._verify_domain_deny_subset(p_dom_deny, c_dom_deny)
+        ip_ok, ip_conf, ip_msg = self._verify_ip_deny_subset(p_ip_deny, c_ip_deny)
+
+        overall_ok = (not c_dom_deny or domain_ok) and (not c_ip_deny or ip_ok)
+        conf = min(domain_conf if c_dom_deny and not domain_ok else 1.0, ip_conf if c_ip_deny and not ip_ok else 1.0)
+        res = (overall_ok, conf, f"domain:{domain_msg},ip:{ip_msg}")
+
+        with self._cache_lock:
+            self._solver_cache[key] = res
+            if len(self._solver_cache) > self._max_cache_size:
+                self._solver_cache.popitem(last=False)
+
+        if not overall_ok and self._config.smt_unknown_default and ("unknown" in domain_msg or "unknown" in ip_msg):
+            return True, 0.5, "unknown"
+        return res
+
+    def _verify_domain_deny_subset(self, p_deny: list[DomainRule], c_deny: list[DomainRule]) -> tuple[bool, float, str]:
+        if not c_deny: return True, 1.0, "trivial"
+        s, ctx = self._get_solver(), self._get_z3_context()
+        child_expr = self._build_domain_expr(c_deny, 'x_domain_deny')
+        if child_expr is None: return True, 1.0, "trivial"
+        parent_expr = self._build_domain_expr(p_deny, 'x_domain_deny') or z3.BoolVal(False, ctx=ctx)
+        return self._verify_with_timeouts(s, child_expr, parent_expr, "")
+
+    def _verify_ip_version_deny_subset(self, p_deny: list[IPCIDRRule], c_deny: list[IPCIDRRule], version: int) -> tuple[bool, float, str]:
+        if not c_deny: return True, 1.0, f"v{version}_trivial"
+        s, ctx = self._get_solver(), self._get_z3_context()
+        child_expr = self._build_ip_expr(c_deny, version, f'x_ipv{version}')
+        if child_expr is None: return True, 1.0, f"v{version}_trivial"
+        parent_expr = self._build_ip_expr(p_deny, version, f'x_ipv{version}') or z3.BoolVal(False, ctx=ctx)
+        return self._verify_with_timeouts(s, child_expr, parent_expr, f"v{version}_")
+
+    def _verify_ip_deny_subset(self, p_deny: list[IPCIDRRule], c_deny: list[IPCIDRRule]) -> tuple[bool, float, str]:
+        if not c_deny: return True, 1.0, "trivial,trivial"
+        v4_p_d, v6_p_d = split_ip_by_version(p_deny)
+        v4_c_d, v6_c_d = split_ip_by_version(c_deny)
+
+        v4_ok, v4_conf, v4_msg = self._verify_ip_version_deny_subset(v4_p_d, v4_c_d, 4)
+        v6_ok, v6_conf, v6_msg = self._verify_ip_version_deny_subset(v6_p_d, v6_c_d, 6)
+        return (v4_ok and v6_ok), min(v4_conf, v6_conf), f"{v4_msg},{v6_msg}"
+
+class CoverageChecker:
+    __slots__ = ('_exact_domains', '_wildcard_domains', '_suffix_domains',
+                 '_ipv4_allow', '_ipv4_deny', '_ipv6_allow', '_ipv6_deny',
+                 '_ipv4_allow_starts', '_ipv4_deny_starts', '_ipv6_allow_starts', '_ipv6_deny_starts')
+
+    def __init__(self, parent_rules: Iterable[RuleType]) -> None:
+        self._exact_domains = set()
+        self._wildcard_domains = set()
+        self._suffix_domains = set()
+
+        ipv4_allow_nets, ipv4_deny_nets = [], []
+        ipv6_allow_nets, ipv6_deny_nets = [], []
+
+        for r in parent_rules:
+            if isinstance(r, DomainRule):
+                key = (r.normalized, r.is_exclusion)
+                if r.match_type == MatchType.EXACT:
+                    self._exact_domains.add(key)
+                elif r.match_type == MatchType.WILDCARD:
+                    self._wildcard_domains.add(key)
+                elif r.match_type == MatchType.SUFFIX:
+                    self._suffix_domains.add(key)
+            else:
+                if r.version == 4:
+                    (ipv4_deny_nets if r.is_exclusion else ipv4_allow_nets).append(r.network)
+                else:
+                    (ipv6_deny_nets if r.is_exclusion else ipv6_allow_nets).append(r.network)
+
+        self._ipv4_allow = self._collapse_networks(ipv4_allow_nets)
+        self._ipv4_deny = self._collapse_networks(ipv4_deny_nets)
+        self._ipv6_allow = self._collapse_networks(ipv6_allow_nets)
+        self._ipv6_deny = self._collapse_networks(ipv6_deny_nets)
+
+        self._ipv4_allow_starts = [start for start, _ in self._ipv4_allow]
+        self._ipv4_deny_starts = [start for start, _ in self._ipv4_deny]
+        self._ipv6_allow_starts = [start for start, _ in self._ipv6_allow]
+        self._ipv6_deny_starts = [start for start, _ in self._ipv6_deny]
 
     @staticmethod
-    def _verify_worker_static(parent_rules_str, child_rules_str, timeout_ms):
-        if not HAS_Z3:
-            return False, 0.0, timeout_ms, "z3_unavailable"
+    def _collapse_networks(nets: list[IPNetworkType]) -> list[tuple[int, int]]:
+        if not nets: return []
+        return sorted((int(net.network_address), int(net.broadcast_address)) for net in ipaddress.collapse_addresses(nets))
 
-        result_container = [None]
-        
-        def target():
-            try:
-                s = z3.Solver()
-                x = z3.String('x')
+    def _domain_covered(self, r: DomainRule) -> bool:
+        key = (r.normalized, r.is_exclusion)
+        if r.match_type == MatchType.EXACT:
+            if key in self._exact_domains or key in self._suffix_domains: return True
+        elif r.match_type == MatchType.WILDCARD:
+            if key in self._wildcard_domains or key in self._suffix_domains: return True
+        elif r.match_type == MatchType.SUFFIX:
+            if key in self._suffix_domains: return True
 
-                parent_exprs = []
-                for rule_str in parent_rules_str:
-                    parts = rule_str.split(':', 1)
-                    if len(parts) == 2:
-                        parent_exprs.append(z3.Contains(x, z3.StringVal(parts[1])))
+        parts = r.normalized.split('.')
+        for i in range(1, len(parts)):
+            pkey = (".".join(parts[i:]), r.is_exclusion)
+            if pkey in self._suffix_domains or pkey in self._wildcard_domains:
+                return True
+        return False
 
-                child_exprs = []
-                for rule_str in child_rules_str:
-                    parts = rule_str.split(':', 1)
-                    if len(parts) == 2:
-                        child_exprs.append(z3.Contains(x, z3.StringVal(parts[1])))
-
-                if not parent_exprs or not child_exprs:
-                    result_container[0] = (True, 1.0, timeout_ms, "trivial")
-                    return
-
-                parent_expr = z3.Or(*parent_exprs) if len(parent_exprs) > 1 else parent_exprs[0]
-                child_expr = z3.Or(*child_exprs) if len(child_exprs) > 1 else child_exprs[0]
-
-                s.add(z3.And(child_expr, z3.Not(parent_expr)))
-                check_result = s.check()
-
-                if check_result == z3.sat:
-                    result_container[0] = (False, 1.0, timeout_ms, "sat")
-                elif check_result == z3.unsat:
-                    result_container[0] = (True, 1.0, timeout_ms, "unsat")
-                else:
-                    result_container[0] = (False, 0.5, timeout_ms, "unknown")
-            except Exception as e:
-                result_container[0] = (False, 0.0, timeout_ms, f"error:{str(e)}")
-
-        thread = threading.Thread(target=target)
-        thread.start()
-        thread.join(timeout_ms / 1000.0)
-        
-        if thread.is_alive():
-            return False, 0.0, timeout_ms, "timeout"
-        
-        return result_container[0] if result_container[0] is not None else (False, 0.0, timeout_ms, "unknown")
-
-
-class StrictNgramSpectrumAnalyzer:
-    __slots__ = ('_baseline_freq', '_scales', '_js_threshold', '_lock', '_det_rand', 
-                 '_chi2_threshold', '_script_whitelist')
-
-    def __init__(self, config: MergeConfig = DEFAULT_CONFIG):
-        self._scales = config.ngram_scales
-        self._js_threshold = config.ngram_js_divergence_threshold
-        self._chi2_threshold = 0.05
-        self._lock = threading.RLock()
-        self._det_rand = DeterministicRandom(config.deterministic_seed + "_ngram")
-        self._script_whitelist = set(config.idn_allowed_scripts) if config.enable_idn_script_whitelist else set()
-        self._baseline_freq: Dict[int, Dict[str, int]] = {}
-        self._build_baseline()
-
-    def _build_baseline(self):
-        baseline_domains = [
-            'google.com', 'facebook.com', 'amazon.com', 'microsoft.com', 'apple.com',
-            'github.com', 'stackoverflow.com', 'wikipedia.org', 'linkedin.com', 'twitter.com',
-            'instagram.com', 'youtube.com', 'reddit.com', 'netflix.com', 'spotify.com'
-        ]
-        for domain in baseline_domains:
-            for n in self._scales:
-                ngrams = self._extract_ngrams(domain, n)
-                if n not in self._baseline_freq:
-                    self._baseline_freq[n] = defaultdict(int)
-                for ng in ngrams:
-                    self._baseline_freq[n][ng] += 1
-
-    def _extract_ngrams(self, s: str, n: int) -> List[str]:
-        s_clean = ''.join(c if c.isalnum() else '-' for c in s.lower())
-        if len(s_clean) < n:
-            return []
-        return [s_clean[i:i+n] for i in range(len(s_clean) - n + 1)]
-
-    def _detect_script(self, s: str) -> Set[str]:
-        scripts = set()
-        for char in s:
-            try:
-                name = unicodedata.name(char)
-                parts = name.split()
-                base_script = parts[0]
-                if base_script in ('DIGIT', 'NUMBER', 'CIRCLED'):
-                    scripts.add('COMMON')
-                elif base_script in ('LATIN', 'CYRILLIC', 'GREEK', 'ARABIC', 'HEBREW', 'CJK', 'HANGUL'):
-                    scripts.add(base_script)
-            except Exception:
-                pass
-        return scripts
-
-    def _is_idn_whitelisted(self, domain: str) -> bool:
-        if not self._script_whitelist:
-            return False
-        scripts = self._detect_script(domain)
-        return len(scripts) == 1 and scripts.pop() in self._script_whitelist
-
-    def _compute_js_divergence(self, test_ngrams: List[str], n: int) -> float:
-        if n not in self._baseline_freq:
-            return 0.0
-
-        test_dist = defaultdict(int)
-        for ng in test_ngrams:
-            test_dist[ng] += 1
-
-        total_test = len(test_ngrams)
-        total_base = sum(self._baseline_freq[n].values())
-
-        if total_test == 0 or total_base == 0:
-            return 0.0
-
-        p = {k: v/total_test for k, v in test_dist.items()}
-        q = {k: v/total_base for k, v in self._baseline_freq[n].items()}
-
-        return calculate_js_divergence(p, q)
-
-    def analyze(self, domain: str) -> Dict[str, Any]:
-        with self._lock:
-            if self._is_idn_whitelisted(domain):
-                return {
-                    'scales': {},
-                    'max_js_divergence': 0.0,
-                    'min_chi2_pvalue': 1.0,
-                    'is_anomaly': False,
-                    'entropy': calculate_entropy(domain),
-                    'conditional_entropy': calculate_conditional_entropy(domain, 1),
-                    'explanation': 'IDN script whitelisted',
-                    'entropy_spectrum': self._compute_entropy_spectrum(domain)
-                }
-
-            results = {
-                'scales': {},
-                'max_js_divergence': 0.0,
-                'min_chi2_pvalue': 1.0,
-                'is_anomaly': False,
-                'entropy': calculate_entropy(domain),
-                'conditional_entropy': calculate_conditional_entropy(domain, 1),
-                'explanation': '',
-                'entropy_spectrum': self._compute_entropy_spectrum(domain)
-            }
-
-            explanations = []
-
-            for n in self._scales:
-                ngrams = self._extract_ngrams(domain, n)
-                js_div = self._compute_js_divergence(ngrams, n)
-                chi2, p_val = self._compute_chi2_statistic(ngrams, n)
-
-                results['scales'][n] = {
-                    'js_divergence': js_div,
-                    'chi2_pvalue': p_val,
-                    'ngram_count': len(ngrams)
-                }
-
-                results['max_js_divergence'] = max(results['max_js_divergence'], js_div)
-                results['min_chi2_pvalue'] = min(results['min_chi2_pvalue'], p_val)
-
-                if js_div > self._js_threshold:
-                    high_ngrams = [ng for ng in ngrams if self._baseline_freq[n].get(ng, 0) == 0]
-                    if high_ngrams:
-                        explanations.append(f"High-frequency consonant cluster '{high_ngrams[0]}' detected (scale {n}), deviation {js_div:.2f}")
-
-            results['is_anomaly'] = (
-                results['max_js_divergence'] > self._js_threshold or
-                results['min_chi2_pvalue'] < self._chi2_threshold or
-                results['entropy'] > 4.5 or
-                results['conditional_entropy'] > 3.5
-            )
-
-            if results['is_anomaly'] and not explanations:
-                explanations.append(f"Entropy {results['entropy']:.2f} exceeds threshold")
-
-            results['explanation'] = '; '.join(explanations) if explanations else 'Normal pattern'
-
-            return results
-
-    def _compute_chi2_statistic(self, test_ngrams: List[str], n: int) -> Tuple[float, float]:
-        if n not in self._baseline_freq:
-            return 0.0, 1.0
-
-        observed = defaultdict(int)
-        for ng in test_ngrams:
-            observed[ng] += 1
-
-        total_observed = len(test_ngrams)
-        total_expected = sum(self._baseline_freq[n].values())
-
-        if total_observed == 0 or total_expected == 0:
-            return 0.0, 1.0
-
-        chi2 = 0.0
-        for ng, obs in observed.items():
-            exp = (self._baseline_freq[n][ng] / total_expected) * total_observed
-            if exp > 0:
-                chi2 += (obs - exp) ** 2 / exp
-
-        degrees_freedom = max(len(observed) - 1, 1)
-        p_value = self._approximate_p_value(chi2, degrees_freedom)
-        return chi2, p_value
-
-    def _approximate_p_value(self, chi2: float, df: int) -> float:
-        if chi2 < 0 or df <= 0:
-            return 1.0
-        return math.exp(-chi2 / (2 * df))
-
-    def _compute_entropy_spectrum(self, domain: str) -> List[float]:
-        spectrum = []
-        for i in range(min(len(domain), 10)):
-            substring = domain[max(0, i-2):i+3]
-            spectrum.append(calculate_entropy(substring))
-        return spectrum
-
-    def is_dga_like(self, domain: str) -> Tuple[bool, str]:
-        analysis = self.analyze(domain)
-        return analysis['is_anomaly'], analysis['explanation']
-
-
-class DomainTrie:
-    __slots__ = ('root', '_cache', '_cache_limit', '_rwlock', '_depth_limit', '_version', '_cache_lock')
-
-    class Node:
-        __slots__ = ('children', 'types', 'terminal', 'wildcard')
-        def __init__(self):
-            self.children: Dict[str, DomainTrie.Node] = {}
-            self.types = set()
-            self.terminal = False
-            self.wildcard = False
-
-    def __init__(self, cache_limit: int = 10000, depth_limit: int = 128):
-        self.root = self.Node()
-        self._cache: OrderedDict = OrderedDict()
-        self._cache_limit = cache_limit
-        self._rwlock = ReadWriteLock()
-        self._depth_limit = depth_limit
-        self._version = 0
-        self._cache_lock = threading.RLock()
-
-    def insert(self, domain: str, match_type: MatchType = MatchType.EXACT):
-        with self._rwlock:
-            new_root = self._copy_path(self.root, domain, match_type)
-            self.root = new_root
-            self._version += 1
-            with self._cache_lock:
-                self._cache.clear()
-
-    def _copy_path(self, node: DomainTrie.Node, domain: str, match_type: MatchType):
-        parts = domain.split('.')
-        if len(parts) > self._depth_limit:
-            parts = parts[-self._depth_limit:]
-        
-        new_root = self.Node()
-        new_root.types = node.types.copy()
-        new_root.terminal = node.terminal
-        new_root.wildcard = node.wildcard
-        new_root.children = dict(node.children)
-        
-        current = new_root
-        for i, part in enumerate(reversed(parts)):
-            if not part:
-                continue
-            if part in current.children:
-                old_child = current.children[part]
-                new_child = self.Node()
-                new_child.types = old_child.types.copy()
-                new_child.terminal = old_child.terminal
-                new_child.wildcard = old_child.wildcard
-                new_child.children = dict(old_child.children)
-                current.children[part] = new_child
+    def calculate(self, child_rules: Iterable[RuleType]) -> float:
+        covered = total = 0
+        for r in child_rules:
+            total += 1
+            if isinstance(r, DomainRule):
+                if self._domain_covered(r): covered += 1
             else:
-                new_child = self.Node()
-                current.children[part] = new_child
-            
-            if match_type == MatchType.WILDCARD and i == len(parts) - 1:
-                new_child.wildcard = True
-                new_child.types.add(MatchType.WILDCARD)
-            elif match_type == MatchType.SUFFIX and i == len(parts) - 1:
-                new_child.types.add(MatchType.SUFFIX)
-            
-            current = new_child
-        
-        current.terminal = True
-        current.types.add(match_type)
-        return new_root
-
-    def is_covered(self, domain: str, match_type: MatchType = MatchType.EXACT) -> Tuple[bool, MatchType, int]:
-        self._rwlock.acquire_read()
-        try:
-            current_root = self.root
-            current_version = self._version
-            
-            cache_key = f"{domain}:{match_type.value}:{current_version}"
-            with self._cache_lock:
-                if cache_key in self._cache:
-                    self._cache.move_to_end(cache_key)
-                    return self._cache[cache_key]
-
-            parts = domain.split('.')
-            if len(parts) > self._depth_limit:
-                parts = parts[-self._depth_limit:]
-
-            node = current_root
-            best_match = (False, MatchType.EXACT, 0)
-            depth = 0
-
-            for i, part in enumerate(reversed(parts)):
-                if not part:
-                    continue
-                if MatchType.WILDCARD in node.types and match_type == MatchType.EXACT:
-                    best_match = (True, MatchType.WILDCARD, depth)
-                if node.terminal and MatchType.SUFFIX in node.types:
-                    best_match = (True, MatchType.SUFFIX, depth)
-                if node.terminal and MatchType.EXACT in node.types and i == len(parts) - 1:
-                    best_match = (True, MatchType.EXACT, depth)
-
-                if part not in node.children:
-                    with self._cache_lock:
-                        self._cache[cache_key] = best_match
-                        if len(self._cache) > self._cache_limit:
-                            self._cache.popitem(last=False)
-                    return best_match
-                node = node.children[part]
-                depth += 1
-
-            if MatchType.WILDCARD in node.types and match_type == MatchType.WILDCARD:
-                best_match = (True, MatchType.WILDCARD, depth)
-            elif node.terminal:
-                if MatchType.EXACT in node.types and match_type == MatchType.EXACT:
-                    best_match = (True, MatchType.EXACT, depth)
-                elif MatchType.SUFFIX in node.types:
-                    best_match = (True, MatchType.SUFFIX, depth)
-
-            with self._cache_lock:
-                self._cache[cache_key] = best_match
-                if len(self._cache) > self._cache_limit:
-                    self._cache.popitem(last=False)
-
-            return best_match
-        finally:
-            self._rwlock.release_read()
-
-    def optimize(self) -> List[Tuple[str, MatchType]]:
-        self._rwlock.acquire_read()
-        try:
-            result = []
-            stack = [(self.root, [])]
-            
-            while stack:
-                node, parts = stack.pop()
-                
-                if node.terminal:
-                    domain = '.'.join(reversed(parts))
-                    if MatchType.WILDCARD in node.types:
-                        result.append((f"*.{domain}" if domain else "*", MatchType.WILDCARD))
-                    elif MatchType.EXACT in node.types:
-                        result.append((domain, MatchType.EXACT))
-                    elif MatchType.SUFFIX in node.types:
-                        result.append((domain, MatchType.SUFFIX))
-                
-                if len(parts) < self._depth_limit:
-                    for part, child in node.children.items():
-                        stack.append((child, parts + [part]))
-            
-            return result
-        finally:
-            self._rwlock.release_read()
-
-    def get_specificity_score(self, domain: str) -> int:
-        self._rwlock.acquire_read()
-        try:
-            parts = domain.split('.')
-            if len(parts) > self._depth_limit:
-                parts = parts[-self._depth_limit:]
-            node = self.root
-            score = 0
-            for part in reversed(parts):
-                if not part:
-                    continue
-                score += 10
-                if MatchType.EXACT in node.types:
-                    score += 5
-                elif MatchType.SUFFIX in node.types:
-                    score += 2
-                if part not in node.children:
-                    break
-                node = node.children[part]
-            return score
-        finally:
-            self._rwlock.release_read()
-
-
-class StrictPatriciaTrie:
-    __slots__ = ('root_v4', 'root_v6', '_lock')
-
-    class Node:
-        __slots__ = ('left', 'right', 'is_terminal', 'prefix_len', 'network')
-        def __init__(self):
-            self.left: Optional[StrictPatriciaTrie.Node] = None
-            self.right: Optional[StrictPatriciaTrie.Node] = None
-            self.is_terminal = False
-            self.prefix_len = -1
-            self.network: Optional[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]] = None
-
-    def __init__(self):
-        self.root_v4 = self.Node()
-        self.root_v6 = self.Node()
-        self._lock = threading.RLock()
-
-    def insert(self, network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]):
-        is_v4 = network.version == 4
-        
-        if network.prefixlen == 0:
-            root = self.root_v4 if is_v4 else self.root_v6
-            with self._lock:
-                root.is_terminal = True
-                root.prefix_len = 0
-                root.network = network
-            return
-        
-        node = self.root_v4 if is_v4 else self.root_v6
-        addr_int = int(network.network_address)
-        width = 32 if is_v4 else 128
-
-        with self._lock:
-            for i in range(network.prefixlen):
-                bit = (addr_int >> (width - 1 - i)) & 1
-                if bit == 0:
-                    if not node.left: node.left = self.Node()
-                    node = node.left
+                if r.version == 4:
+                    lst = self._ipv4_deny if r.is_exclusion else self._ipv4_allow
+                    starts = self._ipv4_deny_starts if r.is_exclusion else self._ipv4_allow_starts
                 else:
-                    if not node.right: node.right = self.Node()
-                    node = node.right
-            node.is_terminal = True
-            node.prefix_len = network.prefixlen
-            node.network = network
+                    lst = self._ipv6_deny if r.is_exclusion else self._ipv6_allow
+                    starts = self._ipv6_deny_starts if r.is_exclusion else self._ipv6_allow_starts
 
-    def contains_subnet(self, network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> bool:
-        is_v4 = network.version == 4
-        node = self.root_v4 if is_v4 else self.root_v6
-        addr_int = int(network.network_address)
-        width = 32 if is_v4 else 128
-
-        with self._lock:
-            for i in range(network.prefixlen + 1):
-                if node.is_terminal:
-                    return True
-                if i == network.prefixlen:
-                    break
-                bit = (addr_int >> (width - 1 - i)) & 1
-                if bit == 0:
-                    if not node.left: return False
-                    node = node.left
-                else:
-                    if not node.right: return False
-                    node = node.right
-            return False
-
-    def find_covering_networks(self, network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
-        is_v4 = network.version == 4
-        node = self.root_v4 if is_v4 else self.root_v6
-        addr_int = int(network.network_address)
-        width = 32 if is_v4 else 128
-
-        covering = []
-
-        with self._lock:
-            for i in range(network.prefixlen + 1):
-                if node.is_terminal and node.network:
-                    if network.subnet_of(node.network):
-                        covering.append(node.network)
-
-                if i == network.prefixlen:
-                    break
-
-                bit = (addr_int >> (width - 1 - i)) & 1
-                if bit == 0:
-                    if not node.left:
-                        break
-                    node = node.left
-                else:
-                    if not node.right:
-                        break
-                    node = node.right
-
-        return sorted(covering, key=lambda x: (-x.prefixlen, int(x.network_address)))
-
-
-class IntervalTreeNode:
-    __slots__ = ('center', 'intervals', 'left', 'right', 'by_start', 'by_end', '_lock', '_max_depth', '_current_depth')
-
-    def __init__(self, intervals: List[Tuple[int, int, Any]], depth: int = 0, max_depth: int = 128):
-        self.intervals: List[Tuple[int, int, Any]] = []
-        self.left: Optional[IntervalTreeNode] = None
-        self.right: Optional[IntervalTreeNode] = None
-        self.by_start: List[Tuple[int, int, Any]] = []
-        self.by_end: List[Tuple[int, int, Any]] = []
-        self._lock = threading.RLock()
-        self._max_depth = max_depth
-        self._current_depth = depth
-
-        if not intervals:
-            self.center = 0
-            return
-
-        starts = [i[0] for i in intervals]
-        ends = [i[1] for i in intervals]
-        self.center = (min(starts) + max(ends)) // 2
-
-        left_intervals = []
-        right_intervals = []
-        for start, end, data in intervals:
-            if end < self.center:
-                left_intervals.append((start, end, data))
-            elif start > self.center:
-                right_intervals.append((start, end, data))
-            else:
-                self.intervals.append((start, end, data))
-
-        self.by_start = sorted(self.intervals, key=lambda x: x[0])
-        self.by_end = sorted(self.intervals, key=lambda x: x[1])
-
-        if depth < max_depth:
-            if left_intervals:
-                self.left = IntervalTreeNode(left_intervals, depth + 1, max_depth)
-            if right_intervals:
-                self.right = IntervalTreeNode(right_intervals, depth + 1, max_depth)
-
-    def find_overlapping(self, start: int, end: int) -> List[Any]:
-        results = []
-        with self._lock:
-            for s, e, data in self.intervals:
-                if not (e < start or s > end):
-                    results.append(data)
-            if self.left and start <= self.center:
-                results.extend(self.left.find_overlapping(start, end))
-            if self.right and end >= self.center:
-                results.extend(self.right.find_overlapping(start, end))
-        return results
-
-
-class IntervalTree:
-    __slots__ = ('root', '_intervals', '_rwlock', '_dirty', '_version', '_max_depth')
-
-    def __init__(self, max_depth: int = 128):
-        self.root: Optional[IntervalTreeNode] = None
-        self._intervals: List[Tuple[int, int, Any]] = []
-        self._rwlock = ReadWriteLock()
-        self._dirty = False
-        self._version = 0
-        self._max_depth = max_depth
-
-    def insert(self, start: int, end: int, data: Any):
-        if start > end:
-            start, end = end, start
-        with self._rwlock:
-            self._intervals.append((start, end, data))
-            self._dirty = True
-            self._version += 1
-
-    def _ensure_built(self):
-        with self._rwlock:
-            if self._dirty:
-                self.root = IntervalTreeNode(self._intervals, max_depth=self._max_depth)
-                self._dirty = False
-
-    def find_overlapping(self, start: int, end: int) -> List[Any]:
-        if start > end:
-            start, end = end, start
-        self._ensure_built()
-        if not self.root:
-            return []
-        return self.root.find_overlapping(start, end)
+                if not lst: continue
+                idx = bisect.bisect_right(starts, r.start_int) - 1
+                if idx >= 0 and r.end_int <= lst[idx][1]: covered += 1
+        return (covered / total) if total > 0 else 1.0
 
 
 class SweepLineCIDRManager:
-    __slots__ = ('_patricia', '_networks', '_lock', 'enable_adjacent_merge', '_interval_tree', '_version', '_rir_manager')
-    
-    PRIORITY = {'BS': 3, 'BE': 1, 'ES': 4, 'EE': 2}
+    @classmethod
+    def approximate_collapse(cls, nets: list[IPNetworkType], target: int) -> tuple[list[IPNetworkType], float]:
+        if target <= 0: return [], 1.0
+        nets = list(ipaddress.collapse_addresses(nets))
+        if len(nets) <= target: return nets, 0.0
 
-    def __init__(self, enable_adjacent_merge: bool = True, use_interval_tree: bool = True, 
-                 enable_rir: bool = False, rir_manager: Optional[RIRDataManager] = None):
-        self._patricia = StrictPatriciaTrie()
-        self._networks: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]] = []
-        self._lock = threading.RLock()
-        self.enable_adjacent_merge = enable_adjacent_merge
-        self._interval_tree = IntervalTree(max_depth=128) if use_interval_tree else None
-        self._version = 0
-        self._rir_manager = rir_manager
+        orig_hosts = sum(n.num_addresses for n in nets)
+        if orig_hosts == 0: return [], 1.0
 
-    def add(self, network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]):
-        if not isinstance(network, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
-            raise TypeError("Must be IPv4Network or IPv6Network")
-
-        with self._lock:
-            self._patricia.insert(network)
-            self._networks.append(network)
-            if self._interval_tree:
-                start = int(network.network_address)
-                end = int(network.broadcast_address)
-                self._interval_tree.insert(start, end, network)
-            self._version += 1
-
-    def contains(self, network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> bool:
-        with self._lock:
-            return self._patricia.contains_subnet(network)
-
-    def find_overlapping(self, network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> List[Any]:
-        if not self._interval_tree:
-            return []
-        with self._lock:
-            start = int(network.network_address)
-            end = int(network.broadcast_address)
-            return self._interval_tree.find_overlapping(start, end)
-
-    @staticmethod
-    def _range_to_cidrs(start: int, end: int, version: int):
-        if start > end:
-            return []
-        try:
-            if version == 4:
-                first = ipaddress.IPv4Address(start)
-                last = ipaddress.IPv4Address(end)
-            else:
-                first = ipaddress.IPv6Address(start)
-                last = ipaddress.IPv6Address(end)
-            return list(ipaddress.summarize_address_range(first, last))
-        except ValueError:
-            return []
-
-    @staticmethod
-    def _merge_adjacent_cidrs(networks):
-        if not networks:
-            return []
-        return list(ipaddress.collapse_addresses(sorted(networks, key=lambda x: (int(x.network_address), x.prefixlen))))
-
-    @staticmethod
-    def _hierarchical_supernet_with_loss(networks, target_count, enable_rir, rir_manager):
-        if len(networks) <= target_count:
-            return networks, 0.0
-        
-        working = sorted(networks, key=lambda n: (n.prefixlen, int(n.network_address)))
-        loss_count = 0
-        original_addresses = sum(n.num_addresses for n in networks)
-        
-        iteration = 0
-        max_iterations = len(networks) * 2
-        
-        while len(working) > target_count and len(working) > 1 and iteration < max_iterations:
-            iteration += 1
-            merged = []
-            i = 0
-            made_progress = False
-            while i < len(working):
-                if i + 1 < len(working):
-                    current = working[i]
-                    next_net = working[i + 1]
-                    
-                    if current.prefixlen == next_net.prefixlen and current.prefixlen > 0:
-                        try:
-                            supernet = current.supernet()
-                            if next_net.subnet_of(supernet):
-                                if not enable_rir or (rir_manager is None) or (rir_manager and rir_manager.can_merge(current, next_net)):
-                                    if current.broadcast_address + 1 == next_net.network_address:
-                                        merged.append(supernet)
-                                        loss_count += supernet.num_addresses - current.num_addresses - next_net.num_addresses
-                                        i += 2
-                                        made_progress = True
-                                        continue
-                        except ValueError:
-                            pass
-                merged.append(working[i])
-                i += 1
-            
-            if not made_progress:
-                break
-            working = merged
-        
-        if len(working) > target_count:
-            working = working[:target_count]
-            current_addresses = sum(n.num_addresses for n in working)
-            if original_addresses > 0:
-                loss_count = max(0, original_addresses - current_addresses)
-        
-        loss_rate = loss_count / original_addresses if original_addresses > 0 else 0.0
-        return working, loss_rate
+        nets.sort(key=lambda x: -x.num_addresses)
+        kept = nets[:target]
+        loss = max(0.0, 1.0 - sum(n.num_addresses for n in kept) / orig_hosts)
+        return kept, loss
 
     @classmethod
-    def subtract(cls, base_nets: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]], 
-                 exclude_nets: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]],
-                 max_fragments: int = 5000,
-                 enable_adjacent_merge: bool = True,
-                 enable_rir_lookup: bool = False,
-                 enable_approximation: bool = False,
-                 approximation_threshold: int = 1000,
-                 max_loss_rate: float = 0.05,
-                 strict_zero_loss: bool = True,
-                 rir_manager: Optional[RIRDataManager] = None) -> List[str]:
-
-        v4_base = [n for n in base_nets if n.version == 4]
-        v6_base = [n for n in base_nets if n.version == 6]
-        v4_excl = [n for n in exclude_nets if n.version == 4]
-        v6_excl = [n for n in exclude_nets if n.version == 6]
-
-        try:
-            v4_result = cls._subtract_version(v4_base, v4_excl, 32, max_fragments // 2)
-            remaining = max(0, max_fragments - len(v4_result))
-            v6_result = cls._subtract_version(v6_base, v6_excl, 128, remaining)
-            total_result = v4_result + v6_result
-
-            if enable_adjacent_merge:
-                v4_merged = cls._merge_adjacent_cidrs([n for n in total_result if n.version == 4])
-                v6_merged = cls._merge_adjacent_cidrs([n for n in total_result if n.version == 6])
-                total_result = v4_merged + v6_merged
-
-            if len(total_result) > max_fragments:
-                if enable_approximation and len(total_result) > approximation_threshold:
-                    total_result, loss_rate = cls._hierarchical_supernet_with_loss(
-                        total_result, max_fragments, enable_rir_lookup, rir_manager
-                    )
-                    if strict_zero_loss and loss_rate > 0:
-                        raise CIDRFragmentationError(len(total_result), max_fragments, loss_rate)
-                    if loss_rate > max_loss_rate:
-                        raise CIDRFragmentationError(len(total_result), max_fragments, loss_rate)
-                else:
-                    raise CIDRFragmentationError(len(total_result), max_fragments, 0.0)
-
-            return [str(n) for n in total_result]
-        except CIDRFragmentationError as e:
-            if enable_approximation and not strict_zero_loss:
-                if e.loss_rate <= max_loss_rate:
-                    merged, _ = cls._hierarchical_supernet_with_loss(
-                        base_nets, max_fragments, enable_rir_lookup, rir_manager
-                    )
-                    return [str(n) for n in merged]
-            raise
-
-    @classmethod
-    def _subtract_version(cls, base: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]], 
-                         exclude: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]], 
-                         width: int, max_frag: int) -> List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
-        if not base:
-            return []
+    def _subtract_version(cls, base: list[IPNetworkType], exclude: list[IPNetworkType], width: int, max_frag: Optional[int] = None) -> list[IPNetworkType]:
+        if not base: return []
         if not exclude:
-            return list(ipaddress.collapse_addresses(base))
+            cidrs = list(ipaddress.collapse_addresses(base))
+            if max_frag and len(cidrs) > max_frag: raise CIDRFragmentationError(len(cidrs), max_frag, 0.0, cidrs)
+            return cidrs
 
-        events = []
         max_addr = (1 << width) - 1
-        event_id = 0
+        events: list[tuple[int, int]] = []
 
         for net in base:
-            start = int(net.network_address)
-            end = min(int(net.broadcast_address), max_addr)
-            events.append((start, cls.PRIORITY['BS'], 0, event_id, net))
-            event_id += 1
-            if end < max_addr:
-                events.append((end + 1, cls.PRIORITY['BE'], 0, event_id, net))
-                event_id += 1
+            events.append((int(net.network_address), 2))
+            if (e := int(net.broadcast_address)) < max_addr: events.append((e + 1, 0))
 
         for net in exclude:
-            start = int(net.network_address)
-            end = min(int(net.broadcast_address), max_addr)
-            events.append((start, cls.PRIORITY['ES'], 1, event_id, net))
-            event_id += 1
-            if end < max_addr:
-                events.append((end + 1, cls.PRIORITY['EE'], 1, event_id, net))
-                event_id += 1
+            events.append((int(net.network_address), 3))
+            if (e := int(net.broadcast_address)) < max_addr: events.append((e + 1, 1))
 
-        events.sort(key=lambda x: (x[0], -x[1], x[3]))
+        events.sort()
 
-        result_intervals = []
-        base_depth = 0
-        exclude_depth = 0
-        prev_pos = events[0][0] if events else 0
+        intervals, merged_intervals = [], []
+        base_depth, excl_depth, prev = 0, 0, events[0][0]
 
-        for pos, prio, is_excl, eid, net in events:
-            if pos > prev_pos and prev_pos <= max_addr:
-                if base_depth > 0 and exclude_depth == 0:
-                    end_pos = min(pos - 1, max_addr)
-                    if result_intervals and result_intervals[-1][1] == prev_pos - 1:
-                        result_intervals[-1] = (result_intervals[-1][0], end_pos)
-                    else:
-                        result_intervals.append((prev_pos, end_pos))
-                    if len(result_intervals) > max_frag:
-                        raise CIDRFragmentationError(len(result_intervals), max_frag)
+        for pos, prio in events:
+            if pos > prev and base_depth > 0 and excl_depth == 0: intervals.append((prev, pos - 1))
+            if prio == 0: base_depth -= 1
+            elif prio == 1: excl_depth -= 1
+            elif prio == 2: base_depth += 1
+            elif prio == 3: excl_depth += 1
+            prev = pos
 
-            if is_excl:
-                if prio == cls.PRIORITY['ES']:
-                    exclude_depth += 1
-                else:
-                    exclude_depth -= 1
+        if base_depth > 0 and excl_depth == 0: intervals.append((prev, max_addr))
+
+        for s, e in intervals:
+            if not merged_intervals:
+                merged_intervals.append((s, e))
             else:
-                if prio == cls.PRIORITY['BS']:
-                    base_depth += 1
-                else:
-                    base_depth -= 1
-            prev_pos = pos
+                last_s, last_e = merged_intervals[-1]
+                if s <= last_e + 1: merged_intervals[-1] = (last_s, max(last_e, e))
+                else: merged_intervals.append((s, e))
 
         cidrs = []
-        for start, end in result_intervals:
-            cidrs.extend(cls._range_to_cidrs(start, end, 4 if width == 32 else 6))
-
-        return list(ipaddress.collapse_addresses(cidrs))
+        ver = 4 if width == 32 else 6
         
-    @classmethod
-    def _hierarchical_supernet_with_loss(cls, networks: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]], 
-                                         target_count: int,
-                                         enable_rir: bool = False,
-                                         rir_manager: Optional[RIRDataManager] = None) -> Tuple[List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]], float]:
-        if len(networks) <= target_count:
-            return networks, 0.0
-
-        v4_networks = [n for n in networks if n.version == 4]
-        v6_networks = [n for n in networks if n.version == 6]
-        
-        v4_target = max(1, target_count // 2) if v4_networks and v6_networks else target_count
-        v6_target = max(1, target_count - v4_target) if v4_networks and v6_networks else target_count
-        
-        v4_merged, v4_loss = cls._hierarchical_supernet_version(v4_networks, v4_target, enable_rir, rir_manager)
-        v6_merged, v6_loss = cls._hierarchical_supernet_version(v6_networks, v6_target, enable_rir, rir_manager)
-        
-        merged = v4_merged + v6_merged
-        original_hosts = sum(n.num_addresses for n in networks)
-        final_hosts = sum(n.num_addresses for n in merged)
-        loss_rate = (original_hosts - final_hosts) / original_hosts if original_hosts > 0 else 0.0
-        
-        return merged[:target_count], loss_rate
-
-    @classmethod
-    def _hierarchical_supernet_version(cls, networks: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]], 
-                                       target_count: int,
-                                       enable_rir: bool = False,
-                                       rir_manager: Optional[RIRDataManager] = None) -> Tuple[List, float]:
-        if len(networks) <= target_count:
-            return networks, 0.0
-            
-        sorted_nets = sorted(networks, key=lambda x: (int(x.network_address), x.prefixlen))
-        original_hosts = sum(n.num_addresses for n in networks)
-
-        merged = []
-        i = 0
-        while i < len(sorted_nets) and len(merged) < target_count:
-            current = sorted_nets[i]
-            merged_siblings = False
-            if i + 1 < len(sorted_nets):
-                next_net = sorted_nets[i + 1]
-                if current.prefixlen == next_net.prefixlen and current.prefixlen > 0:
-                    if enable_rir and rir_manager:
-                        if not rir_manager.can_merge(current, next_net):
-                            merged.append(current)
-                            i += 1
-                            continue
-                    try:
-                        super_net = current.supernet()
-                        if next_net.subnet_of(super_net):
-                            current = super_net
-                            i += 2
-                            while i < len(sorted_nets) and sorted_nets[i].subnet_of(current):
-                                i += 1
-                            merged.append(current)
-                            merged_siblings = True
-                    except ValueError:
-                        pass
-            if not merged_siblings:
-                merged.append(current)
-                i += 1
-
-        if len(merged) > target_count:
-            width = 32 if merged[0].version == 4 else 128
-            min_prefix = max(0, merged[0].prefixlen - 4)
-            for prefix_len in range(merged[0].prefixlen, min_prefix - 1, -1):
-                aggregated = []
-                super_map = {}
-                for net in merged:
-                    if net.prefixlen <= prefix_len:
-                        aggregated.append(net)
+        for s, e in merged_intervals:
+            if s <= e:
+                try:
+                    if ver == 4:
+                        cidrs.extend(ipaddress.summarize_address_range(ipaddress.IPv4Address(s), ipaddress.IPv4Address(e)))
                     else:
-                        shift = width - prefix_len
-                        super_addr = (int(net.network_address) >> shift) << shift
-                        try:
-                            if width == 32:
-                                super_net = ipaddress.IPv4Network((super_addr, prefix_len), strict=False)
-                            else:
-                                super_net = ipaddress.IPv6Network((super_addr, prefix_len), strict=False)
-                        except ValueError:
-                            aggregated.append(net)
-                            continue
-                        
-                        if enable_rir and rir_manager:
-                            if super_net not in super_map:
-                                super_map[super_net] = []
-                            super_map[super_net].append(net)
-                            if not all(rir_manager.can_merge(super_net, sub) for sub in super_map[super_net]):
-                                aggregated.extend(super_map[super_net])
-                                del super_map[super_net]
-                                continue
-                        else:
-                            super_map[super_net] = []
-                
-                for super_net in super_map.keys():
-                    aggregated.append(super_net)
-                
-                merged = cls._merge_adjacent_cidrs(aggregated)
-                if len(merged) <= target_count:
-                    break
+                        cidrs.extend(ipaddress.summarize_address_range(ipaddress.IPv6Address(s), ipaddress.IPv6Address(e)))
+                except (ValueError, TypeError):
+                    pass
 
-        final_hosts = sum(n.num_addresses for n in merged)
-        loss_rate = (original_hosts - final_hosts) / original_hosts if original_hosts > 0 else 0.0
-        return merged[:target_count], loss_rate
-
-    @classmethod
-    def _merge_adjacent_cidrs(cls, networks: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]) -> List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
-        if not networks:
-            return networks
-
-        v4_nets = sorted([n for n in networks if n.version == 4], key=lambda x: (int(x.network_address), x.prefixlen))
-        v6_nets = sorted([n for n in networks if n.version == 6], key=lambda x: (int(x.network_address), x.prefixlen))
-
-        merged_v4 = cls._merge_adjacent_version(v4_nets, 32)
-        merged_v6 = cls._merge_adjacent_version(v6_nets, 128)
-
-        return merged_v4 + merged_v6
-
-    @classmethod
-    def _merge_adjacent_version(cls, nets: List, width: int) -> List:
-        if len(nets) < 2:
-            return nets
-
-        changed = True
-        while changed:
-            changed = False
-            merged = []
-            current = nets[0]
-            for next_net in nets[1:]:
-                if current.prefixlen != next_net.prefixlen:
-                    merged.append(current)
-                    current = next_net
-                    continue
-
-                prefix_len = current.prefixlen
-                if prefix_len == 0:
-                    merged.append(current)
-                    current = next_net
-                    continue
-
-                curr_int = int(current.network_address)
-                next_int = int(next_net.network_address)
-                block_size = 1 << (width - prefix_len)
-
-                if curr_int + block_size == next_int:
-                    super_addr = curr_int & ~(block_size - 1)
-                    try:
-                        if width == 32:
-                            current = ipaddress.IPv4Network((super_addr, prefix_len - 1), strict=False)
-                        else:
-                            current = ipaddress.IPv6Network((super_addr, prefix_len - 1), strict=False)
-                        changed = True
-                    except ValueError:
-                        merged.append(current)
-                        current = next_net
-                else:
-                    merged.append(current)
-                    current = next_net
-
-            merged.append(current)
-            nets = merged
-
-        return nets
-
-    @classmethod
-    def _range_to_cidrs(cls, start: int, end: int, width: int) -> List:
-        cidrs = []
-        current = start
-        max_ip = (1 << width) - 1
-        max_iterations = 10000
-        iterations = 0
-
-        while current <= end and current <= max_ip and iterations < max_iterations:
-            iterations += 1
-            if current == 0:
-                trailing_zeros = width
-            else:
-                trailing_zeros = (current & -current).bit_length() - 1
-
-            max_size = 1 << min(trailing_zeros, width)
-            remaining = end - current + 1
-            
-            if remaining <= 0:
-                break
-                
-            size = max_size
-            while size > remaining:
-                size >>= 1
-                if size == 0:
-                    size = 1
-                    break
-
-            prefix_len = width - (size.bit_length() - 1)
-
-            try:
-                if width == 32:
-                    network = ipaddress.IPv4Network((current, prefix_len), strict=False)
-                else:
-                    network = ipaddress.IPv6Network((current, prefix_len), strict=False)
-                cidrs.append(network)
-                current += size
-            except ValueError:
-                current += 1
-
+        if max_frag and len(cidrs) > max_frag: raise CIDRFragmentationError(len(cidrs), max_frag, 0.0, cidrs)
         return cidrs
+
+    @classmethod
+    def subtract(cls, base_nets: list[IPNetworkType], exclude_nets: Iterable[IPNetworkType], max_fragments: int = 5000,
+                 enable_approximation: bool = False, max_loss_rate: float = 0.05, strict_zero_loss: bool = True) -> list[IPNetworkType]:
+        v4_base, v6_base = split_networks_by_version(base_nets)
+        v4_excl, v6_excl = split_networks_by_version(list(exclude_nets))
+
+        def process_version(base_list: list[IPNetworkType], excl_list: list[IPNetworkType], width: int) -> list[IPNetworkType]:
+            try:
+                return cls._subtract_version(base_list, excl_list, width, max_fragments)
+            except CIDRFragmentationError as e:
+                if enable_approximation and e.cidrs:
+                    res, loss = cls.approximate_collapse(e.cidrs, max_fragments)
+                    if loss > max_loss_rate or (strict_zero_loss and loss > 0):
+                        raise CIDRFragmentationError(len(res), max_fragments, loss, res)
+                    return res
+                raise
+
+        total = (process_version(v4_base, v4_excl, 32) if v4_base else []) + (process_version(v6_base, v6_excl, 128) if v6_base else [])
+        if not total: return []
+
+        if len(total) > max_fragments:
+            if not enable_approximation:
+                raise CIDRFragmentationError(len(total), max_fragments, 0.0, total)
+            v4_res, v6_res = split_networks_by_version(total)
+            target_v4 = int(max_fragments * len(v4_res) / len(total)) if v4_res else 0
+            target_v6 = max_fragments - target_v4
+            if target_v4 == 0 and v4_res: target_v4, target_v6 = 1, max_fragments - 1
+            if target_v6 == 0 and v6_res: target_v6, target_v4 = 1, max_fragments - 1
+
+            v4_approx, loss_v4 = cls.approximate_collapse(v4_res, target_v4) if v4_res else ([], 0.0)
+            v6_approx, loss_v6 = cls.approximate_collapse(v6_res, target_v6) if v6_res else ([], 0.0)
+            total = v4_approx + v6_approx
+            loss = max(loss_v4, loss_v6)
+            if loss > 0:
+                if strict_zero_loss or loss > max_loss_rate: raise CIDRFragmentationError(len(total), max_fragments, loss, total)
+                logger.warning(f"CIDR approximation loss max {loss:.2%} due to fragmentation, resulting in {len(total)} CIDRs")
+        return total
 
 
 class WALBackend:
-    __slots__ = ('db_path', 'wal_path', 'data', '_lock', '_flush_count', '_config')
+    __slots__ = ('db_path', 'data', '_config', '_timestamp', '_lock', '_max_entries', '_pending_write_ts')
 
-    def __init__(self, db_path: Path, config: MergeConfig = DEFAULT_CONFIG):
+    def __init__(self, db_path: Path, config: MergeConfig) -> None:
         self.db_path = db_path.with_suffix('.ldb')
-        self.wal_path = db_path.with_suffix('.wal')
-        self.data = {}
-        self._lock = threading.RLock()
-        self._flush_count = 0
+        self.data: dict[str, Any] = {}
         self._config = config
+        self._max_entries = config.max_cache_entries
+        self._timestamp = 0.0
+        self._pending_write_ts = 0.0
+        self._lock = threading.RLock()
         self._load()
 
-    def _load(self):
-        if self.wal_path.exists():
+    def _load(self) -> None:
+        with self._lock:
+            if not self.db_path.exists(): return
             try:
-                with open(self.wal_path, 'rb') as f:
-                    content = f.read()
-                    if len(content) >= 16:
-                        stored_checksum = content[:16]
-                        data_bytes = content[16:]
-                        computed_checksum = hashlib.blake2b(data_bytes, digest_size=16).digest()
-                        if stored_checksum == computed_checksum:
-                            if USE_MSGPACK:
-                                pending = msgpack.unpackb(data_bytes, raw=False)
-                            else:
-                                pending = json.loads(data_bytes.decode('utf-8'))
-                            self.data.update(pending)
-                            self._snapshot()
-            except Exception:
-                logger.error(f"Corrupted WAL at {self.wal_path}, discarding.")
+                content = self.db_path.read_bytes()
+                if len(content) < 24: return
+                cs, ts_bytes, db = content[:16], content[16:24], content[24:]
+                if hashlib.blake2b(db, digest_size=16).digest() != cs:
+                    logger.warning(f"Checksum mismatch for {self.db_path}")
+                    return
+                self._timestamp = struct.unpack('>d', ts_bytes)[0]
+                if USE_MSGPACK:
+                    try:
+                        self.data = msgpack.unpackb(db, raw=False)
+                        return
+                    except Exception: pass
+                if USE_ORJSON:
+                    try:
+                        self.data = orjson.loads(db)
+                        return
+                    except Exception: pass
+                self.data = json.loads(db.decode('utf-8'))
+            except Exception as e:
+                logger.error(f"Failed to load DB {self.db_path}: {e}")
 
-        if self.db_path.exists():
-            try:
-                with open(self.db_path, 'rb') as f:
-                    content = f.read()
-                    if len(content) >= 16:
-                        stored_checksum = content[:16]
-                        data_bytes = content[16:]
-                        computed_checksum = hashlib.blake2b(data_bytes, digest_size=16).digest()
-                        if stored_checksum == computed_checksum:
-                            if USE_MSGPACK:
-                                self.data = msgpack.unpackb(data_bytes, raw=False)
-                            else:
-                                self.data = json.loads(data_bytes.decode('utf-8'))
-            except Exception:
-                self.data = {}
-
-    def _snapshot(self):
-        tmp = self.db_path.with_suffix('.tmp')
-
-        if USE_MSGPACK:
-            data_bytes = msgpack.packb(self.data, use_bin_type=True)
-        else:
-            data_bytes = json.dumps(self.data, ensure_ascii=False, sort_keys=True).encode('utf-8')
-
-        checksum = hashlib.blake2b(data_bytes, digest_size=16).digest()
-        content = checksum + data_bytes
-
-        with open(tmp, 'wb') as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        
-        tmp.replace(self.db_path)
-        
+    def _snapshot(self) -> bool:
+        tmp = Path(f"{self.db_path}.tmp.{os.getpid()}.{threading.get_ident()}")
         try:
-            dir_fd = os.open(self.db_path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except Exception:
-            pass
+            with self._lock:
+                if len(self.data) > self._max_entries:
+                    items = [(k, v.get('timestamp', time.time()) if isinstance(v, dict) else time.time()) for k, v in self.data.items()]
+                    items.sort(key=lambda x: x[1])
+                    for k, _ in items[:len(self.data) - self._max_entries]:
+                        del self.data[k]
+
+                current_ts = time.time()
+                ts_bytes = struct.pack('>d', current_ts)
+
+                if USE_MSGPACK: db_bytes = msgpack.packb(self.data, use_bin_type=True)
+                elif USE_ORJSON: db_bytes = orjson.dumps(self.data)
+                else: db_bytes = json.dumps(self.data, sort_keys=True, separators=(',', ':')).encode('utf-8')
+
+                digest = hashlib.blake2b(db_bytes, digest_size=16).digest()
+                self._pending_write_ts = current_ts
+
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             
-        if self.wal_path.exists():
-            self.wal_path.unlink()
-
-    def get(self, key):
-        with self._lock:
-            return self.data.get(key)
-
-    def put_batch(self, updates: Dict):
-        with self._lock:
-            if USE_MSGPACK:
-                data_bytes = msgpack.packb(updates, use_bin_type=True)
-            else:
-                data_bytes = json.dumps(updates, ensure_ascii=False, sort_keys=True).encode('utf-8')
-
-            checksum = hashlib.blake2b(data_bytes, digest_size=16).digest()
-            content = checksum + data_bytes
-
-            with open(self.wal_path, 'wb') as f:
-                f.write(content)
+            try:
+                f = os.fdopen(fd, 'wb')
+            except Exception:
+                os.close(fd)
+                raise
+                
+            with f:
+                f.write(digest)
+                f.write(ts_bytes)
+                f.write(db_bytes)
                 f.flush()
                 os.fsync(f.fileno())
 
-            self.data.update(updates)
-            self._flush_count += 1
-
-            if self._flush_count >= self._config.wal_sync_interval:
-                self._snapshot()
-                self._flush_count = 0
-
-    def checkpoint(self):
-        with self._lock:
-            self._snapshot()
-            self._flush_count = 0
-
-
-class AWSetCRDT:
-    __slots__ = ('_node_id', '_add_set', '_remove_set', '_lock', '_vector_clock', '_timestamp_precision')
-
-    def __init__(self, node_id: str):
-        self._node_id = node_id
-        self._add_set = {}
-        self._remove_set = {}
-        self._lock = threading.RLock()
-        self._vector_clock = {node_id: 0}
-        self._timestamp_precision = 1e-6
-
-    def add(self, element: str, timestamp: float = None, vector_clock: Dict = None):
-        with self._lock:
-            ts = timestamp or time.time()
-            self._vector_clock[self._node_id] = self._vector_clock.get(self._node_id, 0) + 1
-
-            if element not in self._add_set:
-                self._add_set[element] = set()
-            self._add_set[element].add((self._node_id, ts))
-
-            if vector_clock:
-                for node, count in vector_clock.items():
-                    self._vector_clock[node] = max(self._vector_clock.get(node, 0), count)
-
-    def remove(self, element: str, timestamp: float = None):
-        with self._lock:
-            ts = timestamp or time.time()
-            self._vector_clock[self._node_id] = self._vector_clock.get(self._node_id, 0) + 1
-
-            if element not in self._remove_set:
-                self._remove_set[element] = set()
-            self._remove_set[element].add((self._node_id, ts))
-
-    def contains(self, element: str) -> bool:
-        with self._lock:
-            if element not in self._add_set:
-                return False
-
-            if element not in self._remove_set:
-                return True
-
-            add_timestamps = self._add_set[element]
-            remove_timestamps = self._remove_set[element]
-
-            max_add = max(ts for _, ts in add_timestamps)
-            max_remove = max(ts for _, ts in remove_timestamps)
-
-            return max_add >= max_remove
-
-    def merge(self, other: 'AWSetCRDT') -> 'AWSetCRDT':
-        with self._lock:
-            for elem, timestamps in other._add_set.items():
-                if elem not in self._add_set:
-                    self._add_set[elem] = set()
-                self._add_set[elem].update(timestamps)
-
-            for elem, timestamps in other._remove_set.items():
-                if elem not in self._remove_set:
-                    self._remove_set[elem] = set()
-                self._remove_set[elem].update(timestamps)
-
-            for node, count in other._vector_clock.items():
-                self._vector_clock[node] = max(self._vector_clock.get(node, 0), count)
-
-            return self
-
-    def to_set(self) -> Set[str]:
-        with self._lock:
-            result = set()
-            for elem in self._add_set:
-                if self.contains(elem):
-                    result.add(elem)
-            return result
-
-    def get_vector_clock(self) -> Dict[str, int]:
-        with self._lock:
-            return self._vector_clock.copy()
-
-
-class ProvenanceLogger:
-    __slots__ = ('_wal', '_activity_log', '_lock', '_config', '_hash_chain')
-
-    def __init__(self, state_dir: Path, config: MergeConfig = DEFAULT_CONFIG):
-        self._config = config
-        self._wal = WALBackend(state_dir / 'provenance', config)
-        self._activity_log = deque(maxlen=1000)
-        self._lock = threading.RLock()
-        self._hash_chain = deque([hashlib.sha256(b'genesis').hexdigest()], maxlen=10000)
-        self._load_state()
-
-    def _load_state(self):
-        try:
-            all_entries = sorted(self._wal.data.values(), key=lambda x: x.get('timestamp', 0))
-            self._hash_chain = deque([hashlib.sha256(b'genesis').hexdigest()], maxlen=10000)
-            for entry in all_entries:
-                if entry.get('prev_hash') != self._hash_chain[-1]:
-                    logger.error(f"Provenance chain broken at {entry.get('timestamp')}")
-                    continue
-                self._hash_chain.append(entry['hash'])
-        except Exception as e:
-            logger.warning(f"Failed to load provenance state: {e}")
-
-    def log_activity(self, activity_type: str, entity_id: str, attributes: Dict, 
-                     agent: str = "system", derived_from: Optional[List[str]] = None):
-        if not self._config.enable_provenance_logging:
-            return
-
-        with self._lock:
-            timestamp = time.time()
-            prev_hash = self._hash_chain[-1]
-            record = {
-                'timestamp': timestamp,
-                'activity': activity_type,
-                'entity': entity_id,
-                'attributes': attributes,
-                'agent': agent,
-                'derived_from': derived_from or [],
-                'prev_hash': prev_hash
-            }
-            record_hash = hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()
-            record['hash'] = record_hash
-            self._hash_chain.append(record_hash)
-            self._activity_log.append(record)
-
-            if len(self._activity_log) >= 100:
-                self._flush()
-
-    def _flush(self):
-        batch = {}
-        for i, entry in enumerate(self._activity_log):
-            batch[f"prov_{entry['timestamp']}_{i}"] = entry
-        self._wal.put_batch(batch)
-        self._activity_log.clear()
-
-    def close(self):
-        with self._lock:
-            self._flush()
-            self._wal.checkpoint()
-
-
-class MerkleClock:
-    __slots__ = ('clock', '_merkle_tree', '_lock', '_hash_cache', '_had_conflict')
-
-    def __init__(self, initial: Optional[Dict] = None, branching: int = 2):
-        self.clock = initial.copy() if initial else {}
-        self._merkle_tree = IncrementalMerkleTree(branching)
-        self._lock = threading.RLock()
-        self._hash_cache = {}
-        self._had_conflict = False
-        self._rebuild_merkle()
-
-    def _rebuild_merkle(self):
-        for node, count in self.clock.items():
-            self._merkle_tree.update_leaf(node, f"{node}:{count}")
-
-    def increment(self, node: str):
-        with self._lock:
-            self.clock[node] = self.clock.get(node, 0) + 1
-            self._merkle_tree.update_leaf(node, f"{node}:{self.clock[node]}")
-            self._hash_cache.clear()
-            return self
-
-    def merge(self, other: 'MerkleClock'):
-        with self._lock:
-            relation = self.compare(other)
-            if relation == "concurrent":
-                for n, c in other.clock.items():
-                    self.clock[n] = max(self.clock.get(n, 0), c)
-                self._had_conflict = True
-                logger.warning(f"MerkleClock detected concurrent conflict, resolved with Add-Wins")
-            elif relation == "before":
-                self.clock.update(other.clock)
-            elif relation == "equal":
-                pass
-            else:  # "after"
-                pass
-            
-            self._rebuild_merkle()
-            self._hash_cache.clear()
-            return self
-
-    def compare(self, other: 'MerkleClock') -> str:
-        s_keys = set(self.clock.keys())
-        o_keys = set(other.clock.keys())
-        all_keys = s_keys | o_keys
-        s_dom = False
-        o_dom = False
-
-        for k in all_keys:
-            s_val = self.clock.get(k, 0)
-            o_val = other.clock.get(k, 0)
-            if s_val > o_val:
-                s_dom = True
-            elif o_val > s_val:
-                o_dom = True
-
-        if s_dom and not o_dom:
-            return "after"
-        if o_dom and not s_dom:
-            return "before"
-        if not s_dom and not o_dom:
-            return "equal"
-        return "concurrent"
-
-    def get_merkle_root(self) -> str:
-        with self._lock:
-            return self._merkle_tree.compute_root() or ''
-
-    def verify_consistency(self, other: 'MerkleClock') -> bool:
-        if self.compare(other) == "equal":
-            return self.get_merkle_root() == other.get_merkle_root()
-        return True
-
-    def had_conflict(self) -> bool:
-        with self._lock:
-            return self._had_conflict
-
-
-class IncrementalMerkleTree:
-    __slots__ = ('branching', 'leaves', 'nodes', '_dirty_paths', '_lock')
-
-    def __init__(self, branching: int = 2):
-        self.branching = branching
-        self.leaves = {}
-        self.nodes = {}
-        self._dirty_paths = set()
-        self._lock = threading.RLock()
-
-    def update_leaf(self, index: str, value: str):
-        with self._lock:
-            old_hash = self.leaves.get(index)
-            new_hash = hashlib.sha256(value.encode()).hexdigest()
-            if old_hash == new_hash:
-                return
-            self.leaves[index] = new_hash
-            self._mark_path_dirty(index)
-
-    def _mark_path_dirty(self, leaf_index: str):
-        path = self._get_path_to_root(leaf_index)
-        for node_id in path:
-            self._dirty_paths.add(node_id)
-
-    def _get_path_to_root(self, leaf_index: str) -> List[str]:
-        path = [f"leaf:{leaf_index}"]
-        current_level = 0
-        sorted_leaves = sorted(self.leaves.keys())
-        current_pos = sorted_leaves.index(leaf_index) if leaf_index in self.leaves else 0
-
-        while len(self.leaves) > self.branching ** current_level:
-            parent_pos = current_pos // self.branching
-            node_id = f"level{current_level}:node{parent_pos}"
-            path.append(node_id)
-            current_pos = parent_pos
-            current_level += 1
-
-        return path
-
-    def compute_root(self) -> Optional[str]:
-        with self._lock:
-            if not self.leaves:
-                return hashlib.sha256(b'').hexdigest()
-
-            sorted_leaves = sorted(self.leaves.items())
-            current_level = [h for _, h in sorted_leaves]
-            level_num = 0
-            empty_hash = hashlib.sha256(b'').hexdigest()
-
-            while len(current_level) > 1:
-                next_level = []
-                for i in range(0, len(current_level), self.branching):
-                    chunk = current_level[i:i+self.branching]
-                    if len(chunk) < self.branching:
-                        chunk.extend([empty_hash] * (self.branching - len(chunk)))
-                    combined = ''.join(chunk).encode()
-                    node_hash = hashlib.sha256(combined).hexdigest()
-                    next_level.append(node_hash)
-                current_level = next_level
-                level_num += 1
-
-            return current_level[0] if current_level else None
-
-
-class PolicyRuleEngine:
-    __slots__ = ('_policies', '_config', '_lock')
-    SOURCE_TYPES = {
-        'AUTHORITY': 3,
-        'COMMUNITY': 2,
-        'LOCAL': 1
-    }
-
-    def __init__(self, config: MergeConfig = DEFAULT_CONFIG):
-        self._config = config
-        self._policies = {}
-        self._lock = threading.Lock()
-
-    def register_source_policy(self, source_url: str, source_type: str, policy: str):
-        with self._lock:
-            self._policies[source_url] = {
-                'type': source_type,
-                'priority': self.SOURCE_TYPES.get(source_type, 1),
-                'policy': policy
-            }
-
-    def mediate_conflict(self, rule_value: str, sources: List[Tuple[str, float, bool]]) -> Tuple[bool, str, Dict]:
-        if not self._config.enable_policy_engine or not sources:
-            return True, "NO_POLICY", {}
-
-        with self._lock:
-            max_priority = -1
-            authoritative_sources = []
-
-            for url, weight, is_excl in sources:
-                policy = self._policies.get(url, {'type': 'LOCAL', 'priority': 1})
-                priority = policy['priority']
-                if priority > max_priority:
-                    max_priority = priority
-                    authoritative_sources = [(url, weight, is_excl, policy)]
-                elif priority == max_priority:
-                    authoritative_sources.append((url, weight, is_excl, policy))
-
-            if len(authoritative_sources) == 1:
-                winner = authoritative_sources[0]
-                proof = {
-                    'winner': winner[0],
-                    'type': winner[3]['type'],
-                    'reason': f'Strict hierarchy: {winner[3]["type"]} overrides others',
-                    'losers': [s[0] for s in sources if s[0] != winner[0]]
-                }
-                return not winner[2], "STRICT_HIERARCHY", proof
-
-            total_weight_allow = sum(s[1] for s in authoritative_sources if not s[2])
-            total_weight_deny = sum(s[1] for s in authoritative_sources if s[2])
-
-            if total_weight_deny > total_weight_allow * self._config.safety_override_threshold:
-                proof = {
-                    'decision': 'EXCLUDE',
-                    'reason': f'Weighted consensus: deny weight {total_weight_deny} > allow {total_weight_allow}',
-                    'participants': [s[0] for s in authoritative_sources]
-                }
-                return False, "WEIGHTED_CONSENSUS", proof
-
-            return True, "WEIGHTED_DEFAULT", {}
-
-
-@dataclass(frozen=True, slots=True)
-class LineageInfo:
-    depth: int
-    min_depth: int
-    originality: float
-    is_redundant: bool
-    confidence: float = 1.0
-    uncertainty_reason: Optional[str] = None
-    covering_sources: Optional[FrozenSet[str]] = None
-    scc_representative: Optional[str] = None
-    is_scc_root_representative: bool = False
-    uncertain_rules: Optional[FrozenSet[str]] = None
-    scc_unique_exclusions: Optional[FrozenSet[str]] = None
-    scc_exclusion_conflicts: Optional[FrozenSet[str]] = None
-    is_scc_union: bool = False
-    vector_clock_causal: Optional[str] = None
-    merkle_root: Optional[str] = None
-    specificity_depth: int = 0
-    verification_level: int = 3
-    mediation_proof: Optional[Dict] = None
-
-
-class StandardBloomFilter:
-    __slots__ = ('size', 'k', 'seed', 'bits', 'locks', 'shards')
-
-    def __init__(self, size: int, k: int, seed: int):
-        self.size = size
-        self.k = k
-        self.seed = seed
-        self.bits = bytearray(size // 8 + 1)
-        self.shards = min(1024, max(1, size // 4096))
-        self.locks = [threading.RLock() for _ in range(self.shards)]
-
-    def add(self, key: str):
-        for i in range(self.k):
-            h = fnv1a_64(key, self.seed + i * 0x9e3779b97f4a7c15)
-            idx = h % self.size
-            byte_idx = idx // 8
-            lock_idx = byte_idx % self.shards
-            with self.locks[lock_idx]:
-                self.bits[byte_idx] |= (1 << (idx % 8))
-
-    def contains(self, key: str) -> bool:
-        for i in range(self.k):
-            h = fnv1a_64(key, self.seed + i * 0x9e3779b97f4a7c15)
-            idx = h % self.size
-            byte_idx = idx // 8
-            lock_idx = byte_idx % self.shards
-            with self.locks[lock_idx]:
-                if not (self.bits[byte_idx] & (1 << (idx % 8))):
-                    return False
-        return True
-
-
-@dataclass(frozen=True, slots=True)
-class RawSource:
-    url: str
-    raw_bytes: Optional[bytes]
-    download_time: float
-    http_status: int
-    headers: Dict[str, str]
-
-
-@dataclass(frozen=True, slots=True)
-class ParsedRuleSet:
-    url: str
-    weight: float
-    domain_rules: Tuple[DomainRule, ...]
-    ip_rules: Tuple[IPCIDRRule, ...]
-    keyword_rules: Tuple[KeywordRule, ...]
-    regex_rules: Tuple[RegexRule, ...]
-    metadata: Dict[str, Any]
-    timestamp: float = field(default_factory=time.time)
-
-    def get_content_hash(self) -> str:
-        hasher = hashlib.sha256()
-        hasher.update(f"w:{self.weight:.6f}".encode())
-        for r in sorted(self.domain_rules, key=lambda x: x.normalized):
-            hasher.update(f"D:{r.match_type}:{r.normalized}:{r.is_exclusion}".encode())
-        for r in sorted(self.ip_rules, key=lambda x: (x.network.version, x.network.network_address)):
-            hasher.update(f"I:{r.network}:{r.is_exclusion}".encode())
-        return hasher.hexdigest()
-
-
-@dataclass
-class IndexedSource:
-    url: str
-    weight: float
-    content_hash: str
-    domain_trie: DomainTrie
-    ip_trie: StrictPatriciaTrie
-    interval_tree: Optional[IntervalTree]
-    bloom_filter: StandardBloomFilter
-    bdd_engine: Optional[TransactionalBDDEngine]
-    rule_verifier: Optional[BDDRuleVerifier]
-    domain_rules: List[DomainRule]
-    ip_rules: List[IPCIDRRule]
-    keyword_rules: List[KeywordRule]
-    regex_rules: List[RegexRule]
-    etld_set: Set[str]
-    merkle_clock: MerkleClock
-    last_modified: float = field(default_factory=time.time)
-    _crdt: Optional[AWSetCRDT] = None
-
-    @classmethod
-    def from_parsed(cls, parsed: ParsedRuleSet, config: MergeConfig, bdd_engine: Optional[TransactionalBDDEngine] = None):
-        domain_trie = DomainTrie(cache_limit=5000, depth_limit=config.max_domain_depth)
-        ip_trie = StrictPatriciaTrie()
-        interval_tree = IntervalTree(max_depth=128) if config.enable_interval_tree else None
-        
-        etld_set = set()
-        if USE_TLDEXTRACT and _tld_cache:
-            for rule in parsed.domain_rules:
-                try:
-                    ext = _tld_cache(rule.normalized)
-                    if ext.suffix:
-                        etld_set.add(ext.suffix)
-                except Exception:
-                    pass
-
-        total_rules = len(parsed.domain_rules) + len(parsed.ip_rules)
-        bloom_size, bloom_k = optimal_bloom_size(max(total_rules, 100), config.bloom_target_fpp)
-        det_seed = int(hashlib.sha256((config.deterministic_seed + parsed.url).encode()).hexdigest()[:8], 16)
-        bloom = StandardBloomFilter(bloom_size, bloom_k, det_seed)
-
-        rule_verifier = BDDRuleVerifier(bdd_engine) if bdd_engine else None
-        crdt = AWSetCRDT(config.node_id) if config.enable_crdt else None
-
-        for rule in parsed.domain_rules:
-            key = f"domain:{rule.normalized}:{rule.is_exclusion}"
-            bloom.add(key)
-            if not rule.is_exclusion:
-                domain_trie.insert(rule.normalized, rule.match_type)
-            if crdt:
-                crdt.add(f"domain:{rule.normalized}", timestamp=parsed.timestamp)
-
-        for rule in parsed.ip_rules:
-            key = f"ip_cidr:{rule.network}:{rule.is_exclusion}"
-            bloom.add(key)
-            if not rule.is_exclusion:
-                ip_trie.insert(rule.network)
-                if interval_tree:
-                    start = int(rule.network.network_address)
-                    end = int(rule.network.broadcast_address)
-                    interval_tree.insert(start, end, rule.network)
-            if crdt:
-                crdt.add(f"ip:{rule.network}", timestamp=parsed.timestamp)
-
-        return cls(
-            url=parsed.url,
-            weight=parsed.weight,
-            content_hash=parsed.get_content_hash(),
-            domain_trie=domain_trie,
-            ip_trie=ip_trie,
-            interval_tree=interval_tree,
-            bloom_filter=bloom,
-            bdd_engine=bdd_engine,
-            rule_verifier=rule_verifier,
-            domain_rules=list(parsed.domain_rules),
-            ip_rules=list(parsed.ip_rules),
-            keyword_rules=list(parsed.keyword_rules),
-            regex_rules=list(parsed.regex_rules),
-            etld_set=etld_set,
-            merkle_clock=MerkleClock(branching=config.merkle_tree_branching),
-            last_modified=parsed.timestamp,
-            _crdt=crdt
-        )
-
-
-@dataclass(slots=True)
-class AcceptedRule:
-    weight: float
-    source: VerifiedSource
-    is_exclusion: bool
-    specificity: int
-    rule_obj: RuleType
-
-
-class IterativeTarjanSCC:
-    __slots__ = ('graph', 'index', 'stack', 'on_stack', 'indices', 'lowlinks', 'sccs', 'max_nodes')
-
-    def __init__(self, graph_edges: Dict[str, Set[str]], max_nodes: int = 100000):
-        self.graph = graph_edges
-        self.index = 0
-        self.stack = []
-        self.on_stack = set()
-        self.indices = {}
-        self.lowlinks = {}
-        self.sccs = []
-        self.max_nodes = max_nodes
-
-    def find_sccs(self) -> List[List[str]]:
-        for v in self.graph:
-            if v not in self.indices:
-                self._strongconnect_iterative(v)
-        return self.sccs
-
-    def _strongconnect_iterative(self, start: str):
-        work_stack = [(start, iter(self.graph.get(start, [])), False)]
-
-        while work_stack:
-            v, children, processed = work_stack[-1]
-            if not processed:
-                if v not in self.indices:
-                    if len(self.indices) >= self.max_nodes:
-                        raise LineageAnalysisError(f"Exceeded max SCC nodes: {self.max_nodes}")
-                    self.indices[v] = self.index
-                    self.lowlinks[v] = self.index
-                    self.index += 1
-                    self.stack.append(v)
-                    self.on_stack.add(v)
-
-                try:
-                    w = next(children)
-                    if w not in self.indices:
-                        work_stack.append((w, iter(self.graph.get(w, [])), False))
-                    elif w in self.on_stack:
-                        self.lowlinks[v] = min(self.lowlinks[v], self.indices[w])
-                except StopIteration:
-                    work_stack[-1] = (v, children, True)
-            else:
-                work_stack.pop()
-                if work_stack:
-                    parent_v, _, _ = work_stack[-1]
-                    self.lowlinks[parent_v] = min(self.lowlinks[parent_v], self.lowlinks[v])
-
-                if self.lowlinks[v] == self.indices[v]:
-                    scc = []
-                    while True:
-                        w = self.stack.pop()
-                        self.on_stack.remove(w)
-                        scc.append(w)
-                        if w == v:
-                            break
-                    self.sccs.append(scc)
-
-
-class StrictConflictResolver:
-    __slots__ = ('config', '_entropy_cache', '_ngram_analyzer', '_policy_engine', '_tiered_strategy', '_rir_manager')
-
-    def __init__(self, config: MergeConfig = DEFAULT_CONFIG, rir_manager: Optional[RIRDataManager] = None):
-        self.config = config
-        self._entropy_cache = {}
-        self._ngram_analyzer = StrictNgramSpectrumAnalyzer(config) if config.enable_ngram_analysis else None
-        self._policy_engine = PolicyRuleEngine(config) if config.enable_policy_engine else None
-        self._tiered_strategy = TieredVerificationStrategy(config)
-        self._rir_manager = rir_manager
-
-    def _temporal_compare(self, src_a: VerifiedSource, src_b: VerifiedSource) -> int:
-        vc_cmp = src_a.indexed.merkle_clock.compare(src_b.indexed.merkle_clock)
-        if vc_cmp == "after":
-            return 1
-        elif vc_cmp == "before":
-            return -1
-        elif vc_cmp == "concurrent":
-            time_diff = src_a.indexed.last_modified - src_b.indexed.last_modified
-            if abs(time_diff) > 86400:
-                return 1 if time_diff > 0 else -1
-            return 0
-        
-        time_diff = src_a.indexed.last_modified - src_b.indexed.last_modified
-        if abs(time_diff) > 86400:
-            return 1 if time_diff > 0 else -1
-        return 0
-
-    def resolve(self, sources: List[VerifiedSource], min_score: float) -> Dict[str, List[str]]:
-        all_rules = []
-        current_time = time.time()
-        
-        if HAS_PSUTIL:
-            try:
-                mem = psutil.virtual_memory()
-                available_memory = 100.0 - mem.percent
-            except Exception:
-                available_memory = 50.0
-        else:
-            available_memory = 50.0
-        
-        monitor = ResourceMonitor(self.config.memory_threshold_percent) if self.config.enable_adaptive_degradation else None
-
-        for src in sources:
-            rule_count = len(src.indexed.domain_rules) + len(src.indexed.ip_rules)
-            tier = self._tiered_strategy.select_tier(rule_count, available_memory)
-            orig = src.lineage_info.originality if src.lineage_info else 1.0
-            base_weight = src.weight * orig
-
-            age_days = (current_time - src.indexed.last_modified) / 86400
-            if age_days > self.config.max_source_age_days:
-                time_decay = math.exp(-(age_days - self.config.max_source_age_days) / 30)
-                base_weight *= time_decay
-
-            if base_weight < min_score:
-                continue
-
-            verification_penalty = 0.9 if (src.lineage_info and src.lineage_info.verification_level < 3) else 1.0
-
-            for rule in src.indexed.domain_rules:
-                effective_weight = base_weight * verification_penalty
-                spec = rule.specificity_score * self.config.rule_specificity_boost
-
-                if rule.is_exclusion:
-                    all_rules.append((effective_weight, 'domain', rule.normalized, True, src, rule))
-                else:
-                    if self._ngram_analyzer:
-                        is_dga, explanation = self._ngram_analyzer.is_dga_like(rule.normalized)
-                        if is_dga:
-                            continue
-
-                    all_rules.append((effective_weight + spec, 'domain', rule.normalized, False, src, rule))
-
-            for rule in src.indexed.ip_rules:
-                effective_weight = base_weight * verification_penalty
-                all_rules.append((effective_weight, 'ip_cidr', str(rule.network), rule.is_exclusion, src, rule))
-
-            if monitor and monitor.should_degrade(2):
-                logger.warning("Resource pressure detected, continuing with current batch")
-
-        if self.config.deterministic_output:
-            det_rand = DeterministicRandom(self.config.deterministic_seed)
-            det_rand.shuffle(all_rules)
-            all_rules.sort(key=lambda x: (-x[0], x[1], x[2], x[3], x[4].url))
-        else:
-            all_rules.sort(key=lambda x: (-x[0], x[1], x[2]))
-
-        accepted_domains: Dict[str, AcceptedRule] = {}
-        accepted_ips: Dict[str, AcceptedRule] = {}
-        exclusions_map: Dict[str, AcceptedRule] = {}
-        conflict_map = defaultdict(list)
-
-        for weight, rtype, value, is_excl, src, rule_obj in all_rules:
-            if is_excl:
-                spec = rule_obj.specificity_score if isinstance(rule_obj, DomainRule) else 0
-                exclusions_map[value] = AcceptedRule(weight, src, True, spec, rule_obj)
-                conflict_map[(rtype, value)].append((src.url, weight, True))
-            else:
-                target_dict = accepted_domains if rtype == 'domain' else accepted_ips
-                if value in target_dict:
-                    conflict_map[(rtype, value)].append((src.url, weight, False))
-                    continue
-
-                spec = rule_obj.specificity_score if isinstance(rule_obj, DomainRule) else 0
-                accepted_rule = AcceptedRule(weight, src, False, spec, rule_obj)
-                
-                if rtype == 'domain':
-                    accepted_domains[value] = accepted_rule
-                    conflict_map[(rtype, value)].append((src.url, weight, False))
-                elif rtype == 'ip_cidr':
-                    try:
-                        net = ipaddress.ip_network(value, strict=False)
-                        accepted_ips[value] = accepted_rule
-                        conflict_map[(rtype, value)].append((src.url, weight, False))
-                    except ValueError:
-                        continue
-
-        mediation_results = {}
-        if self._policy_engine:
-            for key, sources_info in conflict_map.items():
-                if len(sources_info) > 1:
-                    should_include, policy_type, proof = self._policy_engine.mediate_conflict(key[1], sources_info)
-                    mediation_results[key] = (should_include, policy_type, proof)
-                    rtype, value = key
-                    if not should_include:
-                        if rtype == 'domain' and value in accepted_domains:
-                            del accepted_domains[value]
-                        elif rtype == 'ip_cidr' and value in accepted_ips:
-                            del accepted_ips[value]
-
-        self._propagate_exclusion(exclusions_map, accepted_domains)
-        self._propagate_exclusion(exclusions_map, accepted_ips)
-
-        result = defaultdict(list)
-        domain_trie = DomainTrie(depth_limit=self.config.max_domain_depth)
-
-        for value, acc_rule in accepted_domains.items():
-            if not acc_rule.is_exclusion:
-                is_wc = value.startswith('*.')
-                clean_val = value.lstrip('*.') if value.startswith('*.') else value
-                match_type = MatchType.WILDCARD if is_wc else MatchType.EXACT
-                domain_trie.insert(clean_val, match_type)
-
-        optimized = domain_trie.optimize()
-        final_domains = []
-
-        for domain, mtype in optimized:
-            clean = domain.lstrip('*.') if domain.startswith('*.') else domain
-            spec_score = domain_trie.get_specificity_score(clean)
-            final_domains.append((domain, mtype, spec_score))
-
-        final_domains.sort(key=lambda x: (-x[2], x[0]))
-
-        for domain, mtype, _ in final_domains:
-            if domain.startswith('*.'):
-                result['domain_suffix'].append(domain[2:])
-            elif domain == '*':
-                result['domain_suffix'].append('')
-            else:
-                result['domain'].append(domain)
-
-        if accepted_ips:
-            positives = [ipaddress.ip_network(v, strict=False) for v, r in accepted_ips.items() if not r.is_exclusion]
-            negatives = [ipaddress.ip_network(v, strict=False) for v, r in accepted_ips.items() if r.is_exclusion]
-
-            if self.config.strict_cidr_arithmetic and negatives:
-                try:
-                    final_ips = SweepLineCIDRManager.subtract(
-                        positives, negatives, 
-                        max_fragments=self.config.max_cidr_fragmentation,
-                        enable_adjacent_merge=self.config.enable_cidr_adjacent_merge,
-                        enable_approximation=self.config.enable_cidr_approximation,
-                        approximation_threshold=self.config.cidr_approximation_threshold,
-                        max_loss_rate=self.config.cid_approximation_max_loss_rate,
-                        strict_zero_loss=self.config.strict_zero_loss,
-                        enable_rir_lookup=self.config.enable_rir_lookup and self._rir_manager is not None,
-                        rir_manager=self._rir_manager
-                    )
-                    result['ip_cidr'] = final_ips
-                except CIDRFragmentationError as e:
-                    logger.error(f"CIDR fragmentation limit exceeded: {e.processed_count} fragments, loss: {e.loss_rate:.2%}")
-                    raise
-            else:
-                collapsed = list(ipaddress.collapse_addresses(positives))
-                if self.config.enable_cidr_adjacent_merge:
-                    collapsed = SweepLineCIDRManager._merge_adjacent_cidrs(collapsed)
-                result['ip_cidr'] = [str(n) for n in collapsed]
-
-        return dict(result)
-
-    def _propagate_exclusion(self, exclusions: Dict[str, AcceptedRule], accepted: Dict[str, AcceptedRule]):
-        to_remove = []
-
-        for acc_key, acc_rule in list(accepted.items()):
-            if acc_rule.is_exclusion:
-                continue
-
-            for excl_key, excl_rule in exclusions.items():
-                if self._is_covered_by_exclusion(acc_key, acc_rule, excl_key, excl_rule):
-                    temporal_cmp = self._temporal_compare(acc_rule.source, excl_rule.source)
-                    if excl_rule.weight >= acc_rule.weight * self.config.safety_override_threshold or temporal_cmp > 0:
-                        to_remove.append(acc_key)
-                        break
-
-        for key in to_remove:
-            if key in accepted:
-                del accepted[key]
-
-    def _is_covered_by_exclusion(self, acc_key: str, acc_rule: AcceptedRule, 
-                                 excl_key: str, excl_rule: AcceptedRule) -> bool:
-        acc_type = 'domain' if isinstance(acc_rule.rule_obj, DomainRule) else 'ip_cidr'
-        excl_type = 'domain' if isinstance(excl_rule.rule_obj, DomainRule) else 'ip_cidr'
-        
-        if acc_type != excl_type:
-            return False
-            
-        if acc_type == 'domain':
-            if excl_key.startswith('*.'):
-                suffix = excl_key[2:]
-                return acc_key.endswith(suffix)
-            else:
-                return acc_key == excl_val
-        elif acc_type == 'ip_cidr':
-            try:
-                acc_net = ipaddress.ip_network(acc_key, strict=False)
-                excl_net = ipaddress.ip_network(excl_key, strict=False)
-                return acc_net.subnet_of(excl_net)
-            except ValueError:
-                return False
-        return False
-
-
-class PersistentLineageAnalyzer:
-    __slots__ = ('config', 'state_file', 'wal_backend', '_graph', '_cached_depths', 
-                 '_format_version', '_lock', '_smt_verifier', '_source_versions', 
-                 '_global_bdd', '_det_random', '_provenance', '_fuzzer', '_rir_manager')
-
-    def __init__(self, state_file: Optional[Path] = None, config: MergeConfig = DEFAULT_CONFIG):
-        self.config = config
-        self.state_file = state_file or Path('.lineage_state_v9')
-        self.wal_backend = WALBackend(self.state_file, config)
-        self._graph = defaultdict(set)
-        self._cached_depths = {}
-        self._format_version = 90
-        self._lock = threading.RLock()
-        self._source_versions = {}
-        self._global_bdd = TransactionalBDDEngine(gc_threshold=config.bdd_node_limit) if config.enable_bdd_verification else None
-        self._det_random = DeterministicRandom(config.deterministic_seed)
-        self._smt_verifier = None
-        self._provenance = ProvenanceLogger(self.state_file.parent if self.state_file else Path('.'), config)
-        self._fuzzer = ProgressiveFuzzingHarness(config)
-        self._rir_manager = RIRDataManager(config) if config.enable_rir_lookup else None
-        self._load_state()
-
-    def _load_state(self):
-        try:
-            data = self.wal_backend.get('lineage_v90')
-            if data:
-                state = data
-                self._graph = defaultdict(set, {k: set(v) for k, v in state.get('edges', {}).items()})
-                self._cached_depths = state.get('depths', {})
-                self._source_versions = state.get('versions', {})
-        except Exception as e:
-            logger.warning(f"State load failed: {e}, starting fresh")
-
-    def save_state(self):
-        try:
             with self._lock:
-                state = {
-                    'edges': {k: list(v) for k, v in self._graph.items()},
-                    'depths': self._cached_depths,
-                    'versions': self._source_versions,
-                    'version': 90
-                }
-                self.wal_backend.put_batch({'lineage_v90': state})
-                self.wal_backend.checkpoint()
-        except Exception as e:
-            logger.warning(f"State save failed: {e}")
-
-    def close(self):
-        if self._smt_verifier:
-            self._smt_verifier.close()
-        self.save_state()
-        self._provenance.close()
-
-    def compute_incremental(self, parsed_sources: List[ParsedRuleSet]) -> Tuple[Set[int], List[VerifiedSource]]:
-        if self._smt_verifier is None and self.config.enable_smt_verification:
-            self._smt_verifier = SMTVerifier(self.config)
-
-        if self.config.enable_fuzzing_tests:
-            if not self._fuzzer.run_fuzzing_suite(self):
-                logger.warning("Fuzzing tests detected violations, proceeding with caution")
-
-        hash_to_parsed = {}
-        for s in parsed_sources:
-            key = (s.get_content_hash(), s.url, s.weight)
-            hash_to_parsed[key] = s
-        
-        current_hashes = set(hash_to_parsed.keys())
-
-        changed_hashes = set()
-        for h in current_hashes:
-            if h not in self._source_versions:
-                changed_hashes.add(h)
-                self._source_versions[h] = time.time()
-
-        if not changed_hashes and current_hashes == set(self._cached_depths.keys()):
-            return self._apply_cached_results(parsed_sources)
-
-        monitor = ResourceMonitor(self.config.memory_threshold_percent) if self.config.enable_adaptive_degradation else None
-
-        indexed_sources = []
-        for parsed in parsed_sources:
-            indexed = IndexedSource.from_parsed(parsed, self.config, self._global_bdd)
-            indexed_sources.append(indexed)
-
-        new_edges = set()
-        sorted_sources = sorted(indexed_sources, key=lambda s: (-s.weight, -len(s.domain_rules)))
-        confidence_map = {}
-        uncertainty_map = {}
-        causal_map = {}
-
-        for child in sorted_sources:
-            h_child = (child.content_hash, child.url, child.weight)
-
-            for parent in sorted_sources:
-                if child is parent:
-                    continue
-
-                is_subset, confidence, reason = self._is_strict_subset_with_confidence(child, parent, monitor)
-                if is_subset:
-                    h_parent = (parent.content_hash, parent.url, parent.weight)
-                    new_edges.add((h_parent, h_child))
-                    confidence_map[h_child] = min(confidence_map.get(h_child, 1.0), confidence)
-                    if reason:
-                        uncertainty_map[h_child] = reason
-                    
-                    causal_map[h_child] = str(h_parent)
-
-                    self._provenance.log_activity(
-                        'SUBSET_DETECTED',
-                        str(h_child),
-                        {'parent': str(h_parent), 'confidence': confidence, 'reason': reason},
-                        'lineage_analyzer',
-                        [str(h_parent)]
-                    )
-
-        if new_edges:
-            for p, c in new_edges:
-                self._graph[p].add(c)
-
-        max_depths, min_depths, scc_map, sccs = self._compute_depths_with_scc(current_hashes, hash_to_parsed)
-
-        with self._lock:
-            for h in current_hashes:
-                self._cached_depths[h] = {
-                    'max': max_depths.get(h, 0), 
-                    'min': min_depths.get(h, 0), 
-                    'scc': scc_map.get(h),
-                    'confidence': confidence_map.get(h, 1.0),
-                    'uncertainty': uncertainty_map.get(h),
-                    'causal': causal_map.get(h)
-                }
-
-        union_sources = self._create_scc_unions(indexed_sources, sccs, hash_to_parsed, max_depths, min_depths)
-
-        redundant = set()
-        final_sources = []
-        processed_sccs = set()
-
-        for i, src in enumerate(indexed_sources):
-            h = (src.content_hash, src.url, src.weight)
-            scc_id = None
-            for idx, scc in enumerate(sccs):
-                if h in scc:
-                    scc_id = idx
-                    break
-
-            cached = self._cached_depths.get(h, {})
-
-            if scc_id is not None:
-                if scc_id in processed_sccs:
-                    continue
-                processed_sccs.add(scc_id)
-                union_src = union_sources.get(scc_id)
-                if union_src:
-                    final_sources.append(union_src)
-                    if min_depths.get(h, 0) > 0:
-                        redundant.add(len(final_sources) - 1)
-            else:
-                orig = 1.0 / (1.0 + self.config.originality_decay_rate * cached.get('min', 0))
-                is_red = cached.get('min', 0) > 0
-
-                lineage = LineageInfo(
-                    depth=cached.get('max', 0),
-                    min_depth=cached.get('min', 0),
-                    originality=orig,
-                    is_redundant=is_red,
-                    confidence=cached.get('confidence', 1.0),
-                    uncertainty_reason=cached.get('uncertainty'),
-                    covering_sources=frozenset(str(s) for s in self._graph.get(h, set())) if is_red else None,
-                    verification_level=3 if cached.get('confidence', 1.0) >= 1.0 else 2
-                )
-
-                verified = VerifiedSource(
-                    url=src.url,
-                    weight=src.weight,
-                    content_hash=src.content_hash,
-                    indexed=src,
-                    lineage_info=lineage,
-                    final_rules={}
-                )
-
-                final_sources.append(verified)
-                if is_red:
-                    redundant.add(len(final_sources) - 1)
-
-        self.save_state()
-        return redundant, final_sources
-
-    def _create_scc_unions(self, sources: List[IndexedSource], sccs: List[List[Tuple[str, str, float]]], 
-                          hash_to_parsed: Dict[Tuple[str, str, float], ParsedRuleSet], 
-                          max_depths: Dict, min_depths: Dict) -> Dict[int, Optional[VerifiedSource]]:
-        union_map = {}
-        
-        hash_to_indexed = {(s.content_hash, s.url, s.weight): s for s in sources}
-
-        for scc_idx, scc in enumerate(sccs):
-            if len(scc) <= 1:
-                continue
-
-            members = [hash_to_indexed[h] for h in scc if h in hash_to_indexed]
-            if not members:
-                continue
-
-            rep = scc[0]
-            rep_src = hash_to_indexed[rep]
-
-            all_exclusions = set()
-            all_domains = set()
-            for m in members:
-                for r in m.domain_rules:
-                    if r.is_exclusion:
-                        all_exclusions.add(r.normalized)
-                    else:
-                        all_domains.add(r.normalized)
-
-            conflicts = all_exclusions & all_domains
-
-            merged_crdt = None
-            for m in members:
-                if m._crdt:
-                    if merged_crdt is None:
-                        merged_crdt = m._crdt
-                    else:
-                        merged_crdt = merged_crdt.merge(m._crdt)
-
-            union_merkle = MerkleClock(branching=self.config.merkle_tree_branching)
-            for m in members:
-                union_merkle.merge(m.merkle_clock)
-
-            lineage = LineageInfo(
-                depth=max_depths.get(rep, 0),
-                min_depth=min_depths.get(rep, 0),
-                originality=1.0,
-                is_redundant=min_depths.get(rep, 0) > 0,
-                confidence=0.9,
-                uncertainty_reason="scc_union_heuristic",
-                is_scc_union=True,
-                scc_exclusion_conflicts=frozenset(conflicts),
-                verification_level=2
-            )
-
-            verified = VerifiedSource(
-                url=f"scc://{str(rep)[:16]}",
-                weight=max(m.weight for m in members),
-                content_hash=rep_src.content_hash,
-                indexed=rep_src,
-                lineage_info=lineage,
-                final_rules={}
-            )
-            
-            if merged_crdt:
-                verified.indexed._crdt = merged_crdt
-
-            union_map[scc_idx] = verified
-
-        return union_map
-
-    def _is_strict_subset_with_confidence(self, child: IndexedSource, parent: IndexedSource, 
-                                          monitor: Optional[ResourceMonitor] = None) -> Tuple[bool, float, Optional[str]]:
-        confidence = 1.0
-        reason = None
-
-        if not parent.bloom_filter:
-            return False, 1.0, None
-
-        for rule in child.domain_rules:
-            key = f"domain:{rule.normalized}:{rule.is_exclusion}"
-            if not parent.bloom_filter.contains(key):
-                return False, 1.0, None
-
-        if parent.rule_verifier and child.rule_verifier:
-            bdd_subset, bdd_conf = child.rule_verifier.verify_subset_strict(
-                parent.domain_rules + parent.ip_rules,
-                child.domain_rules + child.ip_rules
-            )
-            if bdd_subset:
-                return True, 1.0, None
-            confidence *= bdd_conf
-
-        for rule in child.ip_rules:
-            if not rule.is_exclusion:
-                if not parent.ip_trie.contains_subnet(rule.network):
-                    return False, confidence, reason
-
-        for cidr_rule in child.ip_rules:
-            if parent.interval_tree and not cidr_rule.is_exclusion:
-                start = int(cidr_rule.network.network_address)
-                end = int(cidr_rule.network.broadcast_address)
-                overlapping = parent.interval_tree.find_overlapping(start, end)
-                for parent_net in overlapping:
-                    if not cidr_rule.network.subnet_of(parent_net) and cidr_rule.network.overlaps(parent_net):
-                        confidence *= 0.7
-                        reason = f"cidr_partial_overlap:{cidr_rule.network} vs {parent_net}"
-
-        final_confidence = max(0.5, confidence)
-        return True, final_confidence, reason
-
-    def _compute_depths_with_scc(self, nodes: Set[Tuple[str, str, float]], 
-                                hash_to_parsed: Dict[Tuple[str, str, float], ParsedRuleSet]) -> Tuple[Dict, Dict, Dict, List]:
-        if not nodes:
-            return {}, {}, {}, []
-
-        local_edges = defaultdict(set)
-        for n in nodes:
-            parents = self._graph.get(n, set()) & nodes
-            for p in parents:
-                local_edges[p].add(n)
-
-        tarjan = IterativeTarjanSCC(dict(local_edges), max_nodes=100000)
-        sccs = tarjan.find_sccs()
-
-        scc_map = {}
-        for idx, scc in enumerate(sccs):
-            for node in scc:
-                scc_map[node] = scc[0]
-
-        in_degree = defaultdict(int)
-        compressed_edges = defaultdict(set)
-
-        for parent in nodes:
-            p_rep = scc_map.get(parent, parent)
-            for child in local_edges.get(parent, []):
-                c_rep = scc_map.get(child, child)
-                if p_rep != c_rep:
-                    if c_rep not in compressed_edges[p_rep]:
-                        compressed_edges[p_rep].add(c_rep)
-                        in_degree[c_rep] += 1
-
-        queue = deque([n for n in nodes if scc_map.get(n, n) == n and in_degree[scc_map.get(n, n)] == 0])
-        max_depths = {}
-        min_depths = {}
-
-        for scc in sccs:
-            rep = scc[0]
-            for node in scc:
-                max_depths[node] = 0
-                min_depths[node] = 0
-
-        parent_depths_min = defaultdict(list)
-
-        while queue:
-            u = queue.popleft()
-            md = max_depths[u]
-            mid = min_depths[u]
-
-            for v in compressed_edges.get(u, []):
-                max_depths[v] = max(max_depths.get(v, 0), md + 1)
-                parent_depths_min[v].append(mid)
-                in_degree[v] -= 1
-                if in_degree[v] == 0:
-                    min_depths[v] = min(parent_depths_min[v]) + 1 if parent_depths_min[v] else 0
-                    queue.append(v)
-
-        final_max = {}
-        final_min = {}
-        final_scc = {}
-
-        for node in nodes:
-            rep = scc_map.get(node, node)
-            final_max[node] = max_depths.get(rep, 0)
-            final_min[node] = min_depths.get(rep, 0)
-            if rep != node:
-                final_scc[node] = rep
-
-        return final_max, final_min, final_scc, sccs
-
-    def _apply_cached_results(self, parsed_sources: List[ParsedRuleSet]) -> Tuple[Set[int], List[VerifiedSource]]:
-        redundant = set()
-        final_sources = []
-
-        for i, parsed in enumerate(parsed_sources):
-            h = (parsed.get_content_hash(), parsed.url, parsed.weight)
-            info = self._cached_depths.get(h, {'max': 0, 'min': 0, 'confidence': 1.0})
-
-            min_d = info['min']
-            max_d = info['max']
-            orig = 1.0 / (1.0 + self.config.originality_decay_rate * min_d)
-            is_red = min_d > 0
-
-            lineage = LineageInfo(
-                depth=max_d, min_depth=min_d, originality=orig, is_redundant=is_red,
-                confidence=info.get('confidence', 1.0), uncertainty_reason=info.get('uncertainty'),
-                covering_sources=frozenset(str(s) for s in self._graph.get(h, [])) if is_red else None,
-                verification_level=3 if info.get('confidence', 1.0) >= 1.0 else 2
-            )
-
-            indexed = IndexedSource.from_parsed(parsed, self.config)
-            verified = VerifiedSource(
-                url=parsed.url,
-                weight=parsed.weight,
-                content_hash=parsed.get_content_hash(),
-                indexed=indexed,
-                lineage_info=lineage,
-                final_rules={}
-            )
-
-            final_sources.append(verified)
-            if is_red:
-                redundant.add(i)
-
-        return redundant, final_sources
-
-
-class ProgressiveFuzzingHarness:
-    __slots__ = ('_config', '_oracle', '_violation_count')
-
-    def __init__(self, config: MergeConfig = DEFAULT_CONFIG):
-        self._config = config
-        self._oracle = None
-        self._violation_count = 0
-
-    def run_fuzzing_suite(self, lineage_analyzer, max_duration: int = 300):
-        if not self._config.enable_fuzzing_tests:
+                if self._pending_write_ts == current_ts:
+                    tmp.replace(self.db_path)
+                    self._timestamp = current_ts
+                else:
+                    tmp.unlink(missing_ok=True)
             return True
-
-        start_time = time.time()
-        passed = 0
-        failed = 0
-
-        try:
-            self._test_idempotence(lineage_analyzer)
-            passed += 1
         except Exception as e:
-            logger.error(f"Fuzzing idempotence failed: {e}")
-            failed += 1
-
-        try:
-            self._test_commutativity(lineage_analyzer)
-            passed += 1
-        except Exception as e:
-            logger.error(f"Fuzzing commutativity failed: {e}")
-            failed += 1
-
-        try:
-            self._test_cidr_roundtrip()
-            passed += 1
-        except Exception as e:
-            logger.error(f"Fuzzing CIDR roundtrip failed: {e}")
-            failed += 1
-
-        if failed > 0:
-            self._violation_count += failed
+            logger.error(f"Snapshot failed: {e}")
+            if tmp.exists(): tmp.unlink(missing_ok=True)
             return False
-        return True
 
-    def _test_idempotence(self, lineage_analyzer):
-        sources = self._generate_random_sources(10)
-        _, proc1 = lineage_analyzer.compute_incremental(sources)
-        _, proc2 = lineage_analyzer.compute_incremental(sources)
-        assert len(proc1) == len(proc2), "Idempotence violated"
+    def get(self, key: str) -> Any:
+        with self._lock: return self.data.get(key)
 
-    def _test_commutativity(self, lineage_analyzer):
-        sources = self._generate_random_sources(20)
-        half = len(sources) // 2
-        _, proc_ab = lineage_analyzer.compute_incremental(sources[:half] + sources[half:])
-        _, proc_ba = lineage_analyzer.compute_incremental(sources[half:] + sources[:half])
-        assert len(proc_ab) == len(proc_ba), "Commutativity violated"
-
-    def _test_cidr_roundtrip(self):
-        nets = []
-        for _ in range(50):
-            ip = random.randint(0, 2**32 - 1)
-            prefix = random.randint(16, 30)
-            nets.append(ipaddress.IPv4Network((ip, prefix), strict=False))
-
-        merged = list(ipaddress.collapse_addresses(nets))
-        assert all(isinstance(n, ipaddress.IPv4Network) for n in merged)
-
-    def _generate_random_sources(self, count: int) -> List[ParsedRuleSet]:
-        sources = []
-        for i in range(count):
-            url = f"fuzz://source_{i}"
-            
-            domain_rules = []
-            for j in range(i * 5):
-                domain = f"fuzz{j}domain{i}.com"
-                domain_rules.append(DomainRule(
-                    pattern=domain,
-                    match_type=MatchType.SUFFIX,
-                    normalized=domain,
-                    is_exclusion=False,
-                    original=domain,
-                    specificity_score=len(domain.split('.')) * 10
-                ))
-            
-            ip_rules = []
-            for j in range(i * 2):
-                ip_int = random.randint(0x0A000000, 0x0AFFFFFF)
-                network = ipaddress.IPv4Network((ip_int, 24), strict=False)
-                ip_rules.append(IPCIDRRule(
-                    network=network,
-                    original_str=str(network),
-                    is_exclusion=False
-                ))
-            
-            src = ParsedRuleSet(
-                url=url,
-                weight=1.0 + (i * 0.1),
-                domain_rules=tuple(domain_rules),
-                ip_rules=tuple(ip_rules),
-                keyword_rules=(),
-                regex_rules=(),
-                metadata={'fuzz_id': i},
-                timestamp=time.time()
-            )
-            sources.append(src)
-        return sources
+    def put_batch(self, updates: dict[str, Any]) -> bool:
+        with self._lock: self.data.update(updates)
+        return self._snapshot()
 
 
-def create_session():
-    session = requests.Session()
-    retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=20)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
-    session.headers.update({"User-Agent": "Mozilla/5.0 (compatible; HyperAccurate/9.0)"})
-    return session
+class ParsedRuleSet:
+    __slots__ = ('url', 'weight', 'domain_rules', 'ip_rules', 'timestamp', 'content_hash')
+
+    def __init__(self, url: str, weight: float, domain_rules: tuple[DomainRule, ...], ip_rules: tuple[IPCIDRRule, ...], timestamp: float, content_hash: str = ""):
+        self.url = url
+        self.weight = weight
+        self.domain_rules = domain_rules
+        self.ip_rules = ip_rules
+        self.timestamp = timestamp
+
+        if not content_hash:
+            h = hashlib.sha256()
+            for r in sorted(self.domain_rules, key=lambda x: (x.normalized, x.match_type.value, x.is_exclusion)):
+                h.update(b"D%d%d%s" % (r.match_type.value, r.is_exclusion, r.normalized.encode('ascii', errors='ignore')))
+            for ir in sorted(self.ip_rules, key=lambda x: (x.version, x.start_int, x.prefixlen, x.is_exclusion)):
+                h.update(b"I%d%d%d%d" % (ir.version, ir.start_int, ir.prefixlen, ir.is_exclusion))
+            self.content_hash = h.hexdigest()
+        else:
+            self.content_hash = content_hash
 
 
-def download_file_stream(session, url, max_size, temp_dir):
-    temp_path = None
-    try:
-        with session.get(url, stream=True, timeout=(10, 60), verify=True) as response:
-            response.raise_for_status()
-            content_type = response.headers.get('content-type', '').lower()
-            if 'html' in content_type and not url.endswith('.html'):
-                return None, None
-
-            length_str = response.headers.get('content-length')
-            if length_str and int(length_str) > max_size:
-                return None, None
-
-            fd, temp_path_str = tempfile.mkstemp(suffix='.tmp', dir=str(temp_dir))
-            temp_path = Path(temp_path_str)
-            total = 0
-            first_chunk = True
-
-            with os.fdopen(fd, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=131072):
-                    if not chunk:
-                        continue
-                    if first_chunk and RE_HTML_MAGIC.match(chunk):
-                        return None, None
-                    first_chunk = False
-                    total += len(chunk)
-                    if total > max_size:
-                        return None, None
-                    f.write(chunk)
-
-            if total <= 5 * 1024 * 1024:
-                content = temp_path.read_bytes()
-                try:
-                    temp_path.unlink()
-                except:
-                    pass
-                return content, None
-            return None, temp_path
-
-    except Exception as e:
-        if temp_path and temp_path.exists():
-            try:
-                temp_path.unlink()
-            except:
-                pass
-        raise TransientError(f"Download failed: {e}")
-
-
-class RuleParser:
-    __slots__ = ('_config',)
-    RULE_TYPE_MAP = {
-        'DOMAIN-SUFFIX': 'domain_suffix', 'DOMAIN': 'domain',
-        'DOMAIN-KEYWORD': 'domain_keyword', 'DOMAIN-REGEX': 'domain_regex',
-        'IP-CIDR': 'ip_cidr', 'IP-CIDR6': 'ip_cidr',
-        'SRC-IP-CIDR': 'source_ip_cidr', 'DOMAIN-WILDCARD': 'domain_wildcard',
-    }
-
-    def __init__(self, config: MergeConfig = DEFAULT_CONFIG):
-        self._config = config
-
-    def parse(self, content: bytes, url: str, weight: float) -> ParsedRuleSet:
-        if len(content) > 10 * 1024 * 1024:
-            raise ValueError("Content too large")
-        
-        domain_rules = []
-        ip_rules = []
-        keyword_rules = []
-        regex_rules = []
-        metadata = {}
-        timestamp = time.time()
-
-        try:
-            data = json.loads(content.decode('utf-8', errors='strict'))
-            rules_data = data.get("rules", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
-            metadata['version'] = data.get('version') if isinstance(data, dict) else None
-
-            for rule in rules_data:
-                if not isinstance(rule, dict):
-                    continue
-
-                is_exclusion = rule.get('invert', False)
-                for key, val in rule.items():
-                    if key == 'invert':
-                        continue
-
-                    mapped = self.RULE_TYPE_MAP.get(key.upper(), key)
-                    values = val if isinstance(val, list) else [val]
-
-                    for v in values:
-                        v_str = str(v).strip()
-                        if not v_str:
-                            continue
-                        self._process_value(mapped, v_str, is_exclusion, domain_rules, ip_rules, keyword_rules, regex_rules)
-
-        except json.JSONDecodeError:
-            text = content.decode('utf-8-sig', errors='ignore')
-            lines = text.splitlines()
-            
-            if len(lines) > 1_000_000:
-                raise ValueError("Too many lines")
-            
-            for line in lines:
-                line = line.strip()
-                if not line or line.startswith(('#', '//', ';')):
-                    continue
-
-                is_excl = line.startswith('!')
-                val = line[1:].strip() if is_excl else line
-                if not val:
-                    continue
-
-                if ',' in val and not val.startswith('http'):
-                    parts = val.split(',', 2)
-                    if len(parts) >= 2:
-                        rtype_raw = parts[0].upper().replace('-', '_')
-                        value = parts[1].strip()
-                        type_map = {
-                            'DOMAIN_SUFFIX': 'domain_suffix', 'DOMAIN': 'domain',
-                            'IP-CIDR': 'ip_cidr', 'IP-CIDR6': 'ip_cidr',
-                            'DOMAIN_KEYWORD': 'domain_keyword', 'DOMAIN_REGEX': 'domain_regex',
-                            'DOMAIN_WILDCARD': 'domain_wildcard',
-                        }
-                        if rtype_raw in type_map:
-                            mapped = type_map[rtype_raw]
-                            self._process_value(mapped, value, is_excl, domain_rules, ip_rules, keyword_rules, regex_rules)
-                            continue
-
-        return ParsedRuleSet(
-            url=url,
-            weight=weight,
-            domain_rules=tuple(domain_rules),
-            ip_rules=tuple(ip_rules),
-            keyword_rules=tuple(keyword_rules),
-            regex_rules=tuple(regex_rules),
-            metadata=metadata,
-            timestamp=timestamp
-        )
-
-    def _process_value(self, rtype: str, value: str, is_exclusion: bool, 
-                       domain_rules: List, ip_rules: List, keyword_rules: List, regex_rules: List):
-        if rtype in ('domain', 'domain_suffix', 'domain_wildcard'):
-            is_wc = value.startswith('*.')
-            clean = value[2:] if is_wc else value
-            norm, _ = self._normalize_domain(clean)
-            if norm:
-                mtype = MatchType.WILDCARD if is_wc else (MatchType.SUFFIX if rtype == 'domain_suffix' else MatchType.EXACT)
-                rule = DomainRule(pattern=value, match_type=mtype, normalized=norm, is_exclusion=is_exclusion, original=value)
-                domain_rules.append(rule)
-        elif rtype == 'ip_cidr':
-            try:
-                net = ipaddress.ip_network(value, strict=False)
-                rule = IPCIDRRule(network=net, original_str=value, is_exclusion=is_exclusion)
-                ip_rules.append(rule)
-            except ValueError:
-                pass
-        elif rtype == 'domain_keyword':
-            keyword_rules.append(KeywordRule(keyword=value, is_exclusion=is_exclusion))
-        elif rtype == 'domain_regex':
-            regex_rules.append(RegexRule(pattern=value, is_exclusion=is_exclusion))
-
-    @staticmethod
-    def _normalize_domain(content: str) -> Tuple[Optional[str], bool]:
-        original = content.strip()
-        content = original.lower().strip('.')
-        if not content or len(content) > 253:
-            return (None, False)
-
-        is_exclusion = False
-        if RE_EXCLUSION_PREFIX.match(content):
-            is_exclusion = True
-            content = content.lstrip('!').strip()
-            if not content:
-                return (None, is_exclusion)
-
-        try:
-            normalized = unicodedata.normalize('NFC', content)
-            if normalized != content:
-                content = normalized
-
-            if any(ord(c) > 127 for c in content):
-                encoded = content.encode('idna').decode('ascii')
-                restored = encoded.encode('ascii').decode('idna')
-                if unicodedata.normalize('NFC', restored) != content:
-                    return (None, is_exclusion)
-            elif RE_PUNYCODE.match(content.split('.')[-1]):
-                encoded = content
-                try:
-                    restored = encoded.encode('ascii').decode('idna')
-                    if unicodedata.normalize('NFC', restored) != content:
-                        return (None, is_exclusion)
-                except:
-                    return (None, is_exclusion)
-            else:
-                encoded = content
-        except UnicodeError:
-            return (None, is_exclusion)
-
-        if ' ' in encoded or '_' in encoded:
-            return (None, is_exclusion)
-
-        parts = encoded.split('.')
-        for part in parts:
-            if not part or len(part) > 63 or part.startswith('-') or part.endswith('-'):
-                return (None, is_exclusion)
-            if not RE_DOMAIN_LABEL.match(part):
-                return (None, is_exclusion)
-
-        return (encoded, is_exclusion)
-
-
-def cleanup_temp_dir(temp_dir: Path, max_retries: int = 3) -> bool:
-    for i in range(max_retries):
-        try:
-            shutil.rmtree(temp_dir, ignore_errors=False)
+def _looks_like_json(data: bytes) -> bool:
+    if not data:
+        return False
+    start = 3 if data.startswith(b'\xef\xbb\xbf') else 0
+    end = min(start + 1024, len(data))
+    for i in range(start, end):
+        b = data[i]
+        if b in (123, 91):  # '{' or '['
             return True
-        except PermissionError:
-            if i < max_retries - 1:
-                time.sleep(0.1 * (2 ** i))
-                gc.collect()
+        if b not in (32, 9, 10, 13):  # 空白字符
+            return False
     return False
 
 
-def worker(task: Dict, lineage_analyzer: Optional[PersistentLineageAnalyzer] = None, 
-           global_config: MergeConfig = DEFAULT_CONFIG):
-    name = task['name']
-    temp_dir = None
-    retry_count = 0
-    max_retries = 2
+class RuleParser:
+    __slots__ = ('_config', '_max_domain_depth')
+    RULE_TYPE_MAP = {
+        'DOMAIN-SUFFIX': 'domain_suffix', 'DOMAIN': 'domain',
+        'DOMAIN-WILDCARD': 'domain_wildcard', 'IP-CIDR': 'ip_cidr', 'IP-CIDR6': 'ip_cidr',
+    }
 
-    while retry_count <= max_retries:
+    def __init__(self, config: MergeConfig) -> None:
+        self._config = config
+        self._max_domain_depth = config.max_domain_depth
+
+    def parse(self, source: Union[bytes, Path], url: str, weight: float) -> ParsedRuleSet:
+        dom: list[DomainRule] = []
+        ip: list[IPCIDRRule] = []
+
         try:
-            temp_dir = Path(tempfile.mkdtemp())
-            
-            task_config_dict = task.get('config', {})
-            task_config = MergeConfig.from_dict(task_config_dict, global_config)
-            min_score = float(task.get('min_score', 1.0))
-
-            out_json = task_config.output_dir / "merged-json" / f"{name}.json"
-            out_srs = task_config.output_dir / "merged-srs" / f"{name}.srs"
-
-            session = create_session()
-            parser = RuleParser(task_config)
-            sources = []
-            transient_errors = []
-
-            try:
-                for conf in task.get('sources', []):
-                    url = None
-                    try:
-                        url = conf if isinstance(conf, str) else conf.get('url')
-                        weight = 1.0 if isinstance(conf, str) else float(conf.get('weight', 1.0))
-
-                        content_bytes, temp_path = download_file_stream(
-                            session, url, task_config.max_download_size, temp_dir
-                        )
-
-                        if content_bytes is None and temp_path is None:
-                            continue
-
-                        if content_bytes:
-                            parsed = parser.parse(content_bytes, url, weight)
-                        elif temp_path:
-                            content = temp_path.read_bytes()
-                            parsed = parser.parse(content, url, weight)
-                            try:
-                                temp_path.unlink()
-                            except:
-                                pass
-
-                        if len(parsed.domain_rules) + len(parsed.ip_rules) > 0:
-                            sources.append(parsed)
-
-                    except TransientError as te:
-                        logger.warning(f"Transient error for source {url}: {te}")
-                        transient_errors.append(str(te))
-                        continue
-
-                if not sources:
-                    if transient_errors and retry_count < max_retries:
-                        raise TransientError("No valid sources due to transient errors")
-                    return (name, "⚠️", "No valid sources", "0KB")
-
-                if lineage_analyzer is None:
-                    lineage_analyzer = PersistentLineageAnalyzer(config=task_config)
-
-                redundant, processed = lineage_analyzer.compute_incremental(sources)
-                active = [s for i, s in enumerate(processed) if i not in redundant]
-
-                resolver = StrictConflictResolver(config=task_config, rir_manager=lineage_analyzer._rir_manager)
-                merged = resolver.resolve(active, min_score)
-
-                out_json.parent.mkdir(parents=True, exist_ok=True)
-                final_data = {"version": 9.0, "rules": [{k: v} for k, v in merged.items() if v]}
-
-                with open(out_json, 'wb') as f:
-                    if USE_ORJSON:
-                        f.write(orjson.dumps(final_data, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS))
-                    else:
-                        f.write(json.dumps(final_data, indent=2, ensure_ascii=False, sort_keys=True).encode())
-
-                if Path(task_config.core_bin_path).exists():
-                    res = subprocess.run(
-                        [str(Path(task_config.core_bin_path).absolute()), "rule-set", "compile",
-                         "--output", str(out_srs), str(out_json)],
-                        capture_output=True, text=True, timeout=180
-                    )
-
-                    if res.returncode != 0:
-                        if retry_count < max_retries:
-                            raise TransientError(f"Compile failed: {res.stderr[:100]}")
-                        return (name, "❌", f"Compile failed: {res.stderr[:100]}", "0KB")
-
-                sz = f"{out_srs.stat().st_size / 1024:.1f}KB" if out_srs.exists() else "0KB"
-                total_rules = sum(len(v) for v in merged.values())
-                return (name, "✅", f"Merged {total_rules} rules", sz)
-
-            except CIDRFragmentationError as e:
-                logger.error(f"[{name}] CIDR fragmentation limit exceeded: {e.processed_count} fragments, loss: {e.loss_rate:.2%}")
-                raise
-            except StrictVerificationError as e:
-                logger.error(str(e))
-                raise
-            finally:
-                session.close()
-                if retry_count > 0:
-                    gc.collect()
-
-        except TransientError as te:
-            retry_count += 1
-            if retry_count <= max_retries:
-                wait_time = 2 ** retry_count
-                logger.warning(f"[{name}] Transient error, retrying in {wait_time}s: {te}")
-                time.sleep(wait_time)
-                continue
+            if isinstance(source, Path):
+                with source.open('rb') as f:
+                    head = f.read(4096)
+                is_json = _looks_like_json(head)
             else:
-                logger.error(f"[{name}] Max retries exceeded: {te}")
-                return (name, "❌", f"Failed after retries: {str(te)[:100]}", "0KB")
+                is_json = _looks_like_json(source)
+        except OSError as e:
+            logger.warning(f"File read error for {url}: {e}")
+            return ParsedRuleSet(url, weight, (), (), timestamp=time.time())
 
-        except Exception as e:
-            logger.exception(f"Worker error {name}")
-            return (name, "❌", str(e)[:100], "0KB")
+        if is_json:
+            try:
+                if USE_ORJSON:
+                    if isinstance(source, Path):
+                        with source.open('rb') as f:
+                            raw_bytes = f.read()
+                    else:
+                        raw_bytes = source
+                    
+                    if raw_bytes.startswith(b'\xef\xbb\xbf'):
+                        raw_bytes = raw_bytes[3:]
+                    data = orjson.loads(raw_bytes)
+                    # 立即释放原始字节数组，降低峰值内存
+                    del raw_bytes
+                else:
+                    if isinstance(source, Path):
+                        with source.open('r', encoding='utf-8-sig', errors='ignore') as f:
+                            data = json.load(f)
+                    else:
+                        data = json.loads(source.decode('utf-8-sig', errors='ignore'))
 
-        finally:
-            if temp_dir and temp_dir.exists():
-                if not cleanup_temp_dir(temp_dir):
-                    logger.error(f"Failed to cleanup {temp_dir}")
+                rules = data.get('rules', []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                
+                for rule in rules:
+                    if not isinstance(rule, dict): continue
+                    is_excl = rule.get('invert', False)
+                    for k, v in rule.items():
+                        if k == 'invert': continue
+                        mt = self.RULE_TYPE_MAP.get(k.upper(), k)
+                        if isinstance(v, list):
+                            for val in v:
+                                if (s := str(val).strip()): self._add_rule(mt, s, is_excl, dom, ip)
+                        elif (s := str(v).strip()):
+                            self._add_rule(mt, s, is_excl, dom, ip)
+                return ParsedRuleSet(url, weight, tuple(dom), tuple(ip), timestamp=time.time())
+            except (ValueError, TypeError, JSONDecodeErrorType, MemoryError) as e:
+                logger.debug(f"JSON parsing failed for {url}, falling back to text: {e}")
+                dom.clear()
+                ip.clear()
 
-    return (name, "❌", "Unknown error", "0KB")
+        def _process_text_stream(stream: Iterable[str]) -> None:
+            for line in stream:
+                line = line.strip()
+                if len(line) > MAX_LINE_LENGTH or not line or line.startswith(('#', '//', ';')): continue
+                is_excl = line.startswith('!')
+                val = line[1:].strip() if is_excl else line
+                if ',' in val:
+                    parts = val.split(',', 2)
+                    if len(parts) >= 2 and (m := self.RULE_TYPE_MAP.get(parts[0].upper())):
+                        self._add_rule(m, parts[1].strip(), is_excl, dom, ip)
+                else:
+                    self._add_rule('domain', val, is_excl, dom, ip)
+
+        try:
+            if isinstance(source, Path):
+                with open(source, 'r', encoding='utf-8-sig', errors='ignore') as f:
+                    _process_text_stream(f)
+            else:
+                with io.TextIOWrapper(io.BytesIO(source), encoding='utf-8-sig', errors='ignore') as f:
+                    _process_text_stream(f)
+        except OSError as e:
+            logger.warning(f"Text streaming failed for {url}: {e}")
+            return ParsedRuleSet(url, weight, (), (), timestamp=time.time())
+
+        return ParsedRuleSet(url, weight, tuple(dom), tuple(ip), timestamp=time.time())
+
+    def _add_rule(self, typ: Optional[str], val: str, is_excl: bool, dom: list[DomainRule], ip: list[IPCIDRRule]) -> None:
+        if typ in ('domain', 'domain_suffix', 'domain_wildcard'):
+            if not val: return
+            expected_type = MatchType.WILDCARD if typ == 'domain_wildcard' else (MatchType.SUFFIX if typ == 'domain_suffix' else MatchType.EXACT)
+            clean = val[2:] if val.startswith('*.') else val
+            if val.startswith('*.'): expected_type = MatchType.WILDCARD
+            norm = self._normalize_domain(clean)
+            if norm: dom.append(DomainRule(val, expected_type, norm, is_excl))
+        elif typ == 'ip_cidr':
+            try:
+                net = ipaddress.ip_network(val, strict=False)
+                if net.version == 6 and not self._config.enable_ipv6: return
+                ip.append(IPCIDRRule(net, val, is_excl))
+            except ValueError:
+                pass
+
+    def _normalize_domain(self, d: str) -> Optional[str]:
+        d = d.strip().lower().strip('.')
+        if not d or len(d) > MAX_DOMAIN_LENGTH or ' ' in d: return None
+        if not d.isascii():
+            try: d = d.encode('idna').decode('ascii')
+            except UnicodeError: return None
+        if len(d) > MAX_DOMAIN_LENGTH: return None
+        parts = d.split('.')
+        if len(parts) > self._max_domain_depth: return None
+        for part in parts:
+            if not part or len(part) > 63 or not RE_DOMAIN_LABEL.match(part): return None
+        return d
 
 
-def main():
-    config = MergeConfig()
-    logger.info(f"HyperAccurate v9.0 Strict Starting...")
+def create_session() -> requests.Session:
+    s = requests.Session()
+    retry = Retry(total=DEFAULT_RETRIES, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=1, pool_maxsize=1)
+    s.mount('http://', adapter)
+    s.mount('https://', adapter)
+    s.headers.update({"User-Agent": "StrictRuleMerger/9.0"})
+    return s
 
-    lineage = PersistentLineageAnalyzer(config=config)
+
+def resolve_hostname(hostname: str, config: MergeConfig) -> list[str]:
+    with _DNS_LOCK:
+        if hostname in _DNS_CACHE:
+            ts, ips = _DNS_CACHE[hostname]
+            if time.time() - ts < 300:
+                _DNS_CACHE.move_to_end(hostname)
+                return ips
+            del _DNS_CACHE[hostname]
+
+        if hostname in _DNS_PENDING:
+            event = _DNS_PENDING[hostname]
+            wait_for_event = True
+        else:
+            event = threading.Event()
+            _DNS_PENDING[hostname] = event
+            wait_for_event = False
+
+    if wait_for_event:
+        event.wait(timeout=10)
+        with _DNS_LOCK: return _DNS_CACHE.get(hostname, (0, []))[1]
+
+    ips = []
+    try:
+        results = socket.getaddrinfo(hostname, None)
+        ips_set = set()
+        for res in results:
+            ip_str = res[4][0].split('%')[0]
+            if ip_str in ips_set: continue
+            try:
+                ip = ipaddress.ip_address(ip_str)
+                if ip.is_link_local or (not config.enable_ipv6 and ip.version == 6): continue
+                if not config.url_allow_private_ips and (ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_multicast): continue
+                ips_set.add(ip_str)
+                ips.append(ip_str)
+            except ValueError: continue
+    except Exception: 
+        pass
+    finally:
+        with _DNS_LOCK:
+            _DNS_CACHE[hostname] = (time.time(), ips)
+            _DNS_CACHE.move_to_end(hostname)
+            if len(_DNS_CACHE) > MAX_DNS_CACHE: _DNS_CACHE.popitem(last=False)
+            _DNS_PENDING.pop(hostname, None)
+            event.set()
+    return ips
+
+
+def download_file_stream(url: str, config: MergeConfig, temp_dir: Path) -> tuple[Optional[bytes], Optional[Path], Optional[str]]:
+    redirect_count = 0
+    current_url = url
+    visited = set()
+    tmp_path = None
+    success = False
 
     try:
-        cfg_path = Path(config.config_file)
-        if not cfg_path.exists():
-            logger.error(f"Config file not found: {cfg_path}")
-            return
+        while redirect_count < 5:
+            if current_url in visited: return None, None, "redirect_loop"
+            visited.add(current_url)
 
-        with open(cfg_path, 'rb') as f:
-            cfg = orjson.loads(f.read()) if USE_ORJSON else json.load(f)
-            tasks = cfg.get("merge_tasks", [])
+            allowed, reason = config.is_url_allowed(current_url)
+            if not allowed: return None, None, "url_not_allowed"
 
-        if not tasks:
-            logger.warning("No merge tasks found in config")
-            return
+            parsed_current = urlparse(current_url)
+            current_hostname = parsed_current.hostname
+            if not current_hostname: return None, None, "no_hostname"
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=config.max_workers) as exe:
-            futures = {exe.submit(worker, t, lineage, config): t for t in tasks}
-            try:
-                for f in concurrent.futures.as_completed(futures):
-                    try:
-                        r = f.result()
-                        logger.info(f"[{r[0]}] {r[1]} {r[2]} ({r[3]})")
-                    except StrictVerificationError as e:
-                        logger.error(f"Critical verification error: {e}")
-                        if config.strict_zero_loss:
-                            logger.error("Strict zero loss mode enabled, terminating")
-                            for future in futures:
-                                future.cancel()
-                            break
-                    except CIDRFragmentationError as e:
-                        logger.error(f"Critical CIDR error: {e}")
-                        if config.strict_zero_loss:
-                            logger.error("Strict zero loss mode enabled, terminating")
-                            for future in futures:
-                                future.cancel()
-                            break
-            finally:
-                for future in futures:
-                    if not future.done():
-                        future.cancel()
+            current_public_ips = resolve_hostname(current_hostname, config)
+            if not current_public_ips: return None, None, "no_public_ips"
 
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-    except Exception as e:
-        logger.error(f"Main error: {e}")
+            last_err = None
+            tmp_path = None
+            redirected_this_loop = False
+
+            for attempt_ip in current_public_ips:
+                _dns_context.forced_host = current_hostname
+                _dns_context.forced_ip = attempt_ip
+
+                try:
+                    with create_session() as session:
+                        with session.get(
+                            current_url, stream=True,
+                            timeout=(config.download_timeout_connect, config.download_timeout_read),
+                            verify=config.verify_ssl, allow_redirects=False
+                        ) as resp:
+                            if resp.status_code in (301, 302, 303, 307, 308):
+                                location = resp.headers.get('Location')
+                                if not location: return None, None, "redirect_without_location"
+                                current_url = urljoin(current_url, location)
+                                redirect_count += 1
+                                redirected_this_loop = True
+                                break
+
+                            resp.raise_for_status()
+                            if 'html' in resp.headers.get('content-type', '').lower() and not url.endswith('.html'):
+                                return None, None, "html_content"
+
+                            buffer = bytearray()
+                            use_file = False
+                            total = html_check_count = 0
+
+                            for chunk in resp.iter_content(128 * 1024):
+                                if not chunk: continue
+                                if html_check_count < HTML_CHECK_THRESHOLD:
+                                    if RE_HTML_STRICT.search(chunk): return None, None, "html_detected"
+                                    html_check_count += 1
+                                total += len(chunk)
+                                if total > config.max_download_size: return None, None, "size_exceeded"
+
+                                if not use_file:
+                                    buffer.extend(chunk)
+                                    if total > SMALL_FILE_THRESHOLD:
+                                        use_file = True
+                                        fd, path_str = tempfile.mkstemp(suffix='.tmp', dir=str(temp_dir))
+                                        tmp_path = Path(path_str)
+                                        try:
+                                            tmp_file = os.fdopen(fd, 'wb')
+                                        except Exception:
+                                            os.close(fd)
+                                            raise
+                                        with tmp_file:
+                                            tmp_file.write(buffer)
+                                            buffer.clear()
+                                            for subsequent_chunk in resp.iter_content(128 * 1024):
+                                                if not subsequent_chunk: continue
+                                                total += len(subsequent_chunk)
+                                                if total > config.max_download_size: return None, None, "size_exceeded"
+                                                tmp_file.write(subsequent_chunk)
+                                        break
+
+                            if total == 0: return None, None, "empty_content"
+                            success = True
+                            return (None, tmp_path, None) if use_file else (bytes(buffer), None, None)
+
+                except requests.RequestException as e:
+                    if tmp_path and tmp_path.exists(): tmp_path.unlink(missing_ok=True)
+                    tmp_path = None
+                    last_err = e
+                finally:
+                    _dns_context.forced_host = None
+                    _dns_context.forced_ip = None
+
+            if redirected_this_loop: continue
+
+            if isinstance(last_err, requests.HTTPError):
+                status = last_err.response.status_code if last_err.response else 0
+                if 500 <= status < 600: raise TransientError(f"HTTP 5xx error for {url}") from last_err
+                elif status == 429: raise TransientError(f"HTTP 429 Too Many Requests for {url}") from last_err
+                elif 400 <= status < 500: return None, None, f"http_error_{status}"
+                return None, None, f"http_error_{status}" if status else "http_error_unknown"
+            elif isinstance(last_err, (requests.Timeout, requests.ConnectionError)):
+                raise TransientError("connection error") from last_err
+            elif last_err:
+                return None, None, f"request_error: {type(last_err).__name__}"
+
+            return None, None, "no_valid_ips"
+
+        return None, None, "too_many_redirects"
     finally:
+        if not success and tmp_path and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
+def download_sources(task_cfg: MergeConfig, sources_conf: list[Union[str, dict[str, Any]]], temp_dir: Path, cache: Optional[WALBackend]) -> tuple[list[ParsedRuleSet], list[str]]:
+    parser = RuleParser(task_cfg)
+    sources: list[ParsedRuleSet] = []
+    parse_errors: list[str] = []
+    batch_updates: dict[str, Any] = {}
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=task_cfg.max_concurrent_downloads)
+    future_to_url = {}
+    interrupted = False
+    try:
+        for src_conf in sources_conf:
+            url = src_conf if isinstance(src_conf, str) else src_conf.get('url')
+            if not url: continue
+            weight = 1.0 if isinstance(src_conf, str) else float(src_conf.get('weight', 1.0))
+            future = executor.submit(_download_single_source, task_cfg, url, weight, temp_dir, cache, parser)
+            future_to_url[future] = url
+
+        for future in concurrent.futures.as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                ps, error, cache_update = future.result()
+                if ps:
+                    sources.append(ps)
+                    if cache_update: batch_updates.update(cache_update)
+                elif error:
+                    parse_errors.append(f"{url}: {error}")
+            except Exception as e:
+                parse_errors.append(f"{url}: unexpected error: {str(e)[:50]}")
+    except (KeyboardInterrupt, SystemExit):
+        interrupted = True
+        for fu in future_to_url: fu.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        if not interrupted: executor.shutdown(wait=True)
+
+    if cache and batch_updates:
+        if not cache.put_batch(batch_updates):
+            logger.warning("Failed to write cache updates")
+
+    return sources, parse_errors
+
+
+def _download_single_source(task_cfg: MergeConfig, url: str, weight: float, temp_dir: Path, cache: Optional[WALBackend], parser: RuleParser) -> tuple[Optional[ParsedRuleSet], Optional[str], Optional[dict[str, Any]]]:
+    cache_key = f"parsed:{CACHE_VERSION}:{url}"
+    if cache:
+        loaded = cache.get(cache_key)
+        if isinstance(loaded, dict):
+            try:
+                dom_rules = tuple(DomainRule(d['pattern'], MatchType(d['match_type']), d['normalized'], d['is_exclusion'], d.get('specificity_score', 0)) for d in loaded.get('domain_rules', []))
+                ip_rules = tuple(IPCIDRRule(ipaddress.ip_network(d['network']), d['original_str'], d['is_exclusion']) for d in loaded.get('ip_rules', []))
+                cached_ps = ParsedRuleSet(loaded['url'], loaded['weight'], dom_rules, ip_rules, loaded['timestamp'], loaded['content_hash'])
+                if time.time() - cached_ps.timestamp < task_cfg.max_source_age_days * 86400:
+                    return ParsedRuleSet(cached_ps.url, weight, cached_ps.domain_rules, cached_ps.ip_rules, cached_ps.timestamp, cached_ps.content_hash), None, None
+            except Exception as e:
+                logger.warning(f"Failed to load cached source {url}: {e}")
+
+    src_retry = 0
+    while src_retry <= MAX_DOWNLOAD_RETRIES:
+        tmp_path = None
         try:
-            lineage.close()
+            data, tmp_path, err = download_file_stream(url, task_cfg, temp_dir)
+            if data is None and tmp_path is None:
+                if err: return None, err, None
+                break
+
+            try:
+                if data is not None: ps = parser.parse(data, url, weight)
+                elif tmp_path:
+                    ps = parser.parse(tmp_path, url, weight)
+                else: continue
+
+                if ps.domain_rules or ps.ip_rules:
+                    to_store = None
+                    if cache:
+                        to_store = {cache_key: {
+                            'url': ps.url, 'weight': ps.weight,
+                            'domain_rules': [{'pattern': r.pattern, 'match_type': r.match_type.value, 'normalized': r.normalized, 'is_exclusion': r.is_exclusion, 'specificity_score': r.specificity_score} for r in ps.domain_rules],
+                            'ip_rules': [{'network': str(r.network), 'original_str': r.original_str, 'is_exclusion': r.is_exclusion} for r in ps.ip_rules],
+                            'timestamp': ps.timestamp, 'content_hash': ps.content_hash
+                        }}
+                    return ps, None, to_store
+                return None, "no valid rules", None
+            except Exception as e:
+                return None, str(e)[:50], None
+        except TransientError:
+            src_retry += 1
+            if src_retry <= MAX_DOWNLOAD_RETRIES:
+                time.sleep(min(2 ** src_retry, MAX_BACKOFF_SECONDS))
+                continue
+            return None, f"transient error after {MAX_DOWNLOAD_RETRIES} retries", None
+        finally:
+            if tmp_path and tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+
+    return None, f"download failed after {MAX_DOWNLOAD_RETRIES + 1} attempts", None
+
+
+class FlatDomainMerger:
+    __slots__ = ('rules',)
+
+    def __init__(self) -> None:
+        self.rules: dict[tuple[str, MatchType, bool], tuple[float, DomainRule, int]] = {}
+
+    def add_rule(self, rule: DomainRule, weight: float, config: MergeConfig, rule_index: int) -> None:
+        key = (rule.normalized, rule.match_type, rule.is_exclusion)
+        existing = self.rules.get(key)
+        if existing:
+            existing_weight, existing_rule, existing_idx = existing
+            if weight > existing_weight or (weight == existing_weight and config.conflict_resolution == 'specificity' and rule.specificity_score > existing_rule.specificity_score):
+                self.rules[key] = (weight, rule, rule_index)
+        else:
+            self.rules[key] = (weight, rule, rule_index)
+
+    def collect_rules(self) -> tuple[list[tuple[DomainRule, float]], list[tuple[DomainRule, float]]]:
+        allow, deny = [], []
+        for (_, _, is_excl), (weight, rule, _) in self.rules.items():
+            (deny if is_excl else allow).append((rule, weight))
+        allow.sort(key=lambda x: (-x[1], -x[0].specificity_score, x[0].normalized, int(x[0].is_exclusion)))
+        deny.sort(key=lambda x: (-x[1], -x[0].specificity_score, x[0].normalized, int(x[0].is_exclusion)))
+        return allow, deny
+
+
+class WeightedCIDRMerger:
+    __slots__ = ('config', 'groups')
+
+    def __init__(self, config: MergeConfig) -> None:
+        self.config = config
+        self.groups: dict[float, list[tuple[IPNetworkType, bool]]] = defaultdict(list)
+
+    def add_rule(self, net: IPNetworkType, is_allow: bool, weight: float) -> None:
+        self.groups[weight].append((net, is_allow))
+
+    def get_result(self) -> tuple[list[tuple[IPCIDRRule, float]], list[tuple[IPCIDRRule, float]]]:
+        weights = sorted(self.groups.keys(), reverse=True)
+        final_allow_dict: dict[IPNetworkType, float] = {}
+        final_deny_dict: dict[IPNetworkType, float] = {}
+
+        for w in weights:
+            allow_this, deny_this = [], []
+            for net, is_allow in self.groups[w]:
+                (allow_this if is_allow else deny_this).append(net)
+
+            temp_allow_dict, temp_deny_dict = {}, {}
+
+            if deny_this:
+                try:
+                    for net in SweepLineCIDRManager.subtract(deny_this, itertools.chain(final_allow_dict.keys(), final_deny_dict.keys()), self.config.max_cidr_fragmentation, self.config.enable_cidr_approximation, self.config.cidr_approximation_max_loss_rate, self.config.strict_zero_loss):
+                        if net not in temp_deny_dict: temp_deny_dict[net] = w
+                except CIDRFragmentationError as e:
+                    if self.config.strict_zero_loss: raise
+                    if self.config.enable_cidr_approximation and e.cidrs:
+                        for net in SweepLineCIDRManager.approximate_collapse(e.cidrs, self.config.max_cidr_fragmentation)[0]:
+                            if net not in temp_deny_dict: temp_deny_dict[net] = w
+
+            if allow_this:
+                try:
+                    for net in SweepLineCIDRManager.subtract(allow_this, itertools.chain(final_allow_dict.keys(), final_deny_dict.keys(), temp_deny_dict.keys()), self.config.max_cidr_fragmentation, self.config.enable_cidr_approximation, self.config.cidr_approximation_max_loss_rate, self.config.strict_zero_loss):
+                        if net not in temp_allow_dict: temp_allow_dict[net] = w
+                except CIDRFragmentationError as e:
+                    if self.config.strict_zero_loss: raise
+                    if self.config.enable_cidr_approximation and e.cidrs:
+                        for net in SweepLineCIDRManager.approximate_collapse(e.cidrs, self.config.max_cidr_fragmentation)[0]:
+                            if net not in temp_allow_dict: temp_allow_dict[net] = w
+
+            final_deny_dict.update({k: v for k, v in temp_deny_dict.items() if k not in final_deny_dict})
+            final_allow_dict.update({k: v for k, v in temp_allow_dict.items() if k not in final_allow_dict})
+
+        def _group_by_weight(rule_dict: dict[IPNetworkType, float], is_deny: bool) -> list[tuple[IPCIDRRule, float]]:
+            by_weight: dict[float, list[IPNetworkType]] = defaultdict(list)
+            for net, w in rule_dict.items(): by_weight[w].append(net)
+            results = []
+            for w in sorted(by_weight.keys(), reverse=True):
+                if nets := by_weight[w]:
+                    for cnet in ipaddress.collapse_addresses(nets):
+                        results.append((IPCIDRRule(cnet, str(cnet), is_deny), w))
+            return results
+
+        allow_results = _group_by_weight(final_allow_dict, False)
+        deny_results = _group_by_weight(final_deny_dict, True)
+        allow_results.sort(key=lambda x: (-x[1], x[0].version, -x[0].prefixlen, x[0].start_int))
+        deny_results.sort(key=lambda x: (-x[1], x[0].version, -x[0].prefixlen, x[0].start_int))
+        return allow_results, deny_results
+
+
+def merge_ip_rules(parsed_sets: list[ParsedRuleSet], config: MergeConfig) -> tuple[list[tuple[IPCIDRRule, float]], list[tuple[IPCIDRRule, float]]]:
+    merger = WeightedCIDRMerger(config)
+    for src in sorted(parsed_sets, key=lambda x: -x.weight):
+        for r in src.ip_rules: merger.add_rule(r.network, not r.is_exclusion, src.weight)
+    return merger.get_result()
+
+
+def merge_domains(parsed_sets: list[ParsedRuleSet], config: MergeConfig) -> tuple[list[tuple[DomainRule, float]], list[tuple[DomainRule, float]]]:
+    merger = FlatDomainMerger()
+    idx = 0
+    for src in sorted(parsed_sets, key=lambda x: -x.weight):
+        for r in src.domain_rules:
+            merger.add_rule(r, src.weight, config, idx)
+            idx += 1
+    return merger.collect_rules()
+
+
+def _verify_rule_group(
+    group_name: str, bdd_verifier: Optional[BDDRuleVerifier], smt_verifier: Optional[SMTVerifier],
+    coverage_checker: CoverageChecker, p_dom_allow: list[DomainRule], p_dom_deny: list[DomainRule], c_dom: list[DomainRule],
+    p_ip_allow: list[IPCIDRRule], p_ip_deny: list[IPCIDRRule], c_ip: list[IPCIDRRule], parent_digest: int,
+    source_url: str, is_deny: bool, results: dict[str, Any]
+) -> tuple[bool, float]:
+
+    if not c_dom and not c_ip: return True, 1.0
+
+    if bdd_verifier and not c_dom:
+        try:
+            ok, conf = bdd_verifier.verify_deny_subset(p_ip_deny, c_ip) if is_deny else bdd_verifier.verify_subset_strict(p_ip_allow, p_ip_deny, c_ip)
+            # 直接使用 group_name，避免叠字冗余
+            if not ok: results['issues'].append({'source': source_url, 'verifier': 'BDD', 'type': f"{group_name}_not_subset", 'confidence': conf})
+            return ok, conf
         except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
-        logger.info("Cleanup completed")
+            logger.debug(f"BDD {group_name} verification failed, falling back to SMT: {e}")
+
+    if smt_verifier and smt_verifier.enabled:
+        try:
+            if is_deny: ok, conf, msg = smt_verifier.verify_deny_subset(p_dom_deny, c_dom, p_ip_deny, c_ip, parent_digest)
+            else: ok, conf, msg = smt_verifier.verify_allow_subset(p_dom_allow, p_dom_deny, c_dom, p_ip_allow, p_ip_deny, c_ip, parent_digest)
+            if not ok: results['issues'].append({'source': source_url, 'verifier': 'SMT', 'type': f"{group_name}_not_subset", 'confidence': conf, 'message': msg})
+            return ok, conf
+        except Exception as e:
+            results['issues'].append({'source': source_url, 'verifier': 'SMT', 'type': 'error', 'message': f"{group_name} verification error: {str(e)[:100]}"})
+            return False, 0.0
+
+    ok = True
+    conf = coverage_checker.calculate(itertools.chain(c_dom, c_ip))
+    if conf < 1.0:
+        ok = False
+        results['issues'].append({'source': source_url, 'verifier': 'none', 'type': f"{group_name}_not_covered", 'confidence': conf})
+    return ok, conf
 
 
-if __name__ == "__main__":
-    main()
+def run_verifications(
+    parsed_sets: list[ParsedRuleSet], p_dom_allow: list[DomainRule], p_dom_deny: list[DomainRule],
+    p_ip_allow: list[IPCIDRRule], p_ip_deny: list[IPCIDRRule], bdd_verifier: Optional[BDDRuleVerifier], 
+    smt_verifier: Optional[SMTVerifier], config: MergeConfig
+) -> dict[str, Any]:
+    results: dict[str, Any] = {
+        'bdd_enabled': bool(bdd_verifier and config.enable_bdd_verification),
+        'smt_enabled': bool(smt_verifier and smt_verifier.enabled and config.enable_smt_verification),
+        'issues': [], 'stats': {}
+    }
+
+    parent_digest = rules_digest(itertools.chain(p_dom_allow, p_ip_allow, p_dom_deny, p_ip_deny))
+    coverage_checker = CoverageChecker(itertools.chain(p_dom_allow, p_ip_allow, p_dom_deny, p_ip_deny))
+    total_sources, passed, coverages = 0, 0, []
+
+    for src in sorted(parsed_sets, key=lambda x: -x.weight)[:config.max_verification_sources]:
+        c_dom_allow = [r for r in src.domain_rules if not r.is_exclusion]
+        c_ip_allow = [r for r in src.ip_rules if not r.is_exclusion]
+        c_dom_deny = [r for r in src.domain_rules if r.is_exclusion]
+        c_ip_deny = [r for r in src.ip_rules if r.is_exclusion]
+
+        if not (c_dom_allow or c_ip_allow or c_dom_deny or c_ip_deny): continue
+        total_sources += 1
+        src_passed, cov_components = True, []
+
+        def check(name: str, is_deny: bool, c_d: list[DomainRule], c_i: list[IPCIDRRule]) -> None:
+            nonlocal src_passed
+            if c_d or c_i:
+                ok, conf = _verify_rule_group(name, bdd_verifier, smt_verifier, coverage_checker,
+                                               p_dom_allow, p_dom_deny, c_d,
+                                               p_ip_allow, p_ip_deny, c_i,
+                                               parent_digest, src.url, is_deny, results)
+                src_passed = src_passed and ok
+                cov_components.append(conf)
+
+        check('domain_allow', False, c_dom_allow, [])
+        check('ip_allow', False, [], c_ip_allow)
+        check('domain_deny', True, c_dom_deny, [])
+        check('ip_deny', True, [], c_ip_deny)
+
+        if src_passed: passed += 1
+        coverages.append(min(cov_components) if cov_components else 1.0)
+
+    if total_sources > 0:
+        results['stats'] = {
+            'total_sources': total_sources, 'passed': passed,
+            'pass_rate': passed / total_sources, 'avg_coverage': sum(coverages) / len(coverages)
+        }
+    return results
+
+
+def write_output(name: str, sorted_rules: list[tuple[RuleType, float]], out_path: Path, config: MergeConfig) -> tuple[str, str]:
+    is_surge = config.output_format == 'surge'
+    is_clash = config.output_format == 'clash'
+    out_srs = None
+
+    if is_surge or is_clash:
+        prefix = "  - " if is_clash else ""
+        with open(out_path, 'w', encoding='utf-8') as f:
+            if is_clash: f.write("payload:\n")
+            for rule, _ in sorted_rules:
+                policy = config.deny_policy if rule.is_exclusion else config.allow_policy
+                if isinstance(rule, DomainRule):
+                    if rule.match_type == MatchType.EXACT: typ, val = 'DOMAIN', rule.normalized
+                    elif rule.match_type == MatchType.SUFFIX: typ, val = 'DOMAIN-SUFFIX', rule.normalized
+                    elif rule.match_type == MatchType.WILDCARD: typ, val = 'DOMAIN-WILDCARD', f"*.{rule.normalized}"
+                    else: continue
+                else:
+                    typ, val = ('IP-CIDR6' if rule.version == 6 else 'IP-CIDR'), rule.original_str
+                f.write(f"{prefix}{typ},{val}{',' + policy if policy else ''}\n")
+    else:
+        json_rules = []
+        for rule, _ in sorted_rules:
+            if isinstance(rule, DomainRule):
+                if rule.match_type == MatchType.EXACT: typ, val = 'domain', rule.normalized
+                elif rule.match_type in (MatchType.SUFFIX, MatchType.WILDCARD): typ, val = 'domain_suffix', rule.normalized
+                else: continue
+            else:
+                typ, val = 'ip_cidr', rule.original_str
+
+            entry: dict[str, Any] = {typ: val}
+            if rule.is_exclusion: entry['invert'] = True
+            json_rules.append(entry)
+
+        final_data = {"version": 1, "rules": json_rules}
+
+        if USE_ORJSON:
+            with open(out_path, 'wb') as f_bin:
+                f_bin.write(orjson.dumps(final_data, option=orjson.OPT_INDENT_2 | getattr(orjson, 'OPT_SORT_KEYS', 0)))
+        else:
+            with open(out_path, 'w', encoding='utf-8') as f_txt:
+                json.dump(final_data, f_txt, indent=2, ensure_ascii=False, sort_keys=True)
+
+    if config.core_bin_path and config.core_bin_path.strip():
+        core_path = Path(config.core_bin_path).expanduser()
+        out_srs = out_path.with_suffix('.srs')
+        if core_path.exists() and os.access(str(core_path), os.X_OK):
+            try:
+                proc = subprocess.run(
+                    [str(core_path), "rule-set", "compile", "--output", str(out_srs), str(out_path)],
+                    capture_output=True, text=True, timeout=config.compile_timeout_seconds
+                )
+                if proc.returncode != 0: raise RuntimeError(f"Compile failed: {proc.stderr}")
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("Compile timeout")
+            except Exception as e:
+                raise RuntimeError(f"Compile error: {e}")
+
+    try:
+        target_path = out_srs if out_srs and out_srs.exists() else out_path
+        sz_val = f"{target_path.stat().st_size / 1024:.1f}KB"
+    except OSError:
+        sz_val = "0KB"
+    return sz_val, f"Merged {len(sorted_rules)} rules"
+
+def _sort_rules(item: tuple[RuleType, float]) -> tuple[float, int, int, Union[str, int], int]:
+    rule, weight = item
+    if isinstance(rule, DomainRule):
+        return (-weight, 0, -rule.specificity_score, rule.normalized, int(rule.is_exclusion))
+    return (-weight, 1, rule.version, -rule.prefixlen, rule.start_int)
+
+def worker(task: dict[str, Any], global_config: MergeConfig, smt_verifier: Optional[SMTVerifier] = None) -> tuple[str, str, str, str]:
+    name = task.get('name', '')
+    if not name or not RE_TASK_NAME.match(name) or len(name) > MAX_TASK_NAME_LENGTH:
+        raise ValueError(f"Invalid task name: {name}")
+
+    temp_dir: Optional[Path] = None
+    bdd_verifier: Optional[BDDRuleVerifier] = None
+    cache: Optional[WALBackend] = None
+
+    try:
+        temp_dir = Path(tempfile.mkdtemp(prefix=f"sb_merge_{name}_"))
+        task_cfg = MergeConfig.from_dict(task.get('config', {}), global_config)
+
+        if task_cfg.core_bin_path and not task_cfg.validate_core_path():
+            raise SecurityViolationError(f"Core path validation failed: {task_cfg.core_bin_path}")
+        if task_cfg.core_bin_path and task_cfg.output_format != 'json':
+            raise SecurityViolationError("core compilation requires output_format='json'")
+
+        out_path = task_cfg.output_dir / f"merged-{task_cfg.output_format}" / f"{name}.{'list' if task_cfg.output_format == 'surge' else 'yaml' if task_cfg.output_format == 'clash' else 'json'}"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if task_cfg.enable_cache:
+            cache_dir = Path.cwd() / ".cache" / "rule_merger" / name
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                cache = WALBackend(cache_dir / "source_cache", task_cfg)
+            except OSError as e:
+                logger.warning(f"Failed to create cache directory {cache_dir}: {e}, caching disabled")
+
+        sources, parse_errors = download_sources(task_cfg, task.get('sources', []), temp_dir, cache)
+
+        if not sources: return (name, "⚠️", f"No valid sources ({len(parse_errors)} errors)" if parse_errors else "No valid sources", "0KB")
+        if parse_errors: logger.warning(f"[{name}] Parse errors: {'; '.join(parse_errors[:3])}")
+
+        allow_rules_weights, deny_rules_weights = merge_domains(sources, task_cfg)
+        allow_ip_weights, deny_ip_weights = merge_ip_rules(sources, task_cfg)
+
+        p_dom_allow = [r for r, _ in allow_rules_weights]
+        p_dom_deny = [r for r, _ in deny_rules_weights]
+        p_ip_allow = [r for r, _ in allow_ip_weights]
+        p_ip_deny = [r for r, _ in deny_ip_weights]
+
+        all_rules = list(itertools.chain(allow_rules_weights, deny_rules_weights, allow_ip_weights, deny_ip_weights))
+        all_rules.sort(key=_sort_rules)
+
+        if task_cfg.enable_bdd_verification:
+            engine = BDDEngine(node_cache_max=task_cfg.bdd_node_limit, op_cache_max=task_cfg.bdd_lru_cache_size)
+            bdd_verifier = BDDRuleVerifier(engine, max_cache_size=task_cfg.max_bdd_var_cache_size)
+
+        verify_results = run_verifications(sources, p_dom_allow, p_dom_deny, p_ip_allow, p_ip_deny, bdd_verifier, smt_verifier, task_cfg)
+        stats, issues = verify_results.get('stats', {}), verify_results.get('issues', [])
+        if stats: logger.info(f"[{name}] Verification: {stats.get('passed', 0)}/{stats.get('total_sources', 0)} passed, avg coverage {stats.get('avg_coverage', 0):.2%}")
+        for issue in issues: logger.warning(f"[{name}] Verification issue: {issue}")
+
+        sz, summary = write_output(name, all_rules, out_path, task_cfg)
+        return (name, "⚠️" if issues else "✅", summary, sz)
+
+    except (SecurityViolationError, KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as e:
+        logger.exception(f"[{name}] Error")
+        return (name, "❌", str(e)[:100], "0KB")
+    finally:
+        if bdd_verifier:
+            try: bdd_verifier.clear()
+            except Exception: pass
+        if smt_verifier:
+            try: smt_verifier.clear_thread_state()
+            except Exception: pass
+        if temp_dir and temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+def _check_module_version(mod_name: str, module: Any, min_ver: tuple[int, int, int]) -> None:
+    if module is None: return
+    try:
+        if mod_name == "z3": v_str = ".".join(map(str, module.get_version()[:3]))
+        else:
+            v_str = getattr(module, '__version__', getattr(module, 'version', '0.0.0'))
+            if isinstance(v_str, tuple): v_str = ".".join(map(str, v_str))
+        if parse_version(v_str) < min_ver:
+            logger.warning(f"{mod_name} version < {'.'.join(map(str, min_ver))} may have compatibility issues")
+    except Exception as e:
+        logger.warning(f"Failed to check version for {mod_name}: {e}")
+
+_SMT_WARNING_SHOWN = False
+
+def main() -> int:
+    sys.setrecursionlimit(2000)
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    _check_module_version("orjson", orjson if USE_ORJSON else None, (3, 0, 0))
+    _check_module_version("msgpack", msgpack if USE_MSGPACK else None, (1, 0, 0))
+    _check_module_version("z3", z3 if HAS_Z3 else None, (4, 8, 0))
+    _check_module_version("requests", requests, (2, 25, 0))
+
+    logger.info("Rule Merger v9.0 starting")
+    logger.info("Verification capabilities: BDD and SMT both support domain and IP rules.")
+    if not USE_ORJSON: logger.info("orjson not available, using standard json (slower)")
+    if not USE_MSGPACK: logger.info("msgpack not available, using json for cache (slower)")
+
+    cfg, cfg_path, tasks = DEFAULT_CONFIG, Path(DEFAULT_CONFIG.config_file), []
+    if not cfg_path.exists():
+        logger.warning(f"Config file not found: {cfg_path}, using default configuration (no tasks)")
+    else:
+        try:
+            with open(cfg_path, 'rb') as f:
+                data = orjson.loads(f.read()) if USE_ORJSON else json.loads(f.read().decode('utf-8'))
+            if not isinstance(data, dict):
+                logger.error(f"Config file is not a JSON object: {type(data).__name__}, using default configuration")
+                data = {}
+            cfg = MergeConfig.from_dict(data.get('global', {}), cfg)
+            tasks = data.get('merge_tasks', [])
+        except Exception as e:
+            logger.error(f"Failed to load config: {e}, using default configuration")
+
+    if not tasks:
+        logger.warning("No merge tasks in config, exiting")
+        return 0
+
+    task_names = [t.get('name') for t in tasks if isinstance(t, dict)]
+    if len(task_names) != len(set(task_names)):
+        logger.error("Duplicate task names found in configuration. Task names must be unique.")
+        return 1
+
+    global _SMT_WARNING_SHOWN
+    if not HAS_Z3 and cfg.enable_smt_verification:
+        logger.warning("z3 not installed, SMT verification disabled")
+    elif cfg.enable_smt_verification and HAS_Z3 and not _SMT_WARNING_SHOWN:
+        logger.warning("SMT verification with domain strings can be extremely slow. Consider disabling or adjusting smt_progressive_timeout.")
+        _SMT_WARNING_SHOWN = True
+
+    smt_verifier = SMTVerifier(cfg) if (cfg.enable_smt_verification and HAS_Z3) else None
+
+    executor = None
+    futures = []
+    interrupted = False
+    try:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(cfg.max_workers, len(tasks)), thread_name_prefix="Worker")
+        futures = [executor.submit(worker, t, cfg, smt_verifier) for t in tasks]
+        for f in concurrent.futures.as_completed(futures):
+            try:
+                r = f.result()
+                logger.info(f"[{r[0]}] {r[1]} {r[2]} ({r[3]})")
+            except Exception as e:
+                logger.error(f"Task error: {e}", exc_info=True)
+    except KeyboardInterrupt:
+        interrupted = True
+        logger.info("Interrupted")
+        for fu in futures: fu.cancel()
+        if executor: executor.shutdown(wait=False, cancel_futures=True)
+        return 130
+    finally:
+        if executor and not interrupted:
+            executor.shutdown(wait=True)
+
+    return 0
+
+if __name__ == '__main__':
+    sys.exit(main())
