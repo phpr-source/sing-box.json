@@ -9,7 +9,6 @@ import ipaddress
 import requests
 import logging
 import stat
-import signal
 import tempfile
 import math
 import gc
@@ -17,20 +16,15 @@ import hashlib
 import time
 import threading
 import platform
-import multiprocessing
+import zlib
 from collections import defaultdict, Counter, deque, OrderedDict
-from typing import List, Dict, Set, Tuple, Optional, Any, Union, NamedTuple, Iterator
+from typing import List, Dict, Set, Tuple, Optional, Any, Union, NamedTuple
 from pathlib import Path
-from functools import lru_cache, wraps
+from functools import lru_cache
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from enum import Enum, auto
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
-
-# ==========================================
-# 0. 可選依賴處理（v4.4.1 健壯性增強）
-# ==========================================
 
 try:
     import orjson
@@ -53,15 +47,14 @@ except ImportError:
     msgpack = None
     USE_MSGPACK = False
 
-# v4.4.1: 增強 BLAKE3 導入健壯性（捕獲所有異常）
 try:
     from blake3 import blake3
     USE_BLAKE3 = True
-except Exception:  # 捕獲 ImportError, OSError, ABI 不兼容等所有異常
+except Exception:
     blake3 = None
     USE_BLAKE3 = False
-    if platform.system() != 'Windows':  # 僅在非 Windows 平台記錄警告
-        logging.getLogger(__name__).debug("BLAKE3 加載失敗，使用 SHA256 回退")
+    if platform.system() != 'Windows':
+        logging.getLogger(__name__).debug("BLAKE3 load failed, using SHA256")
 
 USE_Z3 = False
 if platform.system() != 'Windows':
@@ -70,10 +63,6 @@ if platform.system() != 'Windows':
         USE_Z3 = True
     except ImportError:
         pass
-
-# ==========================================
-# 1. 配置與常數（v4.4.1 性能保護）
-# ==========================================
 
 CONFIG_FILE = 'scripts/custom_merge.json'
 DIR_OUTPUT = Path('rules')
@@ -84,16 +73,14 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 MAX_DOWNLOAD_SIZE = 1024 * 1024 * 1024
 INCREMENTAL_MODE = True
 
-# v4.4.1: 新增性能保護閾值
-MAX_CIDR_OUTPUT = 10000  # 防止 CIDR 輸出膨脹攻擊
-MAX_IP_RANGE_AGGREGATION = 2**24  # /8 大小的閾值，超過則使用激進聚合
-LITE_MODE_THRESHOLD = 1000  # 規則數低於此值且無 Z3 時啟用輕量模式
+MAX_CIDR_OUTPUT = 10000
+MAX_IP_RANGE_AGGREGATION = 2**24
+LITE_MODE_THRESHOLD = 1000
 
 STATE_FORMAT_VERSION = 5
 SUPPORTED_STATE_VERSIONS = {4, 5}
 
 class WildcardSemanticsConfig:
-    """嚴格偏序集（Strict Poset）配置"""
     WILDCARD_CONTAINS_ROOT = False      
     ROOT_CONTAINS_WILDCARD = True       
     WILDCARD_CONTAINS_SUBWILDCARD = True
@@ -132,10 +119,6 @@ RE_DOMAIN_LABEL = re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
 
-# ==========================================
-# 2. 分級存儲後端（v4.4.1 遷移加固）
-# ==========================================
-
 class StorageBackend(ABC):
     @abstractmethod
     def save(self, key: bytes, value: bytes): pass
@@ -164,7 +147,7 @@ class SQLiteBackend(StorageBackend):
         import sqlite3
         self.conn = sqlite3.connect(str(path))
         self.conn.execute("CREATE TABLE IF NOT EXISTS state (key BLOB PRIMARY KEY, value BLOB)")
-        self.conn.execute("PRAGMA journal_mode=WAL")  # v4.4.1: 提高並發安全性
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.commit()
     
     def save(self, key: bytes, value: bytes):
@@ -177,18 +160,18 @@ class SQLiteBackend(StorageBackend):
         return row[0] if row else None
     
     def close(self):
+        try:
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.conn.execute("VACUUM")
+        except Exception:
+            pass
         self.conn.close()
 
 def get_storage_backend(path: Path) -> StorageBackend:
     if USE_LMDB and platform.system() != 'Windows':
         return LMDBBackend(path)
     else:
-        logger.info("使用 SQLite 後端（兼容性模式）")
         return SQLiteBackend(path.with_suffix('.sqlite'))
-
-# ==========================================
-# 3. 核心數據結構（v4.4.1 性能保護與線程安全）
-# ==========================================
 
 class TaskResult(NamedTuple):
     name: str
@@ -197,11 +180,6 @@ class TaskResult(NamedTuple):
     size: str
 
 class DomainTrie:
-    """
-    v4.4.1: 讀寫鎖分離優化（讀多寫少場景）
-    - 使用 RLock 保證線程安全
-    - 保留 LRU 緩存加速讀取
-    """
     __slots__ = ('root', '_cache', '_cache_limit', '_lock')
     
     def __init__(self, cache_limit: int = 10000):
@@ -265,11 +243,6 @@ class DomainTrie:
             return sorted(results)
 
 class UnifiedIPRangeIndex:
-    """
-    v4.4.1: 增強型區間合併索引
-    - 添加輸出膨脹保護（MAX_CIDR_OUTPUT）
-    - 大區間激進聚合策略
-    """
     __slots__ = ('v4_ranges', 'v6_ranges', '_sorted', '_lock', '_networks_cache')
     
     def __init__(self):
@@ -280,7 +253,6 @@ class UnifiedIPRangeIndex:
         self._networks_cache = None
     
     def _normalize_mapped(self, cidr: str) -> Optional[Tuple[str, int]]:
-        """處理 IPv4-mapped IPv6"""
         if '/' in cidr:
             base, prefix = cidr.split('/')
             prefix = int(prefix)
@@ -301,7 +273,6 @@ class UnifiedIPRangeIndex:
         return None
     
     def add_cidr(self, cidr: str):
-        """添加 CIDR，線程安全"""
         with self._lock:
             try:
                 mapped = self._normalize_mapped(cidr)
@@ -325,7 +296,6 @@ class UnifiedIPRangeIndex:
                 pass
     
     def build(self):
-        """構建索引：區間排序與合併 O(N log N)"""
         with self._lock:
             if not self._sorted:
                 self.v4_ranges = self._merge_intervals(self.v4_ranges)
@@ -333,7 +303,6 @@ class UnifiedIPRangeIndex:
                 self._sorted = True
     
     def _merge_intervals(self, intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
-        """合併重疊或相鄰區間"""
         if not intervals:
             return []
         
@@ -353,7 +322,6 @@ class UnifiedIPRangeIndex:
         return merged
     
     def contains_cidr(self, cidr: str) -> bool:
-        """二分查找判斷是否包含 O(log N)"""
         with self._lock:
             if not self._sorted:
                 self.build()
@@ -386,25 +354,15 @@ class UnifiedIPRangeIndex:
                 return False
     
     def collapse_to_cidrs(self) -> List[str]:
-        """
-        v4.4.1: 增強型 CIDR 轉換，防止輸出膨脹
-        - 檢測大區間並使用激進聚合
-        - 限制最大輸出 CIDR 數量
-        """
         with self._lock:
             if not self._sorted:
                 self.build()
             
             result = []
             
-            # 處理 IPv4
             for start, end in self.v4_ranges:
-                # v4.4.1: 大區間檢測與保護
                 range_size = end - start + 1
                 if range_size > MAX_IP_RANGE_AGGREGATION:
-                    logger.warning(f"檢測到超大 IPv4 區間 ({start}-{end}, {range_size} 地址)，"
-                                 f"使用激進聚合策略")
-                    # 激進策略：強制使用 /8 /16 /24 邊界聚合，避免生成過多細粒度 CIDR
                     result.extend(self._aggressive_ipv4_summarize(start, end))
                 else:
                     try:
@@ -412,22 +370,15 @@ class UnifiedIPRangeIndex:
                         end_addr = ipaddress.IPv4Address(end)
                         cidrs = list(ipaddress.summarize_address_range(start_addr, end_addr))
                         result.extend(str(c) for c in cidrs)
-                    except (ValueError, TypeError) as e:
-                        logger.warning(f"IPv4 區間轉換失敗: {e}")
+                    except (ValueError, TypeError):
                         continue
                 
-                # v4.4.1: 輸出膨脹保護
                 if len(result) > MAX_CIDR_OUTPUT:
-                    raise ValueError(f"CIDR 輸出數量 ({len(result)}) 超過安全閾值 "
-                                   f"({MAX_CIDR_OUTPUT})，可能存在惡意輸入或極端聚合場景，"
-                                   f"中止處理以防止 DoS")
+                    raise ValueError("CIDR output limit exceeded")
             
-            # 處理 IPv6
             for start, end in self.v6_ranges:
                 range_size = end - start + 1
-                if range_size > MAX_IP_RANGE_AGGREGATION * 2**96:  # IPv6 的相應閾值
-                    logger.warning(f"檢測到超大 IPv6 區間，使用激進聚合")
-                    # IPv6 激進聚合：使用 /32 /48 /64 邊界
+                if range_size > MAX_IP_RANGE_AGGREGATION * 2**96: 
                     result.extend(self._aggressive_ipv6_summarize(start, end))
                 else:
                     try:
@@ -435,33 +386,26 @@ class UnifiedIPRangeIndex:
                         end_addr = ipaddress.IPv6Address(end)
                         cidrs = list(ipaddress.summarize_address_range(start_addr, end_addr))
                         result.extend(str(c) for c in cidrs)
-                    except (ValueError, TypeError) as e:
-                        logger.warning(f"IPv6 區間轉換失敗: {e}")
+                    except (ValueError, TypeError):
                         continue
                 
                 if len(result) > MAX_CIDR_OUTPUT:
-                    raise ValueError(f"CIDR 輸出數量超過安全閾值，中止處理")
+                    raise ValueError("CIDR output limit exceeded")
             
             return result
     
     def _aggressive_ipv4_summarize(self, start: int, end: int) -> List[str]:
-        """v4.4.1: 激進 IPv4 聚合，使用標準 CIDR 邊界"""
         cidrs = []
         current = start
         while current <= end:
-            # 找到最大的可能網絡
             max_size = (current & -current) if current != 0 else (1 << 32)
-            
-            # [v4.4.1 Fix] 確保不超出區間邊界
             remaining = end - current + 1
             if max_size > remaining:
                 max_size = remaining
             
-            # 確保 max_size 是 2 的冪次
             while max_size & (max_size - 1):
                 max_size >>= 1
             
-            # 轉換為前綴長度
             prefix_len = 32 - int(math.log2(max_size))
             cidrs.append(f"{ipaddress.IPv4Address(current)}/{prefix_len}")
             current += max_size
@@ -469,14 +413,11 @@ class UnifiedIPRangeIndex:
         return cidrs
     
     def _aggressive_ipv6_summarize(self, start: int, end: int) -> List[str]:
-        """v4.4.1: 激進 IPv6 聚合"""
         cidrs = []
         current = start
         while current <= end:
             max_size = (current & -current) if current != 0 else (1 << 128)
-            max_size = min(max_size, 2**64)  # 限制最大 /64
-            
-            # [v4.4.1 Fix] 確保不超出區間邊界
+            max_size = min(max_size, 2**64) 
             remaining = end - current + 1
             if max_size > remaining:
                 max_size = remaining
@@ -491,7 +432,6 @@ class UnifiedIPRangeIndex:
         return cidrs
 
 class SourceSignature:
-    """v4.4.1: 優化的源簽名類"""
     __slots__ = ('url', 'initial_weight', 'final_weight', 'rules_by_type', 
                  'exclusions_by_type', 'domain_trie', 'ip_index', 'source_ip_index',
                  'rule_count', 'depth', 'reliability', 'originality',
@@ -516,13 +456,12 @@ class SourceSignature:
         self.last_modified = time.time()
     
     def compute_content_hash(self, content: bytes):
-        """v4.4.1: 健壯的哈希計算"""
         if USE_BLAKE3 and blake3 is not None:
             try:
                 self._hash = blake3(content).hexdigest()
                 return
             except Exception:
-                pass  # 失敗時回退到 SHA256
+                pass
         
         self._hash = hashlib.sha256(content).hexdigest()[:32]
     
@@ -544,7 +483,6 @@ class SourceSignature:
         return self._hash
     
     def build_indices(self):
-        """構建所有索引"""
         if self._indices_built:
             return
         
@@ -606,10 +544,6 @@ class SourceSignature:
         
         return src
 
-# ==========================================
-# 4. Z3 求解器與輕量模式（v4.4.1 雙模式）
-# ==========================================
-
 class CrossPlatformZ3Solver:
     _instance = None
     _executor = None
@@ -626,15 +560,12 @@ class CrossPlatformZ3Solver:
     def _init_executor(self):
         if USE_Z3:
             self._executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
-            logger.info("Z3 Solver: 初始化進程池")
     
     @staticmethod
     def _solve_z3_subprocess(args):
         sources_data, min_score, entropy_filter = args
-        
         try:
             from z3 import Solver, Bool, Or, And, Not, sat, Optimize
-            
             sources = [SourceSignature.from_serializable(s) for s in sources_data]
             
             opt = Optimize()
@@ -643,8 +574,7 @@ class CrossPlatformZ3Solver:
             exclusion_set = set()
             
             for src in sources:
-                if src.final_weight < 0.001:
-                    continue
+                if src.final_weight < 0.001: continue
                 
                 for rtype, items in src.exclusions_by_type.items():
                     for item in items:
@@ -653,8 +583,7 @@ class CrossPlatformZ3Solver:
                 for rtype, items in src.rules_by_type.items():
                     for item in items:
                         if rtype in ('domain', 'domain_suffix', 'domain_wildcard'):
-                            if RE_HASH_LIKE.search(item):
-                                continue
+                            if RE_HASH_LIKE.search(item): continue
                         
                         key = (rtype, item)
                         if key not in rule_vars:
@@ -700,16 +629,10 @@ class CrossPlatformZ3Solver:
         try:
             future = self._executor.submit(self._solve_z3_subprocess, args)
             result = future.result(timeout=timeout)
-            
             if result['status'] == 'sat':
                 return result['rules']
             return None
-        except concurrent.futures.TimeoutError:
-            logger.warning("Z3 求解超時")
-            future.cancel()
-            return None
-        except Exception as e:
-            logger.error(f"Z3 進程執行錯誤: {e}")
+        except Exception:
             return None
     
     @classmethod
@@ -717,15 +640,10 @@ class CrossPlatformZ3Solver:
         if cls._executor is not None:
             try:
                 cls._executor.shutdown(wait=True, cancel_futures=True)
-                logger.info("Z3 Solver: 進程池已關閉")
-            except Exception as e:
-                logger.warning(f"Z3進程池關閉異常: {e}")
+            except Exception:
+                pass
             finally:
                 cls._executor = None
-
-# ==========================================
-# 5. 譜系分析器（v4.4.1 規模保護）
-# ==========================================
 
 class PersistentLineageAnalyzer:
     def __init__(self, state_file: Optional[Path] = None):
@@ -742,11 +660,16 @@ class PersistentLineageAnalyzer:
         self._load_state()
     
     def _load_state(self):
-        """v4.4.1: 增強的狀態遷移"""
         try:
-            data = self.storage.load(b'lineage_state')
-            if not data:
+            raw_data = self.storage.load(b'lineage_state')
+            if not raw_data:
                 return
+            
+            # Transparently handle compressed or uncompressed data
+            try:
+                data = zlib.decompress(raw_data)
+            except zlib.error:
+                data = raw_data
             
             if USE_MSGPACK:
                 state = msgpack.unpackb(data, raw=False)
@@ -756,12 +679,10 @@ class PersistentLineageAnalyzer:
             loaded_version = state.get('_format_version', 1)
             
             if loaded_version not in SUPPORTED_STATE_VERSIONS:
-                logger.warning(f"存儲格式版本 {loaded_version} 不兼容，重置狀態")
                 self._migrate_or_reset(loaded_version)
                 return
             
             if loaded_version == 4:
-                logger.info("檢測到v4存儲格式，執行向v5的遷移...")
                 self._migrate_from_v4(state)
                 return
             
@@ -773,40 +694,31 @@ class PersistentLineageAnalyzer:
             self.reverse_graph = defaultdict(set, {k: set(v) for k, v in state.get('reverse_graph', {}).items()})
             self.in_degree = Counter(state.get('in_degree', {}))
             
-            logger.info(f"已加載 {len(self.existing_sources)} 個歷史源（版本 {loaded_version}）")
-            
-        except Exception as e:
-            logger.warning(f"加載狀態失敗: {e}，將創建新狀態")
+        except Exception:
+            pass
     
     def _migrate_from_v4(self, state: Dict):
-        """v4.4.1: 完善的v4到v5遷移"""
         try:
             self.existing_sources = {}
             for k, v in state.get('sources', {}).items():
                 try:
-                    # v4.4.1: 驗證所有必需字段存在
                     if 'initial_weight' not in v:
                         v['initial_weight'] = v.get('weight', 1.0)
                     if 'last_modified' not in v:
                         v['last_modified'] = time.time()
-                    
                     self.existing_sources[k] = SourceSignature.from_serializable(v)
-                except Exception as e:
-                    logger.warning(f"遷移源 {k} 失敗: {e}，跳過")
+                except Exception:
+                    pass
             
             self.graph = defaultdict(set, {k: set(v) for k, v in state.get('graph', {}).items()})
             self.reverse_graph = defaultdict(set, {k: set(v) for k, v in state.get('reverse_graph', {}).items()})
             self.in_degree = Counter(state.get('in_degree', {}))
-            
-            logger.info(f"v4遷移完成：成功遷移 {len(self.existing_sources)} 個源")
             self.save_state()
             
-        except Exception as e:
-            logger.error(f"v4遷移失敗: {e}،重置狀態")
+        except Exception:
             self._migrate_or_reset(4)
     
     def _migrate_or_reset(self, from_version: int):
-        logger.info(f"執行狀態重置（從版本 {from_version}）")
         self.existing_sources = {}
         self.graph = defaultdict(set)
         self.reverse_graph = defaultdict(set)
@@ -825,10 +737,11 @@ class PersistentLineageAnalyzer:
             }
             
             data = msgpack.packb(state, use_bin_type=True) if USE_MSGPACK else json.dumps(state).encode('utf-8')
-            self.storage.save(b'lineage_state', data)
+            compressed_data = zlib.compress(data, level=9)
+            self.storage.save(b'lineage_state', compressed_data)
             
-        except Exception as e:
-            logger.warning(f"保存狀態失敗: {e}")
+        except Exception:
+            pass
     
     def close(self):
         self.save_state()
@@ -836,14 +749,6 @@ class PersistentLineageAnalyzer:
         CrossPlatformZ3Solver.shutdown()
     
     def compute_incremental(self, new_sources: List[SourceSignature], hop: int = 1) -> Tuple[Set[int], List[SourceSignature]]:
-        """
-        v4.4.1: 增強型增量計算，添加規模保護
-        """
-        # v4.4.1: 大規模輸入警告與保護
-        if len(new_sources) > 1000:
-            logger.warning(f"輸入源數量 ({len(new_sources)}) 超過建議閾值 (1000)，"
-                          f"譜系分析可能較慢。考慮分批處理或優化輸入。")
-        
         if not INCREMENTAL_MODE:
             return self._compute_full(new_sources)
         
@@ -868,8 +773,6 @@ class PersistentLineageAnalyzer:
         affected_hashes = self._compute_affected_subgraph(changed_hashes, hop)
         unaffected_hashes = unchanged_hashes - affected_hashes
         
-        logger.info(f"增量更新：{len(changed_hashes)} 變更，{len(affected_hashes)} 受影響،{len(unaffected_hashes)} 未變更")
-        
         hash_to_src = {src.get_content_hash(): src for src in new_sources}
         for h in unaffected_hashes:
             if h in self.existing_sources and h in hash_to_src:
@@ -884,7 +787,6 @@ class PersistentLineageAnalyzer:
             self.existing_sources[src.get_content_hash()] = src
         
         self.save_state()
-        
         redundant = set(i for i, src in enumerate(new_sources) if src.depth > 0)
         return redundant, new_sources
     
@@ -907,10 +809,8 @@ class PersistentLineageAnalyzer:
                                all_sources: List[SourceSignature]):
         affected_hashes = {s.get_content_hash() for s in affected_sources}
         for h in affected_hashes:
-            if h in self.graph:
-                del self.graph[h]
-            if h in self.reverse_graph:
-                del self.reverse_graph[h]
+            if h in self.graph: del self.graph[h]
+            if h in self.reverse_graph: del self.reverse_graph[h]
             for parent in list(self.graph.keys()):
                 if h in self.graph[parent]:
                     self.graph[parent].remove(h)
@@ -918,10 +818,8 @@ class PersistentLineageAnalyzer:
         
         for i, src_i in enumerate(affected_sources):
             h_i = src_i.get_content_hash()
-            
             for src_j in all_sources:
-                if src_i is src_j:
-                    continue
+                if src_i is src_j: continue
                 h_j = src_j.get_content_hash()
                 
                 if self._is_subset_complete(src_i, src_j):
@@ -993,38 +891,26 @@ class PersistentLineageAnalyzer:
         return redundant, sources
     
     def _is_subset_complete(self, child: SourceSignature, parent: SourceSignature) -> bool:
-        if child is parent:
-            return True
-        if child.rule_count > parent.rule_count:
-            return False
+        if child is parent: return True
+        if child.rule_count > parent.rule_count: return False
         
         child.build_indices()
         parent.build_indices()
         
         if not child.keyword_set.issubset(parent.keyword_set):
             for kw in child.keyword_set:
-                if not any(pk in kw for pk in parent.keyword_set):
-                    return False
+                if not any(pk in kw for pk in parent.keyword_set): return False
         
         for domain in child.rules_by_type.get('domain', set()):
-            if not parent.domain_trie.is_covered(domain):
-                return False
-        
+            if not parent.domain_trie.is_covered(domain): return False
         for suffix in child.rules_by_type.get('domain_suffix', set()):
-            if not parent.domain_trie.is_covered(suffix):
-                return False
-        
+            if not parent.domain_trie.is_covered(suffix): return False
         for wildcard in child.rules_by_type.get('domain_wildcard', set()):
-            if not parent.domain_trie.is_covered(wildcard):
-                return False
-        
+            if not parent.domain_trie.is_covered(wildcard): return False
         for cidr in child.rules_by_type.get('ip_cidr', set()):
-            if not parent.ip_index.contains_cidr(cidr):
-                return False
-        
+            if not parent.ip_index.contains_cidr(cidr): return False
         for cidr in child.rules_by_type.get('source_ip_cidr', set()):
-            if not parent.source_ip_index.contains_cidr(cidr):
-                return False
+            if not parent.source_ip_index.contains_cidr(cidr): return False
         
         return True
     
@@ -1038,8 +924,7 @@ class PersistentLineageAnalyzer:
             for v in self.graph.get(u, set()):
                 depths[v] = max(depths[v], depths[u] + 1)
                 in_deg[v] -= 1
-                if in_deg[v] == 0:
-                    queue.append(v)
+                if in_deg[v] == 0: queue.append(v)
         
         for i, src in enumerate(sources):
             h = src.get_content_hash()
@@ -1047,10 +932,6 @@ class PersistentLineageAnalyzer:
             src.originality = math.pow(0.7, depths[h])
             if redundant is not None and depths[h] > 0:
                 redundant.add(i)
-
-# ==========================================
-# 6. 衝突解決器（v4.4.1 輕量模式修復）
-# ==========================================
 
 class StrictConflictResolver:
     def __init__(self):
@@ -1063,90 +944,25 @@ class StrictConflictResolver:
         
         total_rules = sum(src.rule_count for src in sources)
         
-        # v4.4.1: 輕量模式自動切換
         if total_rules < LITE_MODE_THRESHOLD and not USE_Z3:
-            logger.info(f"規則數 ({total_rules}) 低於閾值且 Z3 不可用،"
-                       f"啟用輕量模式（簡化衝突解決）")
             return self._resolve_lite(sources, min_score, entropy_filter)
         
-        # 標準模式：嘗試 Z3
         if total_rules < 5000:
             z3_result = self.z3_solver.solve(sources, min_score, entropy_filter)
             if z3_result is not None:
                 return self._post_process(z3_result)
         
-        # 回退到啟發式
         return self._resolve_heuristic(sources, min_score, entropy_filter)
     
     def _resolve_lite(self, sources: List[SourceSignature], min_score: float,
                      entropy_filter: Set[EntropyLevel]) -> Dict[str, List[str]]:
-        """
-        v4.4.1 Fix: 修復 source_ip_cidr 排除檢查遺漏
-        輕量模式 - 類似 Code B 的簡化加權統計،無進程開銷
-        適用於小規則集或無 Z3 環境
-        """
-        scores = defaultdict(float)
-        exclusion_trie = DomainTrie()
-        exclusion_ip_index = UnifiedIPRangeIndex()
-        exclusion_source_ip_index = UnifiedIPRangeIndex()  # [v4.4.1 Fix] 新增：源IP排除索引
-        
-        # 收集排除規則
-        for src in sources:
-            if src.final_weight < 0.001:
-                continue
-            for rtype, items in src.exclusions_by_type.items():
-                for item in items:
-                    if rtype in ('domain_suffix', 'domain_wildcard'):
-                        exclusion_trie.insert(item)
-                    elif rtype == 'ip_cidr':
-                        exclusion_ip_index.add_cidr(item)
-                    elif rtype == 'source_ip_cidr':  # [v4.4.1 Fix] 新增：收集源IP排除規則
-                        exclusion_source_ip_index.add_cidr(item)
-        
-        exclusion_ip_index.build()
-        exclusion_source_ip_index.build()  # [v4.4.1 Fix] 新增：構建源IP排除索引
-        
-        # 簡化計分（無熵過濾，僅權重累加）
-        for src in sources:
-            if src.final_weight < 0.001:
-                continue
-            for rtype, items in src.rules_by_type.items():
-                for item in items:
-                    if rtype in ('domain', 'domain_suffix', 'domain_wildcard'):
-                        if RE_HASH_LIKE.search(item):
-                            continue
-                    
-                    is_excluded = False
-                    if rtype in ('domain', 'domain_wildcard', 'domain_suffix'):
-                        if exclusion_trie.is_covered(item):
-                            is_excluded = True
-                    elif rtype == 'ip_cidr':
-                        if exclusion_ip_index.contains_cidr(item):
-                            is_excluded = True
-                    elif rtype == 'source_ip_cidr':  # [v4.4.1 Fix] 新增：源IP排除檢查
-                        if exclusion_source_ip_index.contains_cidr(item):
-                            is_excluded = True
-                    
-                    if not is_excluded:
-                        scores[(rtype, item)] += src.final_weight
-        
-        filtered = {k: v for k, v in scores.items() if v >= min_score}
-        groups = defaultdict(list)
-        for (rtype, item), weight in filtered.items():
-            groups[rtype].append(item)
-        
-        return self._post_process(dict(groups))
-    
-    def _resolve_heuristic(self, sources: List[SourceSignature], min_score: float,
-                          entropy_filter: Set[EntropyLevel]) -> Dict[str, List[str]]:
         scores = defaultdict(float)
         exclusion_trie = DomainTrie()
         exclusion_ip_index = UnifiedIPRangeIndex()
         exclusion_source_ip_index = UnifiedIPRangeIndex()
         
         for src in sources:
-            if src.final_weight < 0.001:
-                continue
+            if src.final_weight < 0.001: continue
             for rtype, items in src.exclusions_by_type.items():
                 for item in items:
                     if rtype in ('domain_suffix', 'domain_wildcard'):
@@ -1160,25 +976,19 @@ class StrictConflictResolver:
         exclusion_source_ip_index.build()
         
         for src in sources:
-            if src.final_weight < 0.001:
-                continue
-            
+            if src.final_weight < 0.001: continue
             for rtype, items in src.rules_by_type.items():
                 for item in items:
                     if rtype in ('domain', 'domain_suffix', 'domain_wildcard'):
-                        if RE_HASH_LIKE.search(item):
-                            continue
+                        if RE_HASH_LIKE.search(item): continue
                     
                     is_excluded = False
                     if rtype in ('domain', 'domain_wildcard', 'domain_suffix'):
-                        if exclusion_trie.is_covered(item):
-                            is_excluded = True
+                        if exclusion_trie.is_covered(item): is_excluded = True
                     elif rtype == 'ip_cidr':
-                        if exclusion_ip_index.contains_cidr(item):
-                            is_excluded = True
+                        if exclusion_ip_index.contains_cidr(item): is_excluded = True
                     elif rtype == 'source_ip_cidr':
-                        if exclusion_source_ip_index.contains_cidr(item):
-                            is_excluded = True
+                        if exclusion_source_ip_index.contains_cidr(item): is_excluded = True
                     
                     if not is_excluded:
                         scores[(rtype, item)] += src.final_weight
@@ -1190,41 +1000,35 @@ class StrictConflictResolver:
         
         return self._post_process(dict(groups))
     
+    def _resolve_heuristic(self, sources: List[SourceSignature], min_score: float,
+                          entropy_filter: Set[EntropyLevel]) -> Dict[str, List[str]]:
+        return self._resolve_lite(sources, min_score, entropy_filter)
+    
     def _post_process(self, rules: Dict[str, List[str]]) -> Dict[str, List[str]]:
         result = {}
-        
         for rtype in ['domain_suffix', 'domain']:
             if rtype in rules:
                 trie = DomainTrie()
-                for item in rules[rtype]:
-                    trie.insert(item)
+                for item in rules[rtype]: trie.insert(item)
                 result[rtype] = sorted(trie.optimize())
         
         if 'domain_wildcard' in rules:
             result['domain_wildcard'] = sorted(set(rules['domain_wildcard']))
         
-        # v4.4.1: 使用增強的 UnifiedIPRangeIndex（含膨脹保護）
         for rtype in ['ip_cidr', 'source_ip_cidr']:
             if rtype in rules:
                 idx = UnifiedIPRangeIndex()
-                for cidr in rules[rtype]:
-                    idx.add_cidr(cidr)
+                for cidr in rules[rtype]: idx.add_cidr(cidr)
                 idx.build()
                 try:
                     result[rtype] = idx.collapse_to_cidrs()
-                except ValueError as e:
-                    logger.error(f"CIDR 聚合失敗: {e}،使用未聚合輸出")
-                    result[rtype] = sorted(set(rules[rtype]))  # 回退到簡單去重
+                except ValueError:
+                    result[rtype] = sorted(set(rules[rtype]))
         
         for rtype in rules:
             if rtype not in result:
                 result[rtype] = sorted(set(rules[rtype]))
-        
         return result
-
-# ==========================================
-# 7. 輔助類與 I/O（v4.4.1 完善）
-# ==========================================
 
 class EntropyAssessor:
     @staticmethod
@@ -1238,8 +1042,7 @@ class EntropyAssessor:
         min_vowel_ratio = 1.0
         
         for part in parts:
-            if len(part) < 5:
-                continue
+            if len(part) < 5: continue
             freq = Counter(part)
             length = len(part)
             entropy = -sum((count/length) * math.log2(count/length) for count in freq.values())
@@ -1247,201 +1050,125 @@ class EntropyAssessor:
             digit_ratio = sum(c.isdigit() for c in part) / length
             max_digit_ratio = max(max_digit_ratio, digit_ratio)
             vowels = set('aeiou')
-            vowel_count = sum(1 for c in part if c in vowels)
-            vowel_ratio = vowel_count / length
+            vowel_ratio = sum(1 for c in part if c in vowels) / length
             min_vowel_ratio = min(min_vowel_ratio, vowel_ratio)
         
-        details = {
-            'normalized_entropy': max_entropy,
-            'max_digit_ratio': max_digit_ratio,
-            'min_vowel_ratio': min_vowel_ratio
-        }
-        
-        if max_entropy > 0.95 and max_digit_ratio > 0.3 and min_vowel_ratio < 0.1:
-            return EntropyLevel.DGA_CONFIRMED, details
-        elif max_entropy > 0.9 and max_digit_ratio > 0.2 and min_vowel_ratio < 0.15:
-            return EntropyLevel.DGA_LIKELY, details
-        elif max_entropy > 0.85 and (max_digit_ratio > 0.15 or min_vowel_ratio < 0.2):
-            return EntropyLevel.SUSPICIOUS, details
-        else:
-            return EntropyLevel.SAFE, details
+        details = {'normalized_entropy': max_entropy, 'max_digit_ratio': max_digit_ratio, 'min_vowel_ratio': min_vowel_ratio}
+        if max_entropy > 0.95 and max_digit_ratio > 0.3 and min_vowel_ratio < 0.1: return EntropyLevel.DGA_CONFIRMED, details
+        elif max_entropy > 0.9 and max_digit_ratio > 0.2 and min_vowel_ratio < 0.15: return EntropyLevel.DGA_LIKELY, details
+        elif max_entropy > 0.85 and (max_digit_ratio > 0.15 or min_vowel_ratio < 0.2): return EntropyLevel.SUSPICIOUS, details
+        else: return EntropyLevel.SAFE, details
 
 class RuleSemantics:
     @staticmethod
     def is_contained_by(child_type: str, child_val: str, parent_type: str, parent_val: str) -> bool:
         WildcardSemanticsConfig.validate_poset_axioms()
-        
         if child_type == parent_type:
-            if child_type in ('domain', 'process_name', 'geoip', 'port', 'source_port'):
-                return child_val == parent_val
-            elif child_type == 'domain_keyword':
-                return parent_val in child_val
-            elif child_type == 'domain_suffix':
-                return child_val.endswith('.' + parent_val) or child_val == parent_val
+            if child_type in ('domain', 'process_name', 'geoip', 'port', 'source_port'): return child_val == parent_val
+            elif child_type == 'domain_keyword': return parent_val in child_val
+            elif child_type == 'domain_suffix': return child_val.endswith('.' + parent_val) or child_val == parent_val
             elif child_type == 'domain_wildcard':
-                if WildcardSemanticsConfig.WILDCARD_CONTAINS_SUBWILDCARD:
-                    return child_val.endswith('.' + parent_val) or child_val == parent_val
+                if WildcardSemanticsConfig.WILDCARD_CONTAINS_SUBWILDCARD: return child_val.endswith('.' + parent_val) or child_val == parent_val
                 return child_val == parent_val
             elif child_type in ('ip_cidr', 'source_ip_cidr'):
-                try:
-                    net1 = ipaddress.ip_network(child_val, strict=False)
-                    net2 = ipaddress.ip_network(parent_val, strict=False)
-                    return net2.supernet_of(net1) or net1 == net2
-                except ValueError:
-                    return False
+                try: return ipaddress.ip_network(parent_val, strict=False).supernet_of(ipaddress.ip_network(child_val, strict=False)) or child_val == parent_val
+                except ValueError: return False
         
-        if child_type == 'domain' and parent_type == 'domain_suffix':
-            return child_val.endswith('.' + parent_val) or child_val == parent_val
-        elif child_type == 'domain_wildcard' and parent_type == 'domain_suffix':
-            return child_val.endswith('.' + parent_val)
+        if child_type == 'domain' and parent_type == 'domain_suffix': return child_val.endswith('.' + parent_val) or child_val == parent_val
+        elif child_type == 'domain_wildcard' and parent_type == 'domain_suffix': return child_val.endswith('.' + parent_val)
         elif child_type == 'domain' and parent_type == 'domain_wildcard':
-            if WildcardSemanticsConfig.ROOT_CONTAINS_WILDCARD:
-                return child_val == parent_val or child_val.endswith('.' + parent_val)
+            if WildcardSemanticsConfig.ROOT_CONTAINS_WILDCARD: return child_val == parent_val or child_val.endswith('.' + parent_val)
             return False
         elif child_type == 'domain_wildcard' and parent_type == 'domain':
-            if WildcardSemanticsConfig.WILDCARD_CONTAINS_ROOT:
-                return child_val == parent_val
+            if WildcardSemanticsConfig.WILDCARD_CONTAINS_ROOT: return child_val == parent_val
             return False
-        
         return False
 
 @lru_cache(maxsize=100000)
 def normalize_domain(content: str) -> Tuple[Optional[str], bool]:
     original = content.strip()
     content = original.lower().strip('.')
-    
-    if not content or len(content) > 253:
-        return (None, False)
+    if not content or len(content) > 253: return (None, False)
     
     is_exclusion = False
     if RE_EXCLUSION_PREFIX.match(content):
         is_exclusion = True
         content = content.lstrip('!').strip()
-        if not content:
-            return (None, is_exclusion)
+        if not content: return (None, is_exclusion)
     
-    try:
-        if any(ord(c) > 127 for c in content):
-            encoded = content.encode('idna').decode('ascii')
-        else:
-            encoded = content
-    except UnicodeError:
-        return (None, is_exclusion)
+    try: encoded = content.encode('idna').decode('ascii') if any(ord(c) > 127 for c in content) else content
+    except UnicodeError: return (None, is_exclusion)
     
-    if ' ' in encoded or '_' in encoded:
-        return (None, is_exclusion)
+    if ' ' in encoded or '_' in encoded: return (None, is_exclusion)
     
     parts = encoded.split('.')
     for part in parts:
-        if not part or len(part) > 63 or part.startswith('-') or part.endswith('-'):
+        if not part or len(part) > 63 or part.startswith('-') or part.endswith('-') or not RE_DOMAIN_LABEL.match(part):
             return (None, is_exclusion)
-        if not RE_DOMAIN_LABEL.match(part):
-            return (None, is_exclusion)
-    
     return (encoded, is_exclusion)
 
 def load_source_to_memory(file_path: Path, src: SourceSignature):
-    """v4.4.1: 完善的解析邏輯"""
     try:
         content_bytes = file_path.read_bytes()
         src.compute_content_hash(content_bytes)
+        text_content = content_bytes.decode('utf-8-sig') if content_bytes.startswith(b'\xef\xbb\xbf') else content_bytes.decode('utf-8', errors='ignore')
         
-        if content_bytes.startswith(b'\xef\xbb\xbf'):
-            text_content = content_bytes.decode('utf-8-sig')
-        else:
-            text_content = content_bytes.decode('utf-8', errors='ignore')
-        
-        # JSON 解析
         try:
             data = json.loads(text_content)
-            if isinstance(data, dict):
-                rules_data = data.get("rules", [])
-                if isinstance(rules_data, dict):
-                    rules_data = [rules_data]
-            else:
-                rules_data = data if isinstance(data, list) else []
+            rules_data = data.get("rules", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            if isinstance(rules_data, dict): rules_data = [rules_data]
             
             for rule in rules_data:
-                if not isinstance(rule, dict):
-                    continue
+                if not isinstance(rule, dict): continue
                 is_exclusion = rule.get('invert', False)
-                
                 for key, val in rule.items():
-                    if key == 'invert':
-                        continue
-                    
-                    mapped = RULE_MAP.get(key.upper())
-                    if not mapped:
-                        if key in RULE_MAP.values():
-                            mapped = key
-                        else:
-                            continue
-                    
-                    values = val if isinstance(val, list) else [val]
-                    for v in values:
+                    if key == 'invert': continue
+                    mapped = RULE_MAP.get(key.upper()) or (key if key in RULE_MAP.values() else None)
+                    if not mapped: continue
+                    for v in (val if isinstance(val, list) else [val]):
                         v_str = str(v)
-                        
                         if mapped in ('domain', 'domain_suffix', 'domain_keyword'):
                             if v_str.startswith('*.'):
                                 norm, _ = normalize_domain(v_str[2:])
-                                if norm:
-                                    src.add_rule('domain_wildcard', norm, is_exclusion)
+                                if norm: src.add_rule('domain_wildcard', norm, is_exclusion)
                             else:
                                 norm, _ = normalize_domain(v_str)
-                                if norm:
-                                    src.add_rule(mapped, norm, is_exclusion)
+                                if norm: src.add_rule(mapped, norm, is_exclusion)
                         elif mapped == 'domain_wildcard':
                             norm, _ = normalize_domain(v_str.lstrip('*.'))
-                            if norm:
-                                src.add_rule('domain_wildcard', norm, is_exclusion)
+                            if norm: src.add_rule('domain_wildcard', norm, is_exclusion)
                         elif mapped in ('ip_cidr', 'source_ip_cidr'):
-                            try:
-                                net = ipaddress.ip_network(v_str, strict=False)
-                                src.add_rule(mapped, str(net), is_exclusion)
-                            except ValueError:
-                                continue
+                            try: src.add_rule(mapped, str(ipaddress.ip_network(v_str, strict=False)), is_exclusion)
+                            except ValueError: continue
                         else:
                             src.add_rule(mapped, v_str.strip(), is_exclusion)
             return
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
         
-        # 純文本解析（SRS 格式）
         for line in text_content.splitlines():
             line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            
+            if not line or line.startswith('#'): continue
             is_exclusion = line.startswith('!')
-            if is_exclusion:
-                line = line[1:].strip()
+            if is_exclusion: line = line[1:].strip()
             
             if line.startswith('DOMAIN,'):
                 parts = line.split(',', 2)
                 if len(parts) >= 2:
-                    domain = parts[1].strip()
-                    norm, _ = normalize_domain(domain)
-                    if norm:
-                        src.add_rule('domain', norm, is_exclusion)
+                    norm, _ = normalize_domain(parts[1].strip())
+                    if norm: src.add_rule('domain', norm, is_exclusion)
             elif line.startswith('DOMAIN-SUFFIX,'):
                 parts = line.split(',', 2)
                 if len(parts) >= 2:
-                    suffix = parts[1].strip()
-                    norm, _ = normalize_domain(suffix)
-                    if norm:
-                        src.add_rule('domain_suffix', norm, is_exclusion)
+                    norm, _ = normalize_domain(parts[1].strip())
+                    if norm: src.add_rule('domain_suffix', norm, is_exclusion)
             elif line.startswith('IP-CIDR,') or line.startswith('IP-CIDR6,'):
                 parts = line.split(',', 2)
                 if len(parts) >= 2:
-                    cidr = parts[1].strip()
-                    try:
-                        net = ipaddress.ip_network(cidr, strict=False)
-                        src.add_rule('ip_cidr', str(net), is_exclusion)
-                    except ValueError:
-                        continue
-                
-    except Exception as e:
-        logger.debug(f"Parse error {file_path}: {e}")
+                    try: src.add_rule('ip_cidr', str(ipaddress.ip_network(parts[1].strip(), strict=False)), is_exclusion)
+                    except ValueError: continue
+    except Exception:
+        pass
 
 def create_session() -> requests.Session:
     session = requests.Session()
@@ -1457,40 +1184,28 @@ def download_file(session: requests.Session, url: str, filename: Path) -> bool:
     try:
         with session.get(url, stream=True, timeout=(10, 60), verify=True) as response:
             response.raise_for_status()
-            content_type = response.headers.get('content-type', '').lower()
-            if 'html' in content_type:
-                return False
-            
+            if 'html' in response.headers.get('content-type', '').lower(): return False
             length_str = response.headers.get('content-length')
-            if length_str and length_str.isdigit():
-                if int(length_str) > MAX_DOWNLOAD_SIZE:
-                    return False
+            if length_str and length_str.isdigit() and int(length_str) > MAX_DOWNLOAD_SIZE: return False
             
             downloaded = 0
             with open(temp, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=131072):
                     if chunk:
                         downloaded += len(chunk)
-                        if downloaded > MAX_DOWNLOAD_SIZE:
-                            return False
+                        if downloaded > MAX_DOWNLOAD_SIZE: return False
                         f.write(chunk)
-        
-        if filename.exists():
-            filename.unlink()
+        if filename.exists(): filename.unlink()
         shutil.move(str(temp), str(filename))
         return True
     except Exception:
-        if temp.exists():
-            temp.unlink(missing_ok=True)
+        if temp.exists(): temp.unlink(missing_ok=True)
         return False
 
 def srs_to_json(srs_path: Path, json_path: Path) -> bool:
     try:
-        subprocess.run(
-            [str(Path(CORE_BIN_PATH).absolute()), "rule-set", "decompile",
-             "--output", str(json_path), str(srs_path)],
-            check=True, capture_output=True, timeout=120
-        )
+        subprocess.run([str(Path(CORE_BIN_PATH).absolute()), "rule-set", "decompile", "--output", str(json_path), str(srs_path)],
+                       check=True, capture_output=True, timeout=120)
         return True
     except Exception:
         return False
@@ -1499,11 +1214,8 @@ def worker(task: Dict, lineage_analyzer: Optional[PersistentLineageAnalyzer] = N
     name = task['name']
     min_score = float(task.get('min_score', 1.0))
     mode = task.get('mode', 'strict')
-    output_format = task.get('format', 'singbox')
-    
     allowed_entropy = {EntropyLevel.SAFE, EntropyLevel.SUSPICIOUS}
-    if mode == 'trust':
-        allowed_entropy.add(EntropyLevel.DGA_LIKELY)
+    if mode == 'trust': allowed_entropy.add(EntropyLevel.DGA_LIKELY)
     
     out_json = DIR_OUTPUT / "merged-json" / f"{name}.json"
     out_srs = DIR_OUTPUT / "merged-srs" / f"{name}.srs"
@@ -1514,134 +1226,81 @@ def worker(task: Dict, lineage_analyzer: Optional[PersistentLineageAnalyzer] = N
         sources: List[SourceSignature] = []
         
         try:
-            configs = task.get('sources', [])
-            failed_sources = []
-            
-            for i, conf in enumerate(configs):
+            for i, conf in enumerate(task.get('sources', [])):
                 url = conf if isinstance(conf, str) else conf.get('url')
                 weight = 1.0 if isinstance(conf, str) else float(conf.get('weight', 1.0))
-                if not url:
-                    continue
+                if not url: continue
                 
                 raw_file = tmppath / f"src_{i}.raw"
-                if not download_file(session, url, raw_file):
-                    failed_sources.append(url)
-                    continue
+                if not download_file(session, url, raw_file): continue
                 
                 target_file = raw_file
                 if url.endswith('.srs'):
                     json_file = tmppath / f"src_{i}.json"
-                    if srs_to_json(raw_file, json_file):
-                        target_file = json_file
-                    else:
-                        failed_sources.append(url)
-                        continue
+                    if srs_to_json(raw_file, json_file): target_file = json_file
+                    else: continue
                 
                 src = SourceSignature(url, weight)
                 load_source_to_memory(target_file, src)
-                
-                if src.rules_by_type or src.exclusions_by_type:
-                    sources.append(src)
+                if src.rules_by_type or src.exclusions_by_type: sources.append(src)
                 
                 try:
                     target_file.unlink(missing_ok=True)
-                    if target_file != raw_file:
-                        raw_file.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                    if target_file != raw_file: raw_file.unlink(missing_ok=True)
+                except OSError: pass
             
-            if not sources:
-                return TaskResult(name, "⚠️", "No valid sources", "0KB")
-            
-            if lineage_analyzer is None:
-                lineage_analyzer = PersistentLineageAnalyzer()
-            
-            # v4.4.1: 處理失敗源（簡化處理，記錄即可）
-            if failed_sources:
-                logger.warning(f"Task {name}: {len(failed_sources)} sources failed to download")
+            if not sources: return TaskResult(name, "⚠️", "No valid sources", "0KB")
+            if lineage_analyzer is None: lineage_analyzer = PersistentLineageAnalyzer()
             
             redundant, active_sources = lineage_analyzer.compute_incremental(sources, hop=1)
-            
-            active_sources = [s for s in sources if s.depth == 0]
-            if not active_sources:
-                active_sources = sources
-            
-            for src in active_sources:
-                src.final_weight = src.initial_weight * src.originality
+            active_sources = [s for s in sources if s.depth == 0] or sources
+            for src in active_sources: src.final_weight = src.initial_weight * src.originality
             
             resolver = StrictConflictResolver()
             merged = resolver.resolve(active_sources, min_score, allowed_entropy)
-            
-            final_data = {
-                "version": TARGET_FORMAT_VERSION,
-                "rules": [{k: v} for k, v in merged.items() if v]
-            }
+            final_data = {"version": TARGET_FORMAT_VERSION, "rules": [{k: v} for k, v in merged.items() if v]}
             
             with open(out_json, 'wb') as f:
-                if USE_ORJSON:
-                    f.write(orjson.dumps(final_data, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS))
-                else:
-                    f.write(json.dumps(final_data, indent=2, ensure_ascii=False, sort_keys=True).encode('utf-8'))
+                if USE_ORJSON: f.write(orjson.dumps(final_data, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS))
+                else: f.write(json.dumps(final_data, indent=2, ensure_ascii=False, sort_keys=True).encode('utf-8'))
             
-            res = subprocess.run(
-                [str(Path(CORE_BIN_PATH).absolute()), "rule-set", "compile",
-                 "--output", str(out_srs), str(out_json)],
-                capture_output=True, text=True, timeout=180
-            )
+            res = subprocess.run([str(Path(CORE_BIN_PATH).absolute()), "rule-set", "compile", "--output", str(out_srs), str(out_json)],
+                                 capture_output=True, text=True, timeout=180)
             
-            total_count = sum(len(v) for v in merged.values())
-            stats_msg = f"Merged {total_count} (v4.4.1)"
-            
-            if res.returncode != 0:
-                return TaskResult(name, "❌", f"Compile: {res.stderr[:100]}", "0KB")
-            
+            if res.returncode != 0: return TaskResult(name, "❌", f"Compile: {res.stderr[:100]}", "0KB")
             size = f"{out_srs.stat().st_size / 1024:.1f}KB" if out_srs.exists() else "0KB"
-            return TaskResult(name, "✅", stats_msg, size)
+            return TaskResult(name, "✅", f"Merged {sum(len(v) for v in merged.values())}", size)
             
         except Exception as e:
-            logger.exception(f"Worker Error {name}")
             return TaskResult(name, "❌", str(e)[:100], "0KB")
         finally:
             session.close()
             gc.collect()
 
 def main():
-    try:
-        WildcardSemanticsConfig.validate_poset_axioms()
-    except ValueError as e:
-        logger.error(f"配置錯誤: {e}")
-        sys.exit(1)
+    try: WildcardSemanticsConfig.validate_poset_axioms()
+    except ValueError: sys.exit(1)
     
-    dirs = [DIR_OUTPUT, DIR_OUTPUT / "merged-json", DIR_OUTPUT / "merged-srs"]
-    for d in dirs:
+    for d in [DIR_OUTPUT, DIR_OUTPUT / "merged-json", DIR_OUTPUT / "merged-srs"]:
         d.mkdir(parents=True, exist_ok=True)
     
     core_path = Path(CORE_BIN_PATH).absolute()
     if core_path.exists():
-        try:
-            os.chmod(core_path, core_path.stat().st_mode | stat.S_IEXEC)
-        except OSError:
-            pass
+        try: os.chmod(core_path, core_path.stat().st_mode | stat.S_IEXEC)
+        except OSError: pass
     
     tasks = []
     cfg_path = Path(CONFIG_FILE)
     if cfg_path.exists():
         try:
             with open(cfg_path, 'rb') as f:
-                if USE_ORJSON:
-                    cfg = orjson.loads(f.read())
-                else:
-                    cfg = json.load(f)
+                cfg = orjson.loads(f.read()) if USE_ORJSON else json.load(f)
                 tasks = cfg.get("merge_tasks", [])
-        except Exception as e:
-            logger.error(f"Config Error: {e}")
-            sys.exit(1)
+        except Exception: sys.exit(1)
     
-    if not tasks:
-        return
+    if not tasks: return
     
     global_analyzer = PersistentLineageAnalyzer()
-    
     try:
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
@@ -1653,18 +1312,10 @@ def main():
         if summary:
             try:
                 with open(summary, 'a', encoding='utf-8') as f:
-                    f.write("## 🏭 Custom Merge Report (HyperAccurate v4.4.1)\n")
-                    f.write("| Task | Status | Details | Size |\n|---|---|---|---|\n")
-                    for r in sorted(results, key=lambda x: x.name):
-                        f.write(f"| {r.name} | {r.status} | {r.msg} | {r.size} |\n")
-            except OSError:
-                pass
-        
-        for r in results:
-            logger.info(f"[{r.name}] {r.status} {r.msg} ({r.size})")
-        
-        if any(r.status == "❌" for r in results):
-            sys.exit(1)
+                    f.write("## 🏭 Custom Merge Report\n| Task | Status | Details | Size |\n|---|---|---|---|\n")
+                    for r in sorted(results, key=lambda x: x.name): f.write(f"| {r.name} | {r.status} | {r.msg} | {r.size} |\n")
+            except OSError: pass
+        if any(r.status == "❌" for r in results): sys.exit(1)
     finally:
         global_analyzer.close()
         CrossPlatformZ3Solver.shutdown()
