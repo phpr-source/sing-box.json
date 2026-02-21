@@ -1824,13 +1824,13 @@
         "zyngapoker.com"
       ],
       "domain_regex": [
-        "^hses[1-7]?\\.akamaized\\.net$",
+        "^[0-9]+vod-adaptive\\.akamaized\\.net$",
+        "^ewcdn[0-9]+\\.nowe\\.com$",
         "(^|\\.)apiproxy-device-prod-nlb-.+\\.amazonaws\\.com$",
         "(^|\\.)apiproxy-website-nlb-prod-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.apiproxy-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.ichnaea-web-.+\\.amazonaws\\.com$",
-        "^ewcdn[0-9]+\\.nowe\\.com$",
-        "^[0-9]+vod-adaptive\\.akamaized\\.net$",
+        "^hses[1-7]?\\.akamaized\\.net$",
         "^epicgames-download\\d\\.akamaized\\.net$",
         "^cdn-akamai-.+\\.gog-services\\.com$",
         "^gog-cdn-.+\\.footprint\\.net$",
