@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from __future__ import annotations
-
 import bisect
 import concurrent.futures
 import hashlib
@@ -12,6 +10,7 @@ import itertools
 import json
 import logging
 import math
+import multiprocessing as mp
 import os
 import re
 import shutil
@@ -22,11 +21,10 @@ import sys
 import tempfile
 import threading
 import time
-import gc
-from collections import defaultdict, OrderedDict, Counter
+from collections import defaultdict, OrderedDict, Counter, deque
 from enum import IntEnum
 from pathlib import Path
-from typing import Any, Iterable, Optional, Union
+from typing import Any, Iterable, Optional, Union, List, Tuple, Dict, Set
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -35,215 +33,154 @@ import urllib3.util.connection
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# 检查 Python 版本
 if sys.version_info < (3, 9):
-    print("Error: Python 3.9 or higher is required", file=sys.stderr)
-    sys.exit(1)
+    sys.exit("Error: Python 3.9+ is required")
 
-# ==========================================
-# 網絡與 DNS 劫持修補模塊
-# ==========================================
+sys.setrecursionlimit(3000)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 _orig_create_connection = urllib3.util.connection.create_connection
 _dns_context = threading.local()
 
 def _patched_create_connection(address: tuple[str, int], *args: Any, **kwargs: Any) -> socket.socket:
     host, port = address
-    forced_ip = getattr(_dns_context, 'forced_ip', None)
-    forced_host = getattr(_dns_context, 'forced_host', None)
-    if forced_ip and forced_host and host == forced_host:
-        address = (forced_ip, port)
+    if getattr(_dns_context, 'forced_ip', None) and getattr(_dns_context, 'forced_host', None) == host:
+        address = (_dns_context.forced_ip, port)
     return _orig_create_connection(address, *args, **kwargs)
 
 urllib3.util.connection.create_connection = _patched_create_connection
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ==========================================
-# 依賴庫動態加載
-# ==========================================
-try:
-    import orjson
-    USE_ORJSON = True
-    JSONDecodeErrorType = orjson.JSONDecodeError
-except ImportError:
-    USE_ORJSON = False
-    JSONDecodeErrorType = json.JSONDecodeError
+try: import orjson; USE_ORJSON = True
+except ImportError: USE_ORJSON = False
 
-try:
-    import msgpack
-    USE_MSGPACK = True
-except ImportError:
-    USE_MSGPACK = False
+try: import msgpack; USE_MSGPACK = True
+except ImportError: USE_MSGPACK = False
 
-try:
-    import z3
-    HAS_Z3 = True
-except ImportError:
-    HAS_Z3 = False
+try: from blake3 import blake3; USE_BLAKE3 = True
+except ImportError: USE_BLAKE3 = False
 
-logger = logging.getLogger(__name__)
+try: import z3; HAS_Z3 = True
+except ImportError: HAS_Z3 = False
 
-# ==========================================
-# 核心常量配置
-# ==========================================
-CACHE_VERSION: int = 14
-MAX_LINE_LENGTH: int = 10000
-MAX_DOMAIN_LABELS: int = 127
-MAX_DOMAIN_LENGTH: int = 253
-MAX_TASK_NAME_LENGTH: int = 100
-DEFAULT_RETRIES: int = 3
-MAX_DOWNLOAD_RETRIES: int = 3
-SMALL_FILE_THRESHOLD: int = 5 * 1024 * 1024
-MAX_BDD_DEPTH: int = 500
-MAX_BACKOFF_SECONDS: int = 60
-HTML_CHECK_THRESHOLD: int = 3
-MAX_DNS_CACHE: int = 1024
+CACHE_VERSION = 60
+MAX_DOWNLOAD_RETRIES = 3
+MAX_DNS_CACHE = 1024
+MAX_BDD_DEPTH = 600
+MAX_IP_RANGE_AGGREGATION_V4 = 2**24
+MAX_IP_RANGE_AGGREGATION_V6 = 2**96
+OP_NEG, OP_AND, OP_OR = 0, 1, 2
 
-OP_NEG = 0
-OP_AND = 1
-OP_OR = 2
-
-RE_DOMAIN_LABEL = re.compile(r'^[a-z0-9_](?:[a-z0-9-_]{0,61}[a-z0-9_])?$', re.ASCII)
-RE_HTML_STRICT = re.compile(rb'(?:^[\s]*<(?:!DOCTYPE\s+html|html|head|body))', re.IGNORECASE | re.MULTILINE)
+RE_DOMAIN_LABEL = re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$', re.IGNORECASE)
 RE_TASK_NAME = re.compile(r'^[a-zA-Z0-9_-]+$')
 RE_HASH_LIKE = re.compile(r'\b[a-f0-9]{32,64}\b', re.IGNORECASE)
+RE_HTML_STRICT = re.compile(rb'(?:^[\s]*<(?:!DOCTYPE\s+html|html|head|body))', re.IGNORECASE | re.MULTILINE)
+RE_IPV4_MAPPED_IPV6 = re.compile(r'^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?:/(\d+))?$', re.IGNORECASE)
 
 IPNetworkType = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
 
-_DNS_CACHE: OrderedDict[str, tuple[float, list[str]]] = OrderedDict()
-_DNS_PENDING: dict[str, threading.Event] = {}
+_DNS_CACHE: OrderedDict[str, Tuple[float, List[str]]] = OrderedDict()
+_DNS_PENDING: Dict[str, threading.Event] = {}
 _DNS_LOCK = threading.Lock()
 
-# ==========================================
-# 異常類與基礎結構
-# ==========================================
 class BDDDepthExceededError(Exception): pass
 class TransientError(Exception): pass
-class SecurityViolationError(Exception): pass
-
 class CIDRFragmentationError(Exception):
-    def __init__(self, processed_count: int, limit: int, loss_rate: float = 0.0, cidrs: Optional[list[IPNetworkType]] = None):
-        self.processed_count = processed_count
-        self.limit = limit
-        self.loss_rate = loss_rate
-        self.cidrs = cidrs or []
-        super().__init__(f"CIDR fragmentation > {limit} ({processed_count}), loss {self.loss_rate:.2%}")
+    def __init__(self, processed_count: int, limit: int, loss_rate: float = 0.0):
+        super().__init__(f"CIDR fragmentation > {limit} ({processed_count}), loss {loss_rate:.2%}")
 
-def parse_version(ver: str) -> tuple[int, int, int]:
-    parts = list(map(int, re.findall(r'\d+', ver))) + [0, 0, 0]
-    return (parts[0], parts[1], parts[2])
+def fast_hash(data: bytes) -> str:
+    return blake3(data).hexdigest() if USE_BLAKE3 else hashlib.sha256(data).hexdigest()
 
 class MergeConfig:
     __slots__ = (
         'config_file', 'output_dir', 'core_bin_path', 'max_workers', 'max_download_size',
-        'max_cidr_fragmentation', 'enable_ipv6', 'strict_zero_loss', 'max_domain_depth',
-        'enable_cidr_approximation', 'cidr_approximation_max_loss_rate', 'enable_smt_verification',
-        'smt_progressive_timeout', 'enable_bdd_verification', 'bdd_node_limit', 'url_allow_private_ips',
+        'enable_ipv6', 'enable_smt_verification', 'smt_progressive_timeout',
+        'enable_bdd_verification', 'bdd_node_limit', 'url_allow_private_ips',
         'max_concurrent_downloads', 'download_timeout_connect', 'download_timeout_read',
         'compile_timeout_seconds', 'max_bdd_var_cache_size', 'max_source_age_days',
-        'allow_local_core', 'enable_cache', 'bdd_lru_cache_size', 'max_verification_sources',
-        'smt_unknown_default', 'conflict_resolution', 'output_format', 'allow_policy',
-        'deny_policy', 'verify_ssl', 'max_cache_entries', 'enable_dga_filter', 'enable_trie_compression'
+        'enable_cache', 'bdd_lru_cache_size', 'max_verification_sources',
+        'output_format', 'allow_policy', 'deny_policy', 'verify_ssl', 'max_cache_entries',
+        'enable_dga_filter', 'enable_trie_compression', 'conflict_resolution',
+        'enable_lineage', 'lineage_state_file', 'enable_reputation',
+        'max_cidr_fragmentation', 'enable_cidr_approximation', 'cidr_approximation_max_loss_rate',
+        'strict_zero_loss', 'smt_unknown_default', 'max_domain_length', 'fallback_on_fragmentation',
+        'ipv4_garbage_threshold', 'ipv6_garbage_threshold'
     )
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, **kwargs: Any):
         self.config_file = kwargs.get('config_file', 'scripts/custom_merge.json')
         self.output_dir = Path(kwargs.get('output_dir', 'rules'))
-        self.core_bin_path = kwargs.get('core_bin_path', "")
-        self.max_workers = int(kwargs.get('max_workers', 0))
+        self.core_bin_path = kwargs.get('core_bin_path', os.getenv("SB_CORE_PATH", "./sb-core"))
+        self.max_workers = int(kwargs.get('max_workers', 0)) or min(max(1, (os.cpu_count() or 4) * 2), 16)
+        self.max_concurrent_downloads = max(10, int(kwargs.get('max_concurrent_downloads', 0)) or self.max_workers)
         self.max_download_size = int(kwargs.get('max_download_size', 150 * 1024 * 1024))
-        self.max_cidr_fragmentation = int(kwargs.get('max_cidr_fragmentation', 5000))
-        self.enable_ipv6 = bool(kwargs.get('enable_ipv6', True))
-        self.strict_zero_loss = bool(kwargs.get('strict_zero_loss', True))
-        self.max_domain_depth = int(kwargs.get('max_domain_depth', MAX_DOMAIN_LABELS))
-        self.enable_cidr_approximation = bool(kwargs.get('enable_cidr_approximation', True))
-        self.cidr_approximation_max_loss_rate = float(kwargs.get('cidr_approximation_max_loss_rate', 0.05))
-        self.enable_smt_verification = bool(kwargs.get('enable_smt_verification', False))
-        self.smt_progressive_timeout = tuple(kwargs.get('smt_progressive_timeout', (100, 500, 2000, 5000)))
-        self.enable_bdd_verification = bool(kwargs.get('enable_bdd_verification', True))
-        self.bdd_node_limit = int(kwargs.get('bdd_node_limit', 100000))
         self.url_allow_private_ips = bool(kwargs.get('url_allow_private_ips', False))
-        self.max_concurrent_downloads = int(kwargs.get('max_concurrent_downloads', 0))
         self.download_timeout_connect = int(kwargs.get('download_timeout_connect', 10))
         self.download_timeout_read = int(kwargs.get('download_timeout_read', 60))
-        self.compile_timeout_seconds = int(kwargs.get('compile_timeout_seconds', 180))
+        self.verify_ssl = bool(kwargs.get('verify_ssl', True))
+        self.enable_ipv6 = bool(kwargs.get('enable_ipv6', True))
+        self.enable_dga_filter = bool(kwargs.get('enable_dga_filter', True))
+        self.enable_trie_compression = bool(kwargs.get('enable_trie_compression', True))
+        self.conflict_resolution = str(kwargs.get('conflict_resolution', 'specificity')).lower()
+        self.max_cidr_fragmentation = int(kwargs.get('max_cidr_fragmentation', 5000))
+        self.enable_cidr_approximation = bool(kwargs.get('enable_cidr_approximation', True))
+        self.cidr_approximation_max_loss_rate = float(kwargs.get('cidr_approximation_max_loss_rate', 0.05))
+        self.strict_zero_loss = bool(kwargs.get('strict_zero_loss', True))
+        self.fallback_on_fragmentation = bool(kwargs.get('fallback_on_fragmentation', True))
+        self.enable_smt_verification = bool(kwargs.get('enable_smt_verification', False))
+        self.smt_progressive_timeout = tuple(kwargs.get('smt_progressive_timeout', (100, 500, 2000)))
+        self.smt_unknown_default = bool(kwargs.get('smt_unknown_default', False))
+        self.enable_bdd_verification = bool(kwargs.get('enable_bdd_verification', True))
+        self.bdd_node_limit = int(kwargs.get('bdd_node_limit', 100000))
         self.max_bdd_var_cache_size = int(kwargs.get('max_bdd_var_cache_size', 10000))
-        self.max_source_age_days = int(kwargs.get('max_source_age_days', 30))
-        self.allow_local_core = bool(kwargs.get('allow_local_core', False))
-        self.enable_cache = bool(kwargs.get('enable_cache', True))
         self.bdd_lru_cache_size = int(kwargs.get('bdd_lru_cache_size', 50000))
         self.max_verification_sources = int(kwargs.get('max_verification_sources', 20))
-        self.smt_unknown_default = bool(kwargs.get('smt_unknown_default', False))
-        self.conflict_resolution = str(kwargs.get('conflict_resolution', 'first')).lower()
+        self.enable_cache = bool(kwargs.get('enable_cache', True))
+        self.max_cache_entries = int(kwargs.get('max_cache_entries', 500))
+        self.max_source_age_days = int(kwargs.get('max_source_age_days', 30))
+        self.enable_lineage = bool(kwargs.get('enable_lineage', True))
+        self.lineage_state_file = kwargs.get('lineage_state_file', '.lineage_state')
+        self.enable_reputation = bool(kwargs.get('enable_reputation', True))
+        self.compile_timeout_seconds = int(kwargs.get('compile_timeout_seconds', 180))
         self.output_format = str(kwargs.get('output_format', 'json')).lower()
         self.allow_policy = str(kwargs.get('allow_policy', 'PROXY'))
         self.deny_policy = str(kwargs.get('deny_policy', 'REJECT'))
-        self.verify_ssl = bool(kwargs.get('verify_ssl', True))
-        self.max_cache_entries = int(kwargs.get('max_cache_entries', 500))
-        self.enable_dga_filter = bool(kwargs.get('enable_dga_filter', True))
-        self.enable_trie_compression = bool(kwargs.get('enable_trie_compression', True))
-        self._validate()
+        self.max_domain_length = int(kwargs.get('max_domain_length', 253))
+        self.ipv4_garbage_threshold = int(kwargs.get('ipv4_garbage_threshold', 8))
+        self.ipv6_garbage_threshold = int(kwargs.get('ipv6_garbage_threshold', 48))
 
-    def _validate(self) -> None:
-        self.max_workers = min(max(1, self.max_workers or (os.cpu_count() or 4) * 2), 16)
-        self.max_concurrent_downloads = max(10, self.max_concurrent_downloads or self.max_workers)
-        self.max_domain_depth = max(1, min(MAX_DOMAIN_LABELS, self.max_domain_depth))
-        if self.conflict_resolution not in ('first', 'specificity'):
-            self.conflict_resolution = 'first'
         if self.output_format not in ('json', 'surge', 'clash'):
             self.output_format = 'json'
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any], base: MergeConfig) -> MergeConfig:
-        merged = {}
+    def from_dict(cls, d: Dict[str, Any], base: 'MergeConfig') -> 'MergeConfig':
+        kwargs = {}
         for key in cls.__slots__:
             if key in d and d[key] is not None:
-                val = d[key]
-                if key == 'output_dir' and isinstance(val, str):
-                    val = Path(val)
-                elif key == 'smt_progressive_timeout' and isinstance(val, (list, tuple)):
-                    val = tuple(int(item) for item in val)
-                merged[key] = val
-            else:
-                merged[key] = getattr(base, key)
-        return cls(**merged)
+                if key == 'output_dir': kwargs[key] = Path(d[key])
+                elif key == 'smt_progressive_timeout': kwargs[key] = tuple(int(i) for i in d[key])
+                else: kwargs[key] = d[key]
+            else: kwargs[key] = getattr(base, key)
+        return cls(**kwargs)
 
     def validate_core_path(self) -> bool:
-        if not self.core_bin_path:
-            return True
-        if not self.allow_local_core:
-            return False
-        path = Path(self.core_bin_path).expanduser()
-        if not path.is_file() or not os.access(str(path), os.X_OK):
-            logger.error(f"Core binary invalid or not executable: {path}")
-            return False
-        return True
-
-    def is_url_allowed(self, url: str) -> tuple[bool, str]:
-        try:
-            parsed = urlparse(url)
-            scheme = parsed.scheme.lower()
-            if scheme not in ('http', 'https'): return False, f"Scheme '{scheme}' not allowed"
-            if not parsed.hostname: return False, "Empty or invalid hostname"
-            if not self.url_allow_private_ips:
-                try:
-                    ip = ipaddress.ip_address(parsed.hostname)
-                    if ip.is_private or ip.is_loopback:
-                        return False, f"Private IP not allowed: {parsed.hostname}"
-                except ValueError:
-                    pass
-            return True, "OK"
-        except Exception as e:
-            return False, str(e)
+        if not self.core_bin_path: return False
+        p = Path(self.core_bin_path).expanduser().absolute()
+        if not p.is_file(): return False
+        try: os.chmod(p, p.stat().st_mode | 0o111)
+        except OSError: pass
+        return os.access(str(p), os.X_OK)
 
 DEFAULT_CONFIG = MergeConfig()
 
-# ==========================================
-# 規則數據模型與優化器
-# ==========================================
 class MatchType(IntEnum):
     EXACT = 1
     SUFFIX = 2
     WILDCARD = 3
+    KEYWORD = 4
+    REGEX = 5
 
 class EntropyLevel(IntEnum):
     SAFE = 1
@@ -253,211 +190,287 @@ class EntropyLevel(IntEnum):
 class EntropyAssessor:
     @staticmethod
     def assess(domain: str) -> EntropyLevel:
-        if RE_HASH_LIKE.search(domain):
-            return EntropyLevel.DGA_CONFIRMED
-            
+        if RE_HASH_LIKE.search(domain): return EntropyLevel.DGA_CONFIRMED
         parts = domain.split('.')
-        max_entropy, max_digit, min_vowel = 0.0, 0.0, 1.0
+        if (len(parts) == 1 and len(parts[0]) < 3) or (len(parts) > 1 and len(parts[-1]) < 2): return EntropyLevel.DGA_CONFIRMED
+        max_ent, max_dig, min_vow = 0.0, 0.0, 1.0
         vowels = set('aeiou')
-        
-        for part in parts:
-            if len(part) < 6: 
-                continue
-                
-            length = len(part)
-            freq = Counter(part)
-            
-            # 計算香農熵
-            entropy = -sum((count/length) * math.log2(count/length) for count in freq.values())
-            norm_entropy = entropy / math.log2(len(set(part))) if len(set(part)) > 1 else 0
-            
-            max_entropy = max(max_entropy, norm_entropy)
-            max_digit = max(max_digit, sum(c.isdigit() for c in part) / length)
-            min_vowel = min(min_vowel, sum(1 for c in part if c in vowels) / length)
-            
-        if max_entropy > 0.95 and max_digit > 0.3 and min_vowel < 0.1:
-            return EntropyLevel.DGA_CONFIRMED
-        if max_entropy > 0.90 and max_digit > 0.2 and min_vowel < 0.15:
-            return EntropyLevel.SUSPICIOUS
-            
+        for p in parts:
+            if len(p) < 6: continue
+            length = len(p)
+            freq = Counter(p)
+            ent = -sum((c / length) * math.log2(c / length) for c in freq.values())
+            n_ent = ent / math.log2(len(set(p))) if len(set(p)) > 1 else 0
+            max_ent = max(max_ent, n_ent)
+            max_dig = max(max_dig, sum(c.isdigit() for c in p) / length)
+            min_vow = min(min_vow, sum(1 for c in p if c in vowels) / length)
+        if max_ent > 0.95 and max_dig > 0.3 and min_vow < 0.1: return EntropyLevel.DGA_CONFIRMED
+        if max_ent > 0.90 and max_dig > 0.2 and min_vow < 0.15: return EntropyLevel.SUSPICIOUS
         return EntropyLevel.SAFE
 
 class DomainRule:
-    __slots__ = ('pattern', 'match_type', 'normalized', 'is_exclusion', 'specificity_score', '_hash')
-
-    def __init__(self, pattern: str, match_type: MatchType, normalized: str, is_exclusion: bool = False, specificity_score: int = 0):
-        self.pattern = pattern
+    __slots__ = ('match_type', 'normalized', 'is_exclusion', '_hash', 'specificity_score', 'attrs')
+    def __init__(self, match_type: MatchType, normalized: str, is_exclusion: bool = False, specificity_score: int = 0, attrs: str = ""):
         self.match_type = match_type
-        self.normalized = normalized or pattern
+        self.normalized = normalized
         self.is_exclusion = is_exclusion
-
+        self.attrs = attrs
+        self._hash = hash((self.normalized, self.match_type.value, self.is_exclusion))
         if specificity_score == 0:
             score = self.normalized.count('.') * 10
-            if self.match_type == MatchType.EXACT: score += 8
-            elif self.match_type == MatchType.SUFFIX: score += 3
-            elif self.match_type == MatchType.WILDCARD: score += 1
+            if match_type == MatchType.EXACT: score += 8
+            elif match_type == MatchType.SUFFIX: score += 3
+            elif match_type == MatchType.WILDCARD: score += 1
             self.specificity_score = score
-        else:
-            self.specificity_score = specificity_score
-
-        self._hash = hash((self.normalized, self.match_type, self.is_exclusion))
-
-    def __hash__(self) -> int:
-        return self._hash
-
-    def __eq__(self, other: Any) -> bool:
-        if type(self) is not type(other): return NotImplemented
-        return (self._hash == other._hash and
-                self.match_type == other.match_type and
-                self.is_exclusion == other.is_exclusion and
-                self.normalized == other.normalized)
+        else: self.specificity_score = specificity_score
+    def __hash__(self) -> int: return self._hash
+    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash and self.normalized == o.normalized
 
 class IPCIDRRule:
-    __slots__ = ('network', 'original_str', 'is_exclusion', 'version', 'start_int', 'end_int', 'prefixlen', '_hash')
-
-    def __init__(self, network: IPNetworkType, original_str: str = "", is_exclusion: bool = False):
-        self.network = network
-        self.original_str = original_str or str(network)
-        self.is_exclusion = is_exclusion
-        self.version = network.version
-        self.start_int = int(network.network_address)
-        self.end_int = int(network.broadcast_address)
-        self.prefixlen = network.prefixlen
+    __slots__ = ('is_exclusion', 'version', 'start_int', 'end_int', 'prefixlen', '_hash', 'attrs')
+    def __init__(self, start_int: int, end_int: int, prefixlen: int, version: int, is_exclusion: bool = False, attrs: str = ""):
+        self.is_exclusion, self.version = is_exclusion, version
+        self.start_int, self.end_int, self.prefixlen = start_int, end_int, prefixlen
+        self.attrs = attrs
         self._hash = hash((self.version, self.start_int, self.prefixlen, self.is_exclusion))
+    def __hash__(self) -> int: return self._hash
+    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash
 
-    def __hash__(self) -> int:
-        return self._hash
+class GenericRule:
+    __slots__ = ('type', 'val', 'is_exclusion', 'attrs', '_hash')
+    def __init__(self, typ: str, val: str, is_exclusion: bool = False, attrs: str = ""):
+        self.type, self.val, self.is_exclusion, self.attrs = typ, val, is_exclusion, attrs
+        self._hash = hash((self.type, self.val, self.is_exclusion))
+    def __hash__(self) -> int: return self._hash
+    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash
 
-    def __eq__(self, other: Any) -> bool:
-        if type(self) is not type(other): return NotImplemented
-        return (self._hash == other._hash and
-                self.is_exclusion == other.is_exclusion and
-                self.version == other.version and
-                self.prefixlen == other.prefixlen and
-                self.start_int == other.start_int)
+RuleType = Union[DomainRule, IPCIDRRule, GenericRule]
 
-RuleType = Union[DomainRule, IPCIDRRule]
+class IntervalMerger:
+    @staticmethod
+    def _union_intervals(ivs: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        if not ivs: return []
+        ivs.sort(key=lambda x: x[0])
+        merged = [ivs[0]]
+        for s, e in ivs[1:]:
+            last_s, last_e = merged[-1]
+            if s <= last_e + 1: merged[-1] = (last_s, max(last_e, e))
+            else: merged.append((s, e))
+        return merged
 
-def rules_digest(rules: Iterable[RuleType]) -> int:
-    fs = frozenset(r._hash for r in rules)
-    return hash(fs) if fs else 0
+    @staticmethod
+    def _subtract_intervals(base_ivs: List[Tuple[int, int]], excl_ivs: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        if not base_ivs: return []
+        if not excl_ivs: return base_ivs
+        events = []
+        for s, e in base_ivs:
+            events.extend([(s, 1), (e + 1, -1)])
+        for s, e in excl_ivs:
+            events.extend([(s, 2), (e + 1, -2)])
+        events.sort(key=lambda x: (x[0], -abs(x[1])))
+        result, a_cnt, d_cnt, prev_x = [], 0, 0, -1
+        for x, op in events:
+            if a_cnt > 0 and d_cnt == 0 and x > prev_x: result.append((prev_x, x - 1))
+            if op == 1: a_cnt += 1
+            elif op == -1: a_cnt -= 1
+            elif op == 2: d_cnt += 1
+            elif op == -2: d_cnt -= 1
+            prev_x = x
+        return IntervalMerger._union_intervals(result)
+
+    @classmethod
+    def resolve_weighted_ips(cls, rules_with_weights: List[Tuple[float, IPCIDRRule]], version: int) -> Tuple[List[Tuple[int, int, str]], List[Tuple[int, int, str]]]:
+        events = []
+        for i, (w, r) in enumerate(rules_with_weights):
+            if r.version != version: continue
+            rw = int(round(w, 5) * 100000)
+            events.extend([(r.start_int, 1, rw, r.is_exclusion, r.attrs, i), (r.end_int + 1, -1, rw, r.is_exclusion, r.attrs, i)])
+
+        events.sort(key=lambda x: x[0])
+        active_a, active_d = {}, {}
+        acc_a, acc_d = [], []
+        i_idx, n, prev_x = 0, len(events), -1
+
+        while i_idx < n:
+            x = events[i_idx][0]
+            if x > prev_x and prev_x != -1:
+                max_a = max((v[0] for v in active_a.values()), default=-1)
+                max_d = max((v[0] for v in active_d.values()), default=-1)
+
+                if max_d >= 0 and max_d >= max_a:
+                    attr = next((v[1] for k, v in sorted(active_d.items()) if v[0] == max_d), "")
+                    acc_d.append((prev_x, x - 1, attr))
+                elif max_a >= 0 and max_a > max_d:
+                    attr = next((v[1] for k, v in sorted(active_a.items()) if v[0] == max_a), "")
+                    acc_a.append((prev_x, x - 1, attr))
+
+            while i_idx < n and events[i_idx][0] == x:
+                _, op, rw, is_excl, attrs, r_id = events[i_idx]
+                tgt = active_d if is_excl else active_a
+                if op == 1: tgt[r_id] = (rw, attrs)
+                else: tgt.pop(r_id, None)
+                i_idx += 1
+            prev_x = x
+
+        def _merge_adj(ivs: List[Tuple[int, int, str]]) -> List[Tuple[int, int, str]]:
+            if not ivs: return []
+            res = [ivs[0]]
+            for s, e, attr in ivs[1:]:
+                ls, le, lattr = res[-1]
+                if s <= le + 1 and attr == lattr: res[-1] = (ls, max(le, e), attr)
+                else: res.append((s, e, attr))
+            return res
+
+        return _merge_adj(acc_a), _merge_adj(acc_d)
+
+    @staticmethod
+    def approximate_collapse(cidrs: List[IPNetworkType], target_count: int) -> Tuple[List[IPNetworkType], float]:
+        if len(cidrs) <= target_count: return cidrs, 0.0
+        orig_hosts = sum(c.num_addresses for c in cidrs)
+        if orig_hosts == 0: return [], 0.0
+        cidrs.sort(key=lambda x: x.num_addresses, reverse=True)
+        kept = list(ipaddress.collapse_addresses(cidrs[:target_count]))
+        new_hosts = sum(c.num_addresses for c in kept)
+        loss = max(0.0, 1.0 - (new_hosts / orig_hosts))
+        return kept, loss
+
+    @classmethod
+    def to_cidrs(cls, intervals: List[Tuple[int, int, str]], version: int, config: MergeConfig) -> List[Tuple[str, str]]:
+        exact_networks = []
+        width = 32 if version == 4 else 128
+        fn = ipaddress.IPv4Address if version == 4 else ipaddress.IPv6Address
+        agg_limit = MAX_IP_RANGE_AGGREGATION_V4 if version == 4 else MAX_IP_RANGE_AGGREGATION_V6
+
+        def _fast_cidr_split(start: int, end: int):
+            cur = start
+            while cur <= end:
+                max_sz = (cur & -cur) if cur != 0 else (1 << width)
+                rem = end - cur + 1
+                if max_sz > rem:
+                    max_sz = 1 << (rem.bit_length() - 1)
+                prefixlen = width - max_sz.bit_length() + 1
+                yield ipaddress.ip_network(f"{fn(cur)}/{prefixlen}", strict=False)
+                cur += max_sz
+
+        for s, e, attr in intervals:
+            r_sz = e - s + 1
+            if r_sz > agg_limit: exact_networks.extend((n, attr) for n in _fast_cidr_split(s, e))
+            else:
+                try: exact_networks.extend((n, attr) for n in ipaddress.summarize_address_range(fn(s), fn(e)))
+                except (ValueError, TypeError): exact_networks.extend((n, attr) for n in _fast_cidr_split(s, e))
+                    
+        if len(exact_networks) <= config.max_cidr_fragmentation: 
+            return [(str(n), a) for n, a in exact_networks]
+            
+        if not config.enable_cidr_approximation:
+            if config.fallback_on_fragmentation:
+                logger.info(f"CIDR fragmented ({len(exact_networks)} > limit). Truncating.")
+                exact_networks.sort(key=lambda x: x[0].num_addresses, reverse=True)
+                grp = defaultdict(list)
+                for n, a in exact_networks[:config.max_cidr_fragmentation]: grp[a].append(n)
+                res = []
+                for a, ns in grp.items(): res.extend((str(k), a) for k in ipaddress.collapse_addresses(ns))
+                return res[:config.max_cidr_fragmentation]
+            raise CIDRFragmentationError(len(exact_networks), config.max_cidr_fragmentation, 0.0)
+            
+        grp = defaultdict(list)
+        for n, a in exact_networks: grp[a].append(n)
+        res, tot_loss = [], 0.0
+        total_exact = max(1, len(exact_networks))
+        
+        for a, ns in grp.items():
+            budget = max(1, int(config.max_cidr_fragmentation * (len(ns) / total_exact)))
+            kept, loss = cls.approximate_collapse(ns, budget)
+            tot_loss = max(tot_loss, loss)
+            res.extend((str(k), a) for k in kept)
+        
+        if len(res) > config.max_cidr_fragmentation:
+            if config.fallback_on_fragmentation:
+                logger.info(f"CIDR still fragmented after approx. Strict truncating to {config.max_cidr_fragmentation}.")
+                res.sort(key=lambda x: ipaddress.ip_network(x[0], strict=False).num_addresses, reverse=True)
+                res = res[:config.max_cidr_fragmentation]
+            else: raise CIDRFragmentationError(len(res), config.max_cidr_fragmentation, tot_loss)
+            
+        if tot_loss > config.cidr_approximation_max_loss_rate or (tot_loss > 0 and config.strict_zero_loss):
+            if config.fallback_on_fragmentation: return res
+            raise CIDRFragmentationError(len(exact_networks), config.max_cidr_fragmentation, tot_loss)
+            
+        return res
 
 class TrieNode:
-    __slots__ = ('children', 'has_exact', 'has_suffix', 'has_wildcard', 'weight')
+    __slots__ = ('children', 'types')
     def __init__(self):
         self.children = {}
-        self.has_exact = False
-        self.has_suffix = False
-        self.has_wildcard = False
-        self.weight = 0.0
+        self.types = 0
 
 class DomainTrieOptimizer:
-    """基於前綴樹的域名剪枝算法，符合 Sing-box/Surge 等引擎的正則包含語義"""
     def __init__(self):
         self.root = TrieNode()
-    
-    def insert(self, rule: DomainRule, weight: float):
-        node = self.root
-        parts = rule.normalized.split('.')
-        for part in reversed(parts):
-            if part not in node.children:
-                node.children[part] = TrieNode()
-            node = node.children[part]
-            
-        # 記錄權重和規則類型
-        node.weight = max(node.weight, weight)
-        if rule.match_type == MatchType.EXACT:
-            node.has_exact = True
-        elif rule.match_type == MatchType.SUFFIX:
-            node.has_suffix = True
-        elif rule.match_type == MatchType.WILDCARD:
-            node.has_wildcard = True
-
-    def optimize(self) -> list[tuple[DomainRule, float]]:
-        result = []
         
-        def _dfs(node: TrieNode, path: list[str]):
-            # 如果此節點存在 SUFFIX，它覆蓋了當前及所有子域名
-            if node.has_suffix:
-                domain_str = '.'.join(reversed(path))
-                result.append((DomainRule(domain_str, MatchType.SUFFIX, domain_str), node.weight))
-                return  # 剪枝：完全放棄遍歷子節點
-                
-            # 處理 EXACT 情況
-            if node.has_exact:
-                domain_str = '.'.join(reversed(path))
-                result.append((DomainRule(domain_str, MatchType.EXACT, domain_str), node.weight))
-                
-            # 處理 WILDCARD 情況
-            if node.has_wildcard:
-                domain_str = '.'.join(reversed(path))
-                result.append((DomainRule(f"*.{domain_str}", MatchType.WILDCARD, domain_str), node.weight))
-                return  # 剪枝：WILDCARD 覆蓋所有子域名，不需要再往下看了
-                
-            # 繼續深度優先遍歷
-            for child_label, child_node in node.children.items():
-                path.append(child_label)
-                _dfs(child_node, path)
+    def insert(self, rule: DomainRule) -> None:
+        node = self.root
+        for part in reversed(rule.normalized.split('.')):
+            if part not in node.children: node.children[part] = TrieNode()
+            node = node.children[part]
+        node.types |= (1 << rule.match_type.value)
+
+    def is_covered(self, domain: str) -> bool:
+        node = self.root
+        parts = domain.split('.')
+        for i, part in enumerate(reversed(parts)):
+            if (node.types & (1 << MatchType.SUFFIX.value)): return True
+            # 修復 2.1：嚴格限制通配符不可覆蓋自身，必須 i < len(parts) - 1
+            if (node.types & (1 << MatchType.WILDCARD.value)) and i < len(parts) - 1: return True
+            if part not in node.children: return False
+            node = node.children[part]
+        return bool(node.types & ((1 << MatchType.EXACT.value) | (1 << MatchType.SUFFIX.value)))
+
+    def optimize(self, is_exclusion: bool) -> List[DomainRule]:
+        res = []
+        def _dfs(node: TrieNode, path: List[str], parent_has_suffix: bool):
+            is_suf = bool(node.types & (1 << MatchType.SUFFIX.value))
+            if parent_has_suffix: return
+            cur = '.'.join(reversed(path))
+            if is_suf:
+                res.append(DomainRule(MatchType.SUFFIX, cur, is_exclusion))
+                return
+            if node.types & (1 << MatchType.WILDCARD.value): res.append(DomainRule(MatchType.WILDCARD, cur, is_exclusion))
+            if node.types & (1 << MatchType.EXACT.value): res.append(DomainRule(MatchType.EXACT, cur, is_exclusion))
+            for lbl, ch in node.children.items():
+                path.append(lbl)
+                _dfs(ch, path, parent_has_suffix or is_suf)
                 path.pop()
+        for lbl, ch in self.root.children.items(): _dfs(ch, [lbl], False)
+        return res
 
-        for label, child in self.root.children.items():
-            _dfs(child, [label])
-            
-        return result
-
-# ==========================================
-# BDD / SMT 衝突驗證引擎
-# ==========================================
 class VersionedBDDNode:
     __slots__ = ('var', 'low', 'high', '_node_id')
-
-    def __init__(self, node_id: int, var: Any, low: Optional[VersionedBDDNode], high: Optional[VersionedBDDNode]) -> None:
-        self.var = var
-        self.low = low
-        self.high = high
-        self._node_id = node_id
-
-    def __hash__(self) -> int:
-        return self._node_id
-
-    def __eq__(self, other: Any) -> bool:
-        return self._node_id == getattr(other, '_node_id', -3)
+    def __init__(self, n_id: int, v: Any, l: Optional['VersionedBDDNode'], h: Optional['VersionedBDDNode']):
+        self.var, self.low, self.high, self._node_id = v, l, h, n_id
+    def __hash__(self) -> int: return self._node_id
+    def __eq__(self, o: Any) -> bool: return self._node_id == getattr(o, '_node_id', -3)
 
 class BDDEngine:
-    __slots__ = ('var_map', 'var_counter', 'true_node', 'false_node',
-                 '_op_cache', '_op_cache_max', '_node_cache', '_node_cache_max',
-                 '_var_nodes', '_node_id_counter')
+    __slots__ = ('var_map', 'var_counter', 'true_node', 'false_node', '_op_cache', '_op_max', '_node_cache', '_node_max', '_var_nodes', '_id_ctr')
+    def __init__(self, node_max: int = 50000, op_max: int = 50000):
+        self.var_map, self.var_counter, self._id_ctr = {}, 0, 0
+        self._op_cache, self._node_cache, self._var_nodes = OrderedDict(), {}, {}
+        self._op_max, self._node_max = op_max, node_max
+        self.false_node = VersionedBDDNode(self._next_id(), -2, None, None)
+        self.true_node = VersionedBDDNode(self._next_id(), -1, None, None)
+        self._cache(self.false_node)
+        self._cache(self.true_node)
 
-    def __init__(self, node_cache_max: int = 50000, op_cache_max: int = 50000) -> None:
-        self.var_map: dict[Any, int] = {}
-        self.var_counter = 0
-        self._op_cache: OrderedDict[tuple[int, int, int], VersionedBDDNode] = OrderedDict()
-        self._op_cache_max = op_cache_max
-        self._node_cache: dict[tuple[int, int, int], VersionedBDDNode] = {}
-        self._node_cache_max = node_cache_max
-        self._node_id_counter = 0
-        self.false_node = VersionedBDDNode(self._next_node_id(), -2, None, None)
-        self.true_node = VersionedBDDNode(self._next_node_id(), -1, None, None)
-        self._var_nodes: dict[int, VersionedBDDNode] = {}
-        self._cache_node(self.false_node)
-        self._cache_node(self.true_node)
-
-    def _next_node_id(self) -> int:
-        nid = self._node_id_counter
-        self._node_id_counter += 1
+    def _next_id(self) -> int:
+        nid = self._id_ctr; self._id_ctr += 1
         return nid
-
-    def _get_cached_node(self, var: int, low_id: int, high_id: int) -> Optional[VersionedBDDNode]:
-        return self._node_cache.get((var, low_id, high_id))
-
-    def _cache_node(self, node: Optional[VersionedBDDNode]) -> None:
-        if node is None:
-            return
-        key = (node.var, node.low._node_id if node.low else -1, node.high._node_id if node.high else -1)
-        if key not in self._node_cache:
-            if len(self._node_cache) >= self._node_cache_max:
-                raise BDDDepthExceededError(f"BDD node limit reached ({self._node_cache_max})")
-            self._node_cache[key] = node
+        
+    def _cache(self, n: Optional[VersionedBDDNode]) -> None:
+        if n:
+            k = (n.var, n.low._node_id if n.low else -1, n.high._node_id if n.high else -1)
+            if k not in self._node_cache:
+                if len(self._node_cache) >= self._node_max: raise BDDDepthExceededError()
+                self._node_cache[k] = n
 
     def get_var(self, name: Any) -> int:
         if name not in self.var_map:
@@ -467,527 +480,218 @@ class BDDEngine:
 
     def ith_var(self, i: int) -> VersionedBDDNode:
         if i not in self._var_nodes:
-            node = VersionedBDDNode(self._next_node_id(), i, self.false_node, self.true_node)
-            self._var_nodes[i] = node
-            self._cache_node(node)
+            n = VersionedBDDNode(self._next_id(), i, self.false_node, self.true_node)
+            self._var_nodes[i] = n
+            self._cache(n)
         return self._var_nodes[i]
 
-    def neg(self, node: VersionedBDDNode, depth: int = 0) -> VersionedBDDNode:
-        if depth > MAX_BDD_DEPTH: raise BDDDepthExceededError("Recursion depth exceeded")
-        if node is self.true_node: return self.false_node
-        if node is self.false_node: return self.true_node
-
-        cache_key = (OP_NEG, node._node_id, -1)
-        if cache_key in self._op_cache:
-            self._op_cache.move_to_end(cache_key)
-            return self._op_cache[cache_key]
-
-        res = self._create_node(node.var, 
-                                self.neg(node.low, depth + 1) if node.low else None,
-                                self.neg(node.high, depth + 1) if node.high else None)
-        self._op_cache[cache_key] = res
-        if len(self._op_cache) > self._op_cache_max:
-            self._op_cache.popitem(last=False)
+    def neg(self, n: VersionedBDDNode, d: int = 0) -> VersionedBDDNode:
+        if d > MAX_BDD_DEPTH: raise BDDDepthExceededError()
+        if n is self.true_node: return self.false_node
+        if n is self.false_node: return self.true_node
+        k = (OP_NEG, n._node_id, -1)
+        if k in self._op_cache:
+            self._op_cache.move_to_end(k)
+            return self._op_cache[k]
+        res = self._create(n.var, self.neg(n.low, d + 1) if n.low else None, self.neg(n.high, d + 1) if n.high else None)
+        self._op_cache[k] = res
+        if len(self._op_cache) > self._op_max: self._op_cache.popitem(last=False)
         return res
 
-    def apply_and(self, f: VersionedBDDNode, g: VersionedBDDNode, depth: int = 0) -> VersionedBDDNode:
-        return self._apply_op(f, g, OP_AND, depth)
+    def apply_and(self, f: VersionedBDDNode, g: VersionedBDDNode, d: int = 0) -> VersionedBDDNode: return self._apply(f, g, OP_AND, d)
+    def apply_or(self, f: VersionedBDDNode, g: VersionedBDDNode, d: int = 0) -> VersionedBDDNode: return self._apply(f, g, OP_OR, d)
 
-    def apply_or(self, f: VersionedBDDNode, g: VersionedBDDNode, depth: int = 0) -> VersionedBDDNode:
-        return self._apply_op(f, g, OP_OR, depth)
-
-    def apply_implies(self, f: VersionedBDDNode, g: VersionedBDDNode, depth: int = 0) -> VersionedBDDNode:
-        return self.apply_or(self.neg(f, depth), g, depth)
-
-    def _apply_op(self, f: VersionedBDDNode, g: VersionedBDDNode, op: int, depth: int = 0) -> VersionedBDDNode:
-        if depth > MAX_BDD_DEPTH: raise BDDDepthExceededError("Recursion depth exceeded")
-
-        if f is self.false_node or g is self.false_node:
-            return self.false_node if op == OP_AND else (g if f is self.false_node else f)
-        if f is self.true_node:
-            return g if op == OP_AND else self.true_node
-        if g is self.true_node:
-            return f if op == OP_AND else self.true_node
-        if f is g:
-            return f
-
-        cache_key = (op, min(f._node_id, g._node_id), max(f._node_id, g._node_id))
-        if cache_key in self._op_cache:
-            self._op_cache.move_to_end(cache_key)
-            return self._op_cache[cache_key]
-
-        if f.var == g.var:
-            res = self._create_node(f.var, 
-                                    self._apply_op(f.low, g.low, op, depth + 1),
-                                    self._apply_op(f.high, g.high, op, depth + 1))
-        elif f.var < g.var:
-            res = self._create_node(f.var, 
-                                    self._apply_op(f.low, g, op, depth + 1),
-                                    self._apply_op(f.high, g, op, depth + 1))
-        else:
-            res = self._create_node(g.var, 
-                                    self._apply_op(f, g.low, op, depth + 1),
-                                    self._apply_op(f, g.high, op, depth + 1))
-
-        self._op_cache[cache_key] = res
-        if len(self._op_cache) > self._op_cache_max:
-            self._op_cache.popitem(last=False)
+    def _apply(self, f: VersionedBDDNode, g: VersionedBDDNode, op: int, d: int = 0) -> VersionedBDDNode:
+        if d > MAX_BDD_DEPTH: raise BDDDepthExceededError()
+        if f is self.false_node or g is self.false_node: return self.false_node if op == OP_AND else (g if f is self.false_node else f)
+        if f is self.true_node: return g if op == OP_AND else self.true_node
+        if g is self.true_node: return f if op == OP_AND else self.true_node
+        if f is g: return f
+        k = (op, min(f._node_id, g._node_id), max(f._node_id, g._node_id))
+        if k in self._op_cache:
+            self._op_cache.move_to_end(k)
+            return self._op_cache[k]
+        if f.var == g.var: res = self._create(f.var, self._apply(f.low, g.low, op, d + 1), self._apply(f.high, g.high, op, d + 1))
+        elif f.var < g.var: res = self._create(f.var, self._apply(f.low, g, op, d + 1), self._apply(f.high, g, op, d + 1))
+        else: res = self._create(g.var, self._apply(f, g.low, op, d + 1), self._apply(f, g.high, op, d + 1))
+        self._op_cache[k] = res
+        if len(self._op_cache) > self._op_max: self._op_cache.popitem(last=False)
         return res
 
-    def _create_node(self, var: int, low: Optional[VersionedBDDNode], high: Optional[VersionedBDDNode]) -> VersionedBDDNode:
-        if low is high and low is not None:
-            return low
-        cached = self._get_cached_node(var, low._node_id if low else -1, high._node_id if high else -1)
-        if cached:
-            return cached
-        node = VersionedBDDNode(self._next_node_id(), var, low, high)
-        self._cache_node(node)
-        return node
+    def _create(self, var: int, l: Optional[VersionedBDDNode], h: Optional[VersionedBDDNode]) -> VersionedBDDNode:
+        if l is h and l is not None: return l
+        c = self._node_cache.get((var, l._node_id if l else -1, h._node_id if h else -1))
+        if c: return c
+        n = VersionedBDDNode(self._next_id(), var, l, h)
+        self._cache(n)
+        return n
 
-    def sat_ratio(self, node: VersionedBDDNode) -> float:
-        if node is self.false_node: return 0.0
-        if node is self.true_node: return 1.0
-        cache: dict[VersionedBDDNode, float] = {}
-
-        def _ratio(n: Optional[VersionedBDDNode], depth: int) -> float:
-            if n is None: return 0.0
-            if depth > MAX_BDD_DEPTH: return 0.0 # 放寬異常拋出，防止單一節點太深導致直接失敗
-            if n is self.false_node: return 0.0
-            if n is self.true_node: return 1.0
-            if n in cache: return cache[n]
-            
-            res = 0.5 * _ratio(n.low, depth + 1) + 0.5 * _ratio(n.high, depth + 1)
-            cache[n] = res
-            return res
-
-        return _ratio(node, 0)
-
-    def implies(self, f: VersionedBDDNode, g: VersionedBDDNode) -> bool:
-        return self.apply_implies(f, g) is self.true_node
-
+    def sat_ratio(self, n: VersionedBDDNode) -> float:
+        if n is self.false_node: return 0.0
+        if n is self.true_node: return 1.0
+        cache = {}
+        def _ratio(node, d):
+            if node is None or d > MAX_BDD_DEPTH or node is self.false_node: return 0.0
+            if node is self.true_node: return 1.0
+            if node in cache: return cache[node]
+            r = 0.5 * _ratio(node.low, d + 1) + 0.5 * _ratio(node.high, d + 1)
+            cache[node] = r
+            return r
+        return _ratio(n, 0)
+    
     def clear(self) -> None:
         self._op_cache.clear()
         self._node_cache.clear()
         self._var_nodes.clear()
         self.var_map.clear()
-        self.var_counter = 0
-        self._node_id_counter = 0
-        self.false_node = VersionedBDDNode(self._next_node_id(), -2, None, None)
-        self.true_node = VersionedBDDNode(self._next_node_id(), -1, None, None)
-        self._cache_node(self.false_node)
-        self._cache_node(self.true_node)
-
-def split_ip_by_version(rules: list[IPCIDRRule]) -> tuple[list[IPCIDRRule], list[IPCIDRRule]]:
-    return [r for r in rules if r.version == 4], [r for r in rules if r.version == 6]
-
-def split_networks_by_version(nets: list[IPNetworkType]) -> tuple[list[IPNetworkType], list[IPNetworkType]]:
-    return [n for n in nets if n.version == 4], [n for n in nets if n.version == 6]
+        self.var_counter = self._id_ctr = 0
+        self.false_node = VersionedBDDNode(self._next_id(), -2, None, None)
+        self.true_node = VersionedBDDNode(self._next_id(), -1, None, None)
+        self._cache(self.false_node)
+        self._cache(self.true_node)
 
 class BDDRuleVerifier:
-    __slots__ = ('engine', '_ip_vars', '_max_cache_size')
+    __slots__ = ('eng', '_ip_vars', '_max_c')
+    def __init__(self, eng: BDDEngine, max_c: int = 10000):
+        self.eng, self._max_c, self._ip_vars = eng, max_c, OrderedDict()
 
-    def __init__(self, engine: BDDEngine, max_cache_size: int = 10000) -> None:
-        self.engine = engine
-        self._ip_vars: OrderedDict[tuple[int, int], VersionedBDDNode] = OrderedDict()
-        self._max_cache_size = max_cache_size
+    def _get_v(self, ver: int, bp: int) -> VersionedBDDNode:
+        k = (ver, bp)
+        if k in self._ip_vars:
+            self._ip_vars.move_to_end(k)
+            return self._ip_vars[k]
+        n = self.eng.ith_var(self.eng.get_var(('ip', ver, bp)))
+        self._ip_vars[k] = n
+        if len(self._ip_vars) > self._max_c: self._ip_vars.popitem(last=False)
+        return n
 
-    def _get_ip_var(self, ver: int, bp: int) -> VersionedBDDNode:
-        key = (ver, bp)
-        if key in self._ip_vars:
-            self._ip_vars.move_to_end(key)
-            return self._ip_vars[key]
-        node = self.engine.ith_var(self.engine.get_var(('ip', ver, bp)))
-        self._ip_vars[key] = node
-        if len(self._ip_vars) > self._max_cache_size:
-            self._ip_vars.popitem(last=False)
-        return node
-
-    def _preallocate_vars(self, rules: list[IPCIDRRule]) -> None:
-        for r in rules:
-            for bp in range(r.prefixlen):
-                self._get_ip_var(r.version, bp)
-
-    def encode_ip_rule(self, rule: IPCIDRRule) -> VersionedBDDNode:
-        addr = rule.start_int
-        plen = rule.prefixlen
-        ver = rule.version
-        width = 32 if ver == 4 else 128
-        
-        if plen == 0:
-            return self.engine.true_node
-            
-        res = self.engine.true_node
-        for bp in range(min(plen, width)):
-            bit = (addr >> (width - 1 - bp)) & 1
-            bv_node = self._get_ip_var(ver, bp)
-            if bit == 0:
-                bv_node = self.engine.neg(bv_node)
-            res = self.engine.apply_and(res, bv_node)
+    def encode(self, start: int, plen: int, ver: int) -> VersionedBDDNode:
+        w = 32 if ver == 4 else 128
+        if plen == 0: return self.eng.true_node
+        res = self.eng.true_node
+        for bp in range(min(plen, w)):
+            v = self._get_v(ver, bp)
+            if ((start >> (w - 1 - bp)) & 1) == 0: v = self.eng.neg(v)
+            res = self.eng.apply_and(res, v)
         return res
 
-    def build_rule_set_expression(self, allow_rules: list[IPCIDRRule], deny_rules: list[IPCIDRRule]) -> VersionedBDDNode:
-        if not allow_rules and not deny_rules:
-            return self.engine.false_node
-            
-        self._preallocate_vars(allow_rules + deny_rules)
+    def build(self, allows: List[IPCIDRRule], denys: List[IPCIDRRule], ver: int) -> VersionedBDDNode:
+        if not allows and not denys: return self.eng.false_node
+        for r in allows + denys:
+            for bp in range(r.prefixlen): self._get_v(ver, bp)
+        a_bdd = self.eng.false_node
+        for r in allows: a_bdd = self.eng.apply_or(a_bdd, self.encode(r.start_int, r.prefixlen, ver))
+        if not denys: return a_bdd
+        d_bdd = self.eng.false_node
+        for r in denys: d_bdd = self.eng.apply_or(d_bdd, self.encode(r.start_int, r.prefixlen, ver))
+        return self.eng.apply_and(a_bdd, self.eng.neg(d_bdd))
 
-        allow_bdd = self.engine.false_node
-        for r in allow_rules:
-            allow_bdd = self.engine.apply_or(allow_bdd, self.encode_ip_rule(r))
-
-        if not deny_rules:
-            return allow_bdd
-
-        deny_bdd = self.engine.false_node
-        for r in deny_rules:
-            deny_bdd = self.engine.apply_or(deny_bdd, self.encode_ip_rule(r))
-
-        return self.engine.apply_and(allow_bdd, self.engine.neg(deny_bdd))
-
-    def verify_subset_strict(self, p_allow: list[IPCIDRRule], p_deny: list[IPCIDRRule], c_allow: list[IPCIDRRule]) -> tuple[bool, float]:
-        if not c_allow: return True, 1.0
-
-        def _verify_ver(p_v_allow: list[IPCIDRRule], p_v_deny: list[IPCIDRRule], c_v_allow: list[IPCIDRRule]) -> tuple[bool, float]:
-            if not c_v_allow: return True, 1.0
-            if not p_v_allow: return False, 0.0
+    def verify(self, pa: List[IPCIDRRule], pd: List[IPCIDRRule], ca: List[IPCIDRRule], is_deny: bool) -> Tuple[bool, float]:
+        if not ca: return True, 1.0
+        def _chk(pa_v, pd_v, ca_v, ver):
+            if not ca_v: return True, 1.0
+            if not pa_v and not is_deny: return False, 0.0
             try:
-                p_bdd = self.build_rule_set_expression(p_v_allow, p_v_deny)
-                c_bdd = self.build_rule_set_expression(c_v_allow, [])
-                
-                if self.engine.implies(c_bdd, p_bdd): return True, 1.0
-                
-                c_ratio = self.engine.sat_ratio(c_bdd)
-                if c_ratio == 0.0: return True, 1.0
-                
-                diff = self.engine.apply_and(c_bdd, self.engine.neg(p_bdd))
-                d_ratio = self.engine.sat_ratio(diff)
-                if d_ratio == 0.0: return True, 1.0
-                
-                return False, max(0.0, min(1.0, 1.0 - (d_ratio / c_ratio)))
-            except BDDDepthExceededError as e:
-                logger.error(f"BDD verification depth exceeded: {e}")
+                if is_deny: p_bdd = self.build(pd_v, [], ver)
+                else: p_bdd = self.build(pa_v, pd_v, ver)
+                c_bdd = self.build(ca_v, [], ver)
+                diff = self.eng.apply_and(c_bdd, self.eng.neg(p_bdd))
+                if diff is self.eng.false_node: return True, 1.0
+                cr = self.eng.sat_ratio(c_bdd)
+                if cr == 0.0: return True, 1.0
+                return False, max(0.0, min(1.0, 1.0 - (self.eng.sat_ratio(diff) / cr)))
+            except BDDDepthExceededError:
                 return False, 0.0
+        v4_pa = [r for r in pa if r.version==4]; v6_pa = [r for r in pa if r.version==6]
+        v4_pd = [r for r in pd if r.version==4]; v6_pd = [r for r in pd if r.version==6]
+        v4_ca = [r for r in ca if r.version==4]; v6_ca = [r for r in ca if r.version==6]
+        ok_v4, c_v4 = _chk(v4_pa, v4_pd, v4_ca, 4)
+        ok_v6, c_v6 = _chk(v6_pa, v6_pd, v6_ca, 6)
+        return (ok_v4 and ok_v6), min(c_v4 if v4_ca and not ok_v4 else 1.0, c_v6 if v6_ca and not ok_v6 else 1.0)
 
-        v4_p_a, v6_p_a = split_ip_by_version(p_allow)
-        v4_p_d, v6_p_d = split_ip_by_version(p_deny)
-        v4_c_a, v6_c_a = split_ip_by_version(c_allow)
+def _z3_worker(p_allow, p_deny, c_rules, is_deny, ver, timeouts):
+    try:
+        import z3
+        ctx = z3.Context()
+        s = z3.Solver(ctx=ctx)
+        w = 32 if ver == 4 else 128
+        def _b(rs):
+            if not rs: return z3.BoolVal(False, ctx=ctx)
+            x = z3.BitVec(f'x_v{ver}', w, ctx=ctx)
+            tms = []
+            for start, plen in rs:
+                if plen == 0: return z3.BoolVal(True, ctx=ctx)
+                tms.append(z3.LShR(x, w - plen) == (start >> (w - plen)))
+            return z3.Or(*tms, ctx=ctx)
+        c_expr = _b(c_rules)
+        if is_deny: target_expr = _b(p_deny)
+        else: target_expr = z3.And(_b(p_allow), z3.Not(_b(p_deny), ctx=ctx), ctx=ctx)
+        for t in timeouts:
+            s.push()
+            s.set("timeout", t)
+            s.add(c_expr)
+            s.add(z3.Not(target_expr, ctx=ctx))
+            res = s.check()
+            s.pop()
+            if res == z3.unsat: return True, 1.0, "unsat"
+            elif res == z3.sat: return False, 0.0, "sat"
+        return False, 0.0, "unknown"
+    except Exception as e:
+        return False, 0.0, f"err:{e}"
 
-        ok_v4, conf_v4 = _verify_ver(v4_p_a, v4_p_d, v4_c_a)
-        ok_v6, conf_v6 = _verify_ver(v6_p_a, v6_p_d, v6_c_a)
+class ProcessIsolatedSMTVerifier:
+    def __init__(self, cfg: MergeConfig):
+        self.enabled = HAS_Z3 and cfg.enable_smt_verification
+        self.tms = cfg.smt_progressive_timeout
 
-        conf = min(conf_v4 if v4_c_a and not ok_v4 else 1.0, conf_v6 if v6_c_a and not ok_v6 else 1.0)
-        return (ok_v4 and ok_v6), conf
-
-    def verify_deny_subset(self, p_deny: list[IPCIDRRule], c_deny: list[IPCIDRRule]) -> tuple[bool, float]:
-        if not c_deny: return True, 1.0
-
-        def _verify_ver(p_v_deny: list[IPCIDRRule], c_v_deny: list[IPCIDRRule]) -> tuple[bool, float]:
-            if not c_v_deny: return True, 1.0
-            if not p_v_deny: return False, 0.0
-            try:
-                parent_bdd = self.build_rule_set_expression(p_v_deny, [])
-                child_bdd = self.build_rule_set_expression(c_v_deny, [])
-                
-                diff = self.engine.apply_and(child_bdd, self.engine.neg(parent_bdd))
-                if diff is self.engine.false_node: return True, 1.0
-                
-                c_ratio = self.engine.sat_ratio(child_bdd)
-                if c_ratio == 0.0: return True, 1.0
-                
-                d_ratio = self.engine.sat_ratio(diff)
-                return False, max(0.0, min(1.0, 1.0 - (d_ratio / c_ratio)))
-            except BDDDepthExceededError as e:
-                logger.error(f"BDD deny verification depth exceeded: {e}")
-                return False, 0.0
-
-        v4_p_d, v6_p_d = split_ip_by_version(p_deny)
-        v4_c_d, v6_c_d = split_ip_by_version(c_deny)
-
-        ok_v4, conf_v4 = _verify_ver(v4_p_d, v4_c_d)
-        ok_v6, conf_v6 = _verify_ver(v6_p_d, v6_c_d)
-
-        conf = min(conf_v4 if v4_c_d and not ok_v4 else 1.0, conf_v6 if v6_c_d and not ok_v6 else 1.0)
-        return (ok_v4 and ok_v6), conf
-
-    def clear(self) -> None:
-        self._ip_vars.clear()
-        self.engine.clear()
-
-class SMTVerifier:
-    __slots__ = ('enabled', '_z3_available', '_solver_cache', '_config',
-                 '_timeout_stages', '_cache_lock', '_max_cache_size', '_solver_pool')
-    _SMT_CACHE_VERSION = 16
-
-    def __init__(self, config: MergeConfig) -> None:
-        self._config = config
-        self._z3_available = HAS_Z3 and config.enable_smt_verification
-        self.enabled = self._z3_available
-        self._solver_cache: OrderedDict[tuple[int, int, int], tuple[bool, float, str]] = OrderedDict()
-        self._cache_lock = threading.RLock()
-        self._max_cache_size = config.max_bdd_var_cache_size
-        self._timeout_stages = config.smt_progressive_timeout
-        self._solver_pool = threading.local()
-
-    def _get_z3_context(self) -> Any:
-        if not hasattr(self._solver_pool, 'ctx'):
-            self._solver_pool.ctx = z3.Context()
-        return getattr(self._solver_pool, 'ctx')
-
-    def _get_solver(self) -> Any:
-        if not hasattr(self._solver_pool, 'solver'):
-            self._solver_pool.solver = z3.Solver(ctx=self._get_z3_context())
-        return getattr(self._solver_pool, 'solver')
-
-    def _reset_solver(self) -> None:
-        if hasattr(self._solver_pool, 'solver'):
-            delattr(self._solver_pool, 'solver')
-        if hasattr(self._solver_pool, 'ctx'):
-            delattr(self._solver_pool, 'ctx')
-
-    def clear_thread_state(self) -> None:
-        self._reset_solver()
-
-    def _verify_with_timeouts(self, s: Any, child_expr: Any, parent_expr: Any, label: str) -> tuple[bool, float, str]:
-        ctx = self._get_z3_context()
-        solver_broken = False
+    def verify(self, executor: concurrent.futures.ProcessPoolExecutor, p_allow: List[IPCIDRRule], p_deny: List[IPCIDRRule], c_rules: List[IPCIDRRule], is_deny: bool) -> Tuple[bool, float, str]:
+        if not self.enabled or not c_rules or executor is None: return True, 1.0, "bypassed"
+        v4_pa = [(r.start_int, r.prefixlen) for r in p_allow if r.version==4]
+        v6_pa = [(r.start_int, r.prefixlen) for r in p_allow if r.version==6]
+        v4_pd = [(r.start_int, r.prefixlen) for r in p_deny if r.version==4]
+        v6_pd = [(r.start_int, r.prefixlen) for r in p_deny if r.version==6]
+        v4_ca = [(r.start_int, r.prefixlen) for r in c_rules if r.version==4]
+        v6_ca = [(r.start_int, r.prefixlen) for r in c_rules if r.version==6]
+        timeout_seconds = max(self.tms) / 1000.0 + 1.0
         try:
-            for timeout in self._timeout_stages:
-                s.push()
-                s.set("timeout", timeout)
-                s.add(child_expr)
-                s.add(z3.Not(parent_expr, ctx=ctx))
-                res = s.check()
-                s.pop()
-                if res == z3.unsat:
-                    return True, 1.0, f"{label}unsat"
-                elif res == z3.sat:
-                    return False, 0.0, f"{label}sat"
-            return False, 0.0, f"{label}unknown"
-        except Exception as e:
-            solver_broken = True
-            logger.error(f"SMT {label} error: {e}")
-            return False, 0.0, f"{label}z3_error"
-        finally:
-            if solver_broken:
-                self._reset_solver()
-
-    def _build_domain_expr(self, rules: list[DomainRule], var_name: str = 'x_domain') -> Optional[Any]:
-        if not rules: return None
-        ctx = self._get_z3_context()
-        x_domain = z3.String(var_name, ctx=ctx)
-        terms = []
-        for r in rules:
-            if r.match_type == MatchType.EXACT:
-                terms.append(x_domain == z3.StringVal(r.normalized, ctx=ctx))
-            elif r.match_type == MatchType.SUFFIX:
-                terms.append(z3.Or(
-                    x_domain == z3.StringVal(r.normalized, ctx=ctx),
-                    z3.And(z3.Length(x_domain) > len(r.normalized),
-                           z3.SuffixOf(z3.StringVal('.' + r.normalized, ctx=ctx), x_domain), ctx=ctx), ctx=ctx))
-            elif r.match_type == MatchType.WILDCARD:
-                terms.append(z3.And(z3.Length(x_domain) > len(r.normalized) + 1,
-                                    z3.SuffixOf(z3.StringVal('.' + r.normalized, ctx=ctx), x_domain), ctx=ctx))
-        if not terms: return None
-        return z3.Or(*terms, ctx=ctx) if len(terms) > 1 else terms[0]
-
-    def _build_ip_expr(self, rules: list[IPCIDRRule], version: int, var_name: str) -> Optional[Any]:
-        if not rules: return None
-        ctx = self._get_z3_context()
-        width = 32 if version == 4 else 128
-        x_ip = z3.BitVec(var_name, width, ctx=ctx)
-        terms = []
-        for rule in rules:
-            addr, plen = rule.start_int, rule.prefixlen
-            if plen == 0: return z3.BoolVal(True, ctx=ctx)
-            shifted = z3.LShR(x_ip, width - plen)
-            target = addr >> (width - plen)
-            terms.append(shifted == target)
-        return z3.Or(*terms, ctx=ctx) if terms else None
-
-    def _build_parent_expr(self, allow_expr: Optional[Any], deny_expr: Optional[Any], ctx: Any) -> Any:
-        if allow_expr is None:
-            return z3.BoolVal(False, ctx=ctx)
-        elif deny_expr is None:
-            return allow_expr
-        return z3.And(allow_expr, z3.Not(deny_expr, ctx=ctx), ctx=ctx)
-
-    def verify_allow_subset(self,
-                            p_dom_allow: list[DomainRule], p_dom_deny: list[DomainRule], c_dom_allow: list[DomainRule],
-                            p_ip_allow: list[IPCIDRRule], p_ip_deny: list[IPCIDRRule], c_ip_allow: list[IPCIDRRule],
-                            parent_digest: int) -> tuple[bool, float, str]:
-        if not self.enabled: return False, 0.0, "smt_disabled"
-        if not c_dom_allow and not c_ip_allow: return True, 1.0, "trivial"
-
-        c_digest = rules_digest(itertools.chain(c_dom_allow, c_ip_allow))
-        key = (self._SMT_CACHE_VERSION, parent_digest, c_digest)
-
-        with self._cache_lock:
-            if key in self._solver_cache:
-                self._solver_cache.move_to_end(key)
-                return self._solver_cache[key]
-
-        domain_ok, domain_conf, domain_msg = self._verify_domain_allow_subset(p_dom_allow, p_dom_deny, c_dom_allow)
-        ip_ok, ip_conf, ip_msg = self._verify_ip_allow_subset(p_ip_allow, p_ip_deny, c_ip_allow)
-
-        overall_ok = (not c_dom_allow or domain_ok) and (not c_ip_allow or ip_ok)
-        conf = min(domain_conf if c_dom_allow and not domain_ok else 1.0, ip_conf if c_ip_allow and not ip_ok else 1.0)
-        res = (overall_ok, conf, f"domain:{domain_msg},ip:{ip_msg}")
-
-        with self._cache_lock:
-            self._solver_cache[key] = res
-            if len(self._solver_cache) > self._max_cache_size:
-                self._solver_cache.popitem(last=False)
-
-        if not overall_ok and self._config.smt_unknown_default and ("unknown" in domain_msg or "unknown" in ip_msg):
-            return True, 0.5, "unknown"
-        return res
-
-    def _verify_domain_allow_subset(self, p_allow: list[DomainRule], p_deny: list[DomainRule], c_allow: list[DomainRule]) -> tuple[bool, float, str]:
-        if not c_allow: return True, 1.0, "trivial"
-        s, ctx = self._get_solver(), self._get_z3_context()
-        child_expr = self._build_domain_expr(c_allow, 'x_domain')
-        if child_expr is None: return True, 1.0, "trivial"
-        
-        parent_expr = self._build_parent_expr(
-            self._build_domain_expr(p_allow, 'x_domain'),
-            self._build_domain_expr(p_deny, 'x_domain'),
-            ctx
-        )
-        return self._verify_with_timeouts(s, child_expr, parent_expr, "")
-
-    def _verify_ip_version_allow_subset(self, p_allow: list[IPCIDRRule], p_deny: list[IPCIDRRule], c_allow: list[IPCIDRRule], version: int) -> tuple[bool, float, str]:
-        if not c_allow: return True, 1.0, f"v{version}_trivial"
-        s, ctx = self._get_solver(), self._get_z3_context()
-        child_expr = self._build_ip_expr(c_allow, version, f'x_ipv{version}')
-        if child_expr is None: return True, 1.0, f"v{version}_trivial"
-        
-        parent_expr = self._build_parent_expr(
-            self._build_ip_expr(p_allow, version, f'x_ipv{version}'),
-            self._build_ip_expr(p_deny, version, f'x_ipv{version}'),
-            ctx
-        )
-        return self._verify_with_timeouts(s, child_expr, parent_expr, f"v{version}_")
-
-    def _verify_ip_allow_subset(self, p_allow: list[IPCIDRRule], p_deny: list[IPCIDRRule], c_allow: list[IPCIDRRule]) -> tuple[bool, float, str]:
-        if not c_allow: return True, 1.0, "trivial,trivial"
-        v4_p_a, v6_p_a = split_ip_by_version(p_allow)
-        v4_p_d, v6_p_d = split_ip_by_version(p_deny)
-        v4_c_a, v6_c_a = split_ip_by_version(c_allow)
-
-        v4_ok, v4_conf, v4_msg = self._verify_ip_version_allow_subset(v4_p_a, v4_p_d, v4_c_a, 4)
-        v6_ok, v6_conf, v6_msg = self._verify_ip_version_allow_subset(v6_p_a, v6_p_d, v6_c_a, 6)
-        return (v4_ok and v6_ok), min(v4_conf, v6_conf), f"{v4_msg},{v6_msg}"
-
-    def verify_deny_subset(self, p_dom_deny: list[DomainRule], c_dom_deny: list[DomainRule], p_ip_deny: list[IPCIDRRule], c_ip_deny: list[IPCIDRRule], parent_digest: int) -> tuple[bool, float, str]:
-        if not self.enabled: return False, 0.0, "smt_disabled"
-        if not c_dom_deny and not c_ip_deny: return True, 1.0, "trivial"
-
-        c_digest = rules_digest(itertools.chain(c_dom_deny, c_ip_deny))
-        key = (self._SMT_CACHE_VERSION, parent_digest, c_digest)
-
-        with self._cache_lock:
-            if key in self._solver_cache:
-                self._solver_cache.move_to_end(key)
-                return self._solver_cache[key]
-
-        domain_ok, domain_conf, domain_msg = self._verify_domain_deny_subset(p_dom_deny, c_dom_deny)
-        ip_ok, ip_conf, ip_msg = self._verify_ip_deny_subset(p_ip_deny, c_ip_deny)
-
-        overall_ok = (not c_dom_deny or domain_ok) and (not c_ip_deny or ip_ok)
-        conf = min(domain_conf if c_dom_deny and not domain_ok else 1.0, ip_conf if c_ip_deny and not ip_ok else 1.0)
-        res = (overall_ok, conf, f"domain:{domain_msg},ip:{ip_msg}")
-
-        with self._cache_lock:
-            self._solver_cache[key] = res
-            if len(self._solver_cache) > self._max_cache_size:
-                self._solver_cache.popitem(last=False)
-
-        if not overall_ok and self._config.smt_unknown_default and ("unknown" in domain_msg or "unknown" in ip_msg):
-            return True, 0.5, "unknown"
-        return res
-
-    def _verify_domain_deny_subset(self, p_deny: list[DomainRule], c_deny: list[DomainRule]) -> tuple[bool, float, str]:
-        if not c_deny: return True, 1.0, "trivial"
-        s, ctx = self._get_solver(), self._get_z3_context()
-        child_expr = self._build_domain_expr(c_deny, 'x_domain_deny')
-        if child_expr is None: return True, 1.0, "trivial"
-        parent_expr = self._build_domain_expr(p_deny, 'x_domain_deny') or z3.BoolVal(False, ctx=ctx)
-        return self._verify_with_timeouts(s, child_expr, parent_expr, "")
-
-    def _verify_ip_version_deny_subset(self, p_deny: list[IPCIDRRule], c_deny: list[IPCIDRRule], version: int) -> tuple[bool, float, str]:
-        if not c_deny: return True, 1.0, f"v{version}_trivial"
-        s, ctx = self._get_solver(), self._get_z3_context()
-        child_expr = self._build_ip_expr(c_deny, version, f'x_ipv{version}')
-        if child_expr is None: return True, 1.0, f"v{version}_trivial"
-        parent_expr = self._build_ip_expr(p_deny, version, f'x_ipv{version}') or z3.BoolVal(False, ctx=ctx)
-        return self._verify_with_timeouts(s, child_expr, parent_expr, f"v{version}_")
-
-    def _verify_ip_deny_subset(self, p_deny: list[IPCIDRRule], c_deny: list[IPCIDRRule]) -> tuple[bool, float, str]:
-        if not c_deny: return True, 1.0, "trivial,trivial"
-        v4_p_d, v6_p_d = split_ip_by_version(p_deny)
-        v4_c_d, v6_c_d = split_ip_by_version(c_deny)
-
-        v4_ok, v4_conf, v4_msg = self._verify_ip_version_deny_subset(v4_p_d, v4_c_d, 4)
-        v6_ok, v6_conf, v6_msg = self._verify_ip_version_deny_subset(v6_p_d, v6_c_d, 6)
-        return (v4_ok and v6_ok), min(v4_conf, v6_conf), f"{v4_msg},{v6_msg}"
+            if v4_ca: v4_ok, v4_c, v4_m = executor.submit(_z3_worker, v4_pa, v4_pd, v4_ca, is_deny, 4, self.tms).result(timeout=timeout_seconds)
+            else: v4_ok, v4_c, v4_m = True, 1.0, "triv"
+        except concurrent.futures.TimeoutError:
+            v4_ok, v4_c, v4_m = False, 0.0, "timeout"
+        try:
+            if v6_ca: v6_ok, v6_c, v6_m = executor.submit(_z3_worker, v6_pa, v6_pd, v6_ca, is_deny, 6, self.tms).result(timeout=timeout_seconds)
+            else: v6_ok, v6_c, v6_m = True, 1.0, "triv"
+        except concurrent.futures.TimeoutError:
+            v6_ok, v6_c, v6_m = False, 0.0, "timeout"
+        return (v4_ok and v6_ok), min(v4_c, v6_c), f"{v4_m},{v6_m}"
 
 class CoverageChecker:
-    __slots__ = ('_exact_domains', '_wildcard_domains', '_suffix_domains',
-                 '_ipv4_allow', '_ipv4_deny', '_ipv6_allow', '_ipv6_deny',
-                 '_ipv4_allow_starts', '_ipv4_deny_starts', '_ipv6_allow_starts', '_ipv6_deny_starts')
-
-    def __init__(self, parent_rules: Iterable[RuleType]) -> None:
-        self._exact_domains = set()
-        self._wildcard_domains = set()
-        self._suffix_domains = set()
-
-        ipv4_allow_nets, ipv4_deny_nets = [], []
-        ipv6_allow_nets, ipv6_deny_nets = [], []
-
+    __slots__ = ('_exact_domains', '_wildcard_domains', '_suffix_domains', '_v4_a', '_v4_d', '_v6_a', '_v6_d')
+    def __init__(self, parent_rules: Iterable[RuleType]):
+        self._exact_domains, self._wildcard_domains, self._suffix_domains = set(), set(), set()
+        v4_a, v4_d, v6_a, v6_d = [], [], [], []
         for r in parent_rules:
             if isinstance(r, DomainRule):
-                key = (r.normalized, r.is_exclusion)
-                if r.match_type == MatchType.EXACT:
-                    self._exact_domains.add(key)
-                elif r.match_type == MatchType.WILDCARD:
-                    self._wildcard_domains.add(key)
-                elif r.match_type == MatchType.SUFFIX:
-                    self._suffix_domains.add(key)
-            else:
-                if r.version == 4:
-                    (ipv4_deny_nets if r.is_exclusion else ipv4_allow_nets).append(r.network)
-                else:
-                    (ipv6_deny_nets if r.is_exclusion else ipv6_allow_nets).append(r.network)
-
-        self._ipv4_allow = self._collapse_networks(ipv4_allow_nets)
-        self._ipv4_deny = self._collapse_networks(ipv4_deny_nets)
-        self._ipv6_allow = self._collapse_networks(ipv6_allow_nets)
-        self._ipv6_deny = self._collapse_networks(ipv6_deny_nets)
-
-        self._ipv4_allow_starts = [start for start, _ in self._ipv4_allow]
-        self._ipv4_deny_starts = [start for start, _ in self._ipv4_deny]
-        self._ipv6_allow_starts = [start for start, _ in self._ipv6_allow]
-        self._ipv6_deny_starts = [start for start, _ in self._ipv6_deny]
-
-    @staticmethod
-    def _collapse_networks(nets: list[IPNetworkType]) -> list[tuple[int, int]]:
-        if not nets: return []
-        return sorted((int(net.network_address), int(net.broadcast_address)) for net in ipaddress.collapse_addresses(nets))
+                k = (r.normalized, r.is_exclusion)
+                if r.match_type == MatchType.EXACT: self._exact_domains.add(k)
+                elif r.match_type == MatchType.WILDCARD: self._wildcard_domains.add(k)
+                elif r.match_type == MatchType.SUFFIX: self._suffix_domains.add(k)
+            elif isinstance(r, IPCIDRRule):
+                target = v4_d if r.is_exclusion else v4_a if r.version == 4 else v6_d if r.is_exclusion else v6_a
+                target.append((r.start_int, r.end_int))
+        self._v4_a = IntervalMerger._union_intervals(v4_a)
+        self._v4_d = IntervalMerger._union_intervals(v4_d)
+        self._v6_a = IntervalMerger._union_intervals(v6_a)
+        self._v6_d = IntervalMerger._union_intervals(v6_d)
 
     def _domain_covered(self, r: DomainRule) -> bool:
-        key = (r.normalized, r.is_exclusion)
-        if r.match_type == MatchType.EXACT:
-            if key in self._exact_domains or key in self._suffix_domains: return True
-        elif r.match_type == MatchType.WILDCARD:
-            if key in self._wildcard_domains or key in self._suffix_domains: return True
-        elif r.match_type == MatchType.SUFFIX:
-            if key in self._suffix_domains: return True
-
+        k = (r.normalized, r.is_exclusion)
+        if r.match_type == MatchType.EXACT and (k in self._exact_domains or k in self._suffix_domains): return True
+        if r.match_type == MatchType.WILDCARD and (k in self._wildcard_domains or k in self._suffix_domains): return True
+        if r.match_type == MatchType.SUFFIX and k in self._suffix_domains: return True
         parts = r.normalized.split('.')
         for i in range(1, len(parts)):
-            pkey = (".".join(parts[i:]), r.is_exclusion)
-            if pkey in self._suffix_domains or pkey in self._wildcard_domains:
-                return True
+            if (".".join(parts[i:]), r.is_exclusion) in self._suffix_domains or (".".join(parts[i:]), r.is_exclusion) in self._wildcard_domains: return True
         return False
 
     def calculate(self, child_rules: Iterable[RuleType]) -> float:
@@ -996,414 +700,328 @@ class CoverageChecker:
             total += 1
             if isinstance(r, DomainRule):
                 if self._domain_covered(r): covered += 1
-            else:
-                if r.version == 4:
-                    lst = self._ipv4_deny if r.is_exclusion else self._ipv4_allow
-                    starts = self._ipv4_deny_starts if r.is_exclusion else self._ipv4_allow_starts
-                else:
-                    lst = self._ipv6_deny if r.is_exclusion else self._ipv6_allow
-                    starts = self._ipv6_deny_starts if r.is_exclusion else self._ipv6_allow_starts
-
+            elif isinstance(r, IPCIDRRule):
+                lst = self._v4_d if r.is_exclusion else self._v4_a if r.version == 4 else self._v6_d if r.is_exclusion else self._v6_a
                 if not lst: continue
+                starts = [s for s, _ in lst]
                 idx = bisect.bisect_right(starts, r.start_int) - 1
                 if idx >= 0 and r.end_int <= lst[idx][1]: covered += 1
         return (covered / total) if total > 0 else 1.0
 
-# ==========================================
-# Sweep Line CIDR IP 段合併處理
-# ==========================================
-class SweepLineCIDRManager:
-    @classmethod
-    def approximate_collapse(cls, nets: list[IPNetworkType], target: int) -> tuple[list[IPNetworkType], float]:
-        if target <= 0: return [], 1.0
-        nets = list(ipaddress.collapse_addresses(nets))
-        if len(nets) <= target: return nets, 0.0
-
-        orig_hosts = sum(n.num_addresses for n in nets)
-        if orig_hosts == 0: return [], 1.0
-
-        nets.sort(key=lambda x: -x.num_addresses)
-        kept = nets[:target]
-        loss = max(0.0, 1.0 - sum(n.num_addresses for n in kept) / orig_hosts)
-        return kept, loss
-
-    @classmethod
-    def _subtract_version(cls, base: list[IPNetworkType], exclude: list[IPNetworkType], width: int, max_frag: Optional[int] = None) -> list[IPNetworkType]:
-        if not base: return []
-        if not exclude:
-            cidrs = list(ipaddress.collapse_addresses(base))
-            if max_frag and len(cidrs) > max_frag: raise CIDRFragmentationError(len(cidrs), max_frag, 0.0, cidrs)
-            return cidrs
-
-        max_addr = (1 << width) - 1
-        events: list[tuple[int, int]] = []
-
-        for net in base:
-            events.append((int(net.network_address), 2))
-            if (e := int(net.broadcast_address)) < max_addr: events.append((e + 1, 0))
-
-        for net in exclude:
-            events.append((int(net.network_address), 3))
-            if (e := int(net.broadcast_address)) < max_addr: events.append((e + 1, 1))
-
-        events.sort()
-
-        intervals, merged_intervals = [], []
-        base_depth, excl_depth, prev = 0, 0, events[0][0]
-
-        for pos, prio in events:
-            if pos > prev and base_depth > 0 and excl_depth == 0: intervals.append((prev, pos - 1))
-            if prio == 0: base_depth -= 1
-            elif prio == 1: excl_depth -= 1
-            elif prio == 2: base_depth += 1
-            elif prio == 3: excl_depth += 1
-            prev = pos
-
-        if base_depth > 0 and excl_depth == 0: intervals.append((prev, max_addr))
-
-        for s, e in intervals:
-            if not merged_intervals:
-                merged_intervals.append((s, e))
-            else:
-                last_s, last_e = merged_intervals[-1]
-                if s <= last_e + 1: merged_intervals[-1] = (last_s, max(last_e, e))
-                else: merged_intervals.append((s, e))
-
-        cidrs = []
-        ver = 4 if width == 32 else 6
-        
-        for s, e in merged_intervals:
-            if s <= e:
-                try:
-                    if ver == 4:
-                        cidrs.extend(ipaddress.summarize_address_range(ipaddress.IPv4Address(s), ipaddress.IPv4Address(e)))
-                    else:
-                        cidrs.extend(ipaddress.summarize_address_range(ipaddress.IPv6Address(s), ipaddress.IPv6Address(e)))
-                except (ValueError, TypeError):
-                    pass
-
-        if max_frag and len(cidrs) > max_frag: raise CIDRFragmentationError(len(cidrs), max_frag, 0.0, cidrs)
-        return cidrs
-
-    @classmethod
-    def subtract(cls, base_nets: list[IPNetworkType], exclude_nets: Iterable[IPNetworkType], max_fragments: int = 5000,
-                 enable_approximation: bool = False, max_loss_rate: float = 0.05, strict_zero_loss: bool = True) -> list[IPNetworkType]:
-        v4_base, v6_base = split_networks_by_version(base_nets)
-        v4_excl, v6_excl = split_networks_by_version(list(exclude_nets))
-
-        def process_version(base_list: list[IPNetworkType], excl_list: list[IPNetworkType], width: int) -> list[IPNetworkType]:
-            try:
-                return cls._subtract_version(base_list, excl_list, width, max_fragments)
-            except CIDRFragmentationError as e:
-                if enable_approximation and e.cidrs:
-                    res, loss = cls.approximate_collapse(e.cidrs, max_fragments)
-                    if loss > max_loss_rate or (strict_zero_loss and loss > 0):
-                        raise CIDRFragmentationError(len(res), max_fragments, loss, res)
-                    return res
-                raise
-
-        total = (process_version(v4_base, v4_excl, 32) if v4_base else []) + (process_version(v6_base, v6_excl, 128) if v6_base else [])
-        if not total: return []
-
-        if len(total) > max_fragments:
-            if not enable_approximation:
-                raise CIDRFragmentationError(len(total), max_fragments, 0.0, total)
-            v4_res, v6_res = split_networks_by_version(total)
-            target_v4 = int(max_fragments * len(v4_res) / len(total)) if v4_res else 0
-            target_v6 = max_fragments - target_v4
-            if target_v4 == 0 and v4_res: target_v4, target_v6 = 1, max_fragments - 1
-            if target_v6 == 0 and v6_res: target_v6, target_v4 = 1, max_fragments - 1
-
-            v4_approx, loss_v4 = cls.approximate_collapse(v4_res, target_v4) if v4_res else ([], 0.0)
-            v6_approx, loss_v6 = cls.approximate_collapse(v6_res, target_v6) if v6_res else ([], 0.0)
-            total = v4_approx + v6_approx
-            loss = max(loss_v4, loss_v6)
-            if loss > 0:
-                if strict_zero_loss or loss > max_loss_rate: raise CIDRFragmentationError(len(total), max_fragments, loss, total)
-                logger.warning(f"CIDR approximation loss max {loss:.2%} due to fragmentation, resulting in {len(total)} CIDRs")
-        return total
-
-# ==========================================
-# 緩存後端模塊
-# ==========================================
 class WALBackend:
-    __slots__ = ('db_path', 'data', '_config', '_timestamp', '_lock', '_max_entries', '_pending_write_ts')
-
-    def __init__(self, db_path: Path, config: MergeConfig) -> None:
-        self.db_path = db_path.with_suffix('.ldb')
-        self.data: dict[str, Any] = {}
-        self._config = config
-        self._max_entries = config.max_cache_entries
-        self._timestamp = 0.0
-        self._pending_write_ts = 0.0
-        self._lock = threading.RLock()
-        self._load()
-
-    def _load(self) -> None:
-        with self._lock:
+    __slots__ = ('db_path', 'data', '_max', '_lck')
+    def __init__(self, p: Path, c: MergeConfig):
+        self.db_path = p.with_suffix('.ldb')
+        self.data, self._max, self._lck = {}, c.max_cache_entries, threading.RLock()
+        with self._lck:
             if not self.db_path.exists(): return
             try:
-                content = self.db_path.read_bytes()
-                if len(content) < 24: return
-                cs, ts_bytes, db = content[:16], content[16:24], content[24:]
-                if hashlib.blake2b(db, digest_size=16).digest() != cs:
-                    logger.warning(f"Checksum mismatch for {self.db_path}")
-                    return
-                self._timestamp = struct.unpack('>d', ts_bytes)[0]
-                if USE_MSGPACK:
-                    try:
-                        self.data = msgpack.unpackb(db, raw=False)
-                        return
-                    except Exception: pass
-                if USE_ORJSON:
-                    try:
-                        self.data = orjson.loads(db)
-                        return
-                    except Exception: pass
-                self.data = json.loads(db.decode('utf-8'))
-            except Exception as e:
-                logger.error(f"Failed to load DB {self.db_path}: {e}")
+                raw = self.db_path.read_bytes()
+                if len(raw) > 24 and hashlib.blake2b(raw[24:], digest_size=16).digest() == raw[:16]:
+                    db = raw[24:]
+                    if USE_MSGPACK: self.data = msgpack.unpackb(db, raw=False)
+                    elif USE_ORJSON: self.data = orjson.loads(db)
+                    else: self.data = json.loads(db.decode('utf-8'))
+            except Exception: pass
 
-    def _snapshot(self) -> bool:
-        tmp = Path(f"{self.db_path}.tmp.{os.getpid()}.{threading.get_ident()}")
-        try:
-            with self._lock:
-                if len(self.data) > self._max_entries:
-                    items = [(k, v.get('timestamp', time.time()) if isinstance(v, dict) else time.time()) for k, v in self.data.items()]
-                    items.sort(key=lambda x: x[1])
-                    for k, _ in items[:len(self.data) - self._max_entries]:
-                        del self.data[k]
-
-                current_ts = time.time()
-                ts_bytes = struct.pack('>d', current_ts)
-
-                if USE_MSGPACK: db_bytes = msgpack.packb(self.data, use_bin_type=True)
-                elif USE_ORJSON: db_bytes = orjson.dumps(self.data)
-                else: db_bytes = json.dumps(self.data, sort_keys=True, separators=(',', ':')).encode('utf-8')
-
-                digest = hashlib.blake2b(db_bytes, digest_size=16).digest()
-                self._pending_write_ts = current_ts
-
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    def get(self, k: str) -> Any:
+        with self._lck: return self.data.get(k)
             
+    def put_batch(self, upd: Dict[str, Any]) -> None:
+        with self._lck:
+            self.data.update(upd)
+            if len(self.data) > self._max:
+                sorted_items = sorted([(k, v.get('ts', 0)) for k, v in self.data.items() if isinstance(v, dict)], key=lambda x: x[1])
+                for k, _ in sorted_items[:len(self.data)-self._max]: del self.data[k]
             try:
-                f = os.fdopen(fd, 'wb')
-            except Exception:
-                os.close(fd)
-                raise
-                
-            with f:
-                f.write(digest)
-                f.write(ts_bytes)
-                f.write(db_bytes)
-                f.flush()
-                os.fsync(f.fileno())
+                if USE_MSGPACK: b = msgpack.packb(self.data, use_bin_type=True)
+                elif USE_ORJSON: b = orjson.dumps(self.data)
+                else: b = json.dumps(self.data, separators=(',', ':')).encode('utf-8')
+                tp = Path(f"{self.db_path}.tmp")
+                with open(tp, 'wb') as f:
+                    f.write(hashlib.blake2b(b, digest_size=16).digest())
+                    f.write(struct.pack('>d', time.time()))
+                    f.write(b)
+                    f.flush()
+                    os.fsync(f.fileno())
+                tp.replace(self.db_path)
+            except Exception: pass
 
-            with self._lock:
-                if self._pending_write_ts == current_ts:
-                    tmp.replace(self.db_path)
-                    self._timestamp = current_ts
-                else:
-                    tmp.unlink(missing_ok=True)
-            return True
-        except Exception as e:
-            logger.error(f"Snapshot failed: {e}")
-            if tmp.exists(): tmp.unlink(missing_ok=True)
-            return False
-
-    def get(self, key: str) -> Any:
-        with self._lock: return self.data.get(key)
-
-    def put_batch(self, updates: dict[str, Any]) -> bool:
-        with self._lock: self.data.update(updates)
-        return self._snapshot()
-
-# ==========================================
-# 解析與提取模塊
-# ==========================================
 class ParsedRuleSet:
-    __slots__ = ('url', 'weight', 'domain_rules', 'ip_rules', 'timestamp', 'content_hash')
+    __slots__ = ('url', 'domain_rules', 'ip_rules', 'generic_rules', 'ts', 'hash', 'weight', 'initial_weight', 'compiled_regexes')
+    def __init__(self, u: str, d: Tuple[DomainRule,...], i: Tuple[IPCIDRRule,...], g: Tuple[GenericRule,...], t: float, h: str = "", w: float = 1.0):
+        self.url, self.domain_rules, self.ip_rules, self.generic_rules, self.ts = u, d, i, g, t
+        self.weight = self.initial_weight = w
+        self.hash = h or fast_hash(b"".join(b"%d%d%s" % (r.match_type.value, r.is_exclusion, r.normalized.encode('utf-8')) for r in d) + b"".join(b"%d%d%d" % (r.version, r.start_int, r.prefixlen) for r in i) + b"".join(b"%s%s%d" % (r.type.encode('utf-8'), r.val.encode('utf-8'), r.is_exclusion) for r in g))
+        
+        self.compiled_regexes = []
+        for r in d:
+            if r.match_type == MatchType.REGEX:
+                try: self.compiled_regexes.append(re.compile(r.val, re.IGNORECASE))
+                except re.error: pass
 
-    def __init__(self, url: str, weight: float, domain_rules: tuple[DomainRule, ...], ip_rules: tuple[IPCIDRRule, ...], timestamp: float, content_hash: str = ""):
-        self.url = url
-        self.weight = weight
-        self.domain_rules = domain_rules
-        self.ip_rules = ip_rules
-        self.timestamp = timestamp
+class SourceSignature:
+    __slots__ = ('url', 'initial_weight', 'final_weight', 'hash', 'depth', 'originality', 'd_hashes', 'i_hashes', 'rule_count')
+    def __init__(self, url: str, weight: float, c_hash: str, d_hash: set, i_hash: set, count: int):
+        self.url, self.initial_weight, self.final_weight, self.hash = url, weight, weight, c_hash
+        self.d_hashes, self.i_hashes, self.rule_count, self.depth, self.originality = d_hash, i_hash, count, 0, 1.0
 
-        if not content_hash:
-            h = hashlib.sha256()
-            for r in sorted(self.domain_rules, key=lambda x: (x.normalized, x.match_type.value, x.is_exclusion)):
-                h.update(b"D%d%d%s" % (r.match_type.value, r.is_exclusion, r.normalized.encode('ascii', errors='ignore')))
-            for ir in sorted(self.ip_rules, key=lambda x: (x.version, x.start_int, x.prefixlen, x.is_exclusion)):
-                h.update(b"I%d%d%d%d" % (ir.version, ir.start_int, ir.prefixlen, ir.is_exclusion))
-            self.content_hash = h.hexdigest()
-        else:
-            self.content_hash = content_hash
+    @classmethod
+    def from_parsed(cls, ps: 'ParsedRuleSet') -> 'SourceSignature':
+        return cls(ps.url, ps.weight, ps.hash, {r._hash for r in ps.domain_rules}, {r._hash for r in ps.ip_rules}, len(ps.domain_rules)+len(ps.ip_rules))
 
-def _looks_like_json(data: bytes) -> bool:
-    if not data:
-        return False
-    start = 3 if data.startswith(b'\xef\xbb\xbf') else 0
-    end = min(start + 1024, len(data))
-    for i in range(start, end):
-        b = data[i]
-        if b in (123, 91):  # '{' or '['
-            return True
-        if b not in (32, 9, 10, 13):
-            return False
-    return False
+class SemanticLineageAnalyzer:
+    def __init__(self, path: Path, enable: bool):
+        self.path = path.with_suffix('.msgpack' if USE_MSGPACK else '.json')
+        self.enable, self.graph, self.in_deg, self.exist_hashes = enable, defaultdict(set), Counter(), set()
+        self._lock = threading.RLock()
+        if self.enable and self.path.exists():
+            try:
+                data = msgpack.unpackb(self.path.read_bytes(), raw=False) if USE_MSGPACK else json.loads(self.path.read_text('utf-8'))
+                self.exist_hashes = set(data.get('hashes', []))
+                for k, lst in data.get('graph', {}).items(): self.graph[k] = set(lst)
+                self.in_deg = Counter(data.get('in_deg', {}))
+            except Exception: pass
+
+    def save(self) -> None:
+        if not self.enable: return
+        clean_graph = {k: list(v.intersection(self.exist_hashes)) for k, v in self.graph.items() if k in self.exist_hashes}
+        clean_in_deg = {k: 0 for k in self.exist_hashes}
+        for k, v_set in clean_graph.items():
+            for v in v_set: clean_in_deg[v] += 1
+        data = {'hashes': list(self.exist_hashes), 'graph': clean_graph, 'in_deg': clean_in_deg}
+        try:
+            b = msgpack.packb(data, use_bin_type=True) if USE_MSGPACK else json.dumps(data, separators=(',', ':')).encode('utf-8')
+            tp = self.path.with_suffix('.tmp')
+            with open(tp, 'wb') as f:
+                f.write(b); f.flush(); os.fsync(f.fileno())
+            tp.replace(self.path)
+        except Exception: pass
+            
+    def _is_subset_semantic(self, child: 'ParsedRuleSet', parent_trie: DomainTrieOptimizer, parent: 'ParsedRuleSet') -> bool:
+        child_v4 = IntervalMerger._union_intervals([(r.start_int, r.end_int) for r in child.ip_rules if r.version == 4])
+        parent_v4 = IntervalMerger._union_intervals([(r.start_int, r.end_int) for r in parent.ip_rules if r.version == 4])
+        if IntervalMerger._subtract_intervals(child_v4, parent_v4): return False
+            
+        child_v6 = IntervalMerger._union_intervals([(r.start_int, r.end_int) for r in child.ip_rules if r.version == 6])
+        parent_v6 = IntervalMerger._union_intervals([(r.start_int, r.end_int) for r in parent.ip_rules if r.version == 6])
+        if IntervalMerger._subtract_intervals(child_v6, parent_v6): return False
+            
+        c_gen = {(r.type, r.val, r.is_exclusion) for r in child.generic_rules}
+        p_gen = {(r.type, r.val, r.is_exclusion) for r in parent.generic_rules}
+        if not c_gen.issubset(p_gen): return False
+            
+        p_kws = [r.val for r in parent.domain_rules if r.match_type == MatchType.KEYWORD]
+        p_rex = {r.val for r in parent.domain_rules if r.match_type == MatchType.REGEX}
+        
+        for r in child.domain_rules:
+            if r.match_type not in (MatchType.KEYWORD, MatchType.REGEX):
+                covered = parent_trie.is_covered(r.normalized)
+                if not covered and p_kws: covered = any(pk in r.normalized for pk in p_kws)
+                if not covered and parent.compiled_regexes: covered = any(pat.search(r.normalized) for pat in parent.compiled_regexes)
+                if not covered: return False
+            elif r.match_type == MatchType.KEYWORD:
+                if not p_kws or not any(pk in r.val for pk in p_kws): return False
+            elif r.match_type == MatchType.REGEX:
+                if r.val not in p_rex: return False
+        return True
+
+    def compute(self, parsed_srcs: List['ParsedRuleSet'], sigs: List[SourceSignature]) -> Set[int]:
+        if not self.enable: return set()
+        with self._lock:
+            new_hashes = {s.hash for s in parsed_srcs if s.hash not in self.exist_hashes}
+            if new_hashes:
+                tries = {}
+                def get_trie(idx):
+                    if idx not in tries:
+                        t = DomainTrieOptimizer()
+                        for r in parsed_srcs[idx].domain_rules: t.insert(r)
+                        tries[idx] = t
+                    return tries[idx]
+                    
+                for i in range(len(parsed_srcs)):
+                    for j in range(i+1, len(parsed_srcs)):
+                        p_i, p_j = parsed_srcs[i], parsed_srcs[j]
+                        if p_i.hash in new_hashes or p_j.hash in new_hashes:
+                            if self._is_subset_semantic(p_i, get_trie(j), p_j):
+                                if p_i.hash not in self.graph[p_j.hash]:
+                                    self.graph[p_j.hash].add(p_i.hash)
+                                    self.in_deg[p_i.hash] += 1
+                            if self._is_subset_semantic(p_j, get_trie(i), p_i):
+                                if p_j.hash not in self.graph[p_i.hash]:
+                                    self.graph[p_i.hash].add(p_j.hash)
+                                    self.in_deg[p_j.hash] += 1
+                        
+            q = deque([s.hash for s in sigs if self.in_deg.get(s.hash, 0) == 0])
+            depths = {s.hash: 0 for s in sigs}
+            local_in_deg = Counter({s.hash: self.in_deg.get(s.hash, 0) for s in sigs})
+            
+            while q:
+                u = q.popleft()
+                for v in self.graph.get(u, set()):
+                    if v in depths:
+                        depths[v] = max(depths[v], depths[u] + 1)
+                        local_in_deg[v] -= 1
+                        if local_in_deg[v] == 0: q.append(v)
+            
+            red = set()
+            for i, s in enumerate(sigs):
+                s.depth = depths.get(s.hash, 0)
+                s.originality = math.pow(0.7, s.depth)
+                self.exist_hashes.add(s.hash)
+                if s.depth > 0: red.add(i)
+            self.save()
+            return red
+
+class DynamicReputationEngine:
+    def __init__(self, sources: List['ParsedRuleSet'], cache: Optional[WALBackend], cfg: MergeConfig):
+        self.sources, self.cache, self.cfg = sources, cache, cfg
+
+    def evaluate(self) -> None:
+        N = len(self.sources)
+        if N == 0: return
+        freq = Counter()
+        for src in self.sources:
+            for r in src.domain_rules: freq[r._hash] += 1
+            for r in src.ip_rules: freq[r._hash] += 1
+            for r in src.generic_rules: freq[r._hash] += 1
+            
+        for src in self.sources:
+            tot = len(src.domain_rules) + len(src.ip_rules) + len(src.generic_rules)
+            if tot == 0:
+                src.weight = 0.0
+                continue
+            garbage = 0
+            for r in src.domain_rules:
+                if r.normalized.count('.') == 0 or EntropyAssessor.assess(r.normalized) == EntropyLevel.DGA_CONFIRMED: garbage += 1
+            for r in src.ip_rules:
+                if r.version == 4 and r.prefixlen <= self.cfg.ipv4_garbage_threshold: garbage += 1
+                elif r.version == 6 and r.prefixlen <= self.cfg.ipv6_garbage_threshold: garbage += 1
+            
+            align = sum(freq[r._hash] for r in itertools.chain(src.domain_rules, src.ip_rules, src.generic_rules)) / max(1, N * tot)
+            garbage_ratio = garbage / max(1, tot)
+            
+            h_rep = 1.0
+            if self.cache:
+                c_data = self.cache.get(f"rep:{src.url}")
+                if c_data and isinstance(c_data, dict):
+                    h_rep = c_data.get('rep', 1.0)
+            
+            fw = align * math.exp(-5 * garbage_ratio)
+            smoothed_rep = h_rep * 0.7 + fw * 0.3
+            src.weight = src.initial_weight * smoothed_rep
+            
+            if self.cache: self.cache.put_batch({f"rep:{src.url}": {'rep': smoothed_rep, 'ts': time.time()}})
+                
+        max_w = max((s.weight for s in self.sources), default=1.0)
+        if max_w > 0: 
+            for s in self.sources: s.weight /= max_w
 
 class RuleParser:
-    __slots__ = ('_config', '_max_domain_depth', '_enable_dga')
-    RULE_TYPE_MAP = {
+    __slots__ = ('_cfg', '_dga')
+    RMAP = {
         'DOMAIN-SUFFIX': 'domain_suffix', 'HOST-SUFFIX': 'domain_suffix',
-        'DOMAIN': 'domain', 'HOST': 'domain',
-        'DOMAIN-WILDCARD': 'domain_wildcard', 
-        'IP-CIDR': 'ip_cidr', 'IP-CIDR6': 'ip_cidr',
+        'DOMAIN': 'domain', 'HOST': 'domain', 'DOMAIN-WILDCARD': 'domain_wildcard',
+        'DOMAIN-KEYWORD': 'domain_keyword', 'HOST-KEYWORD': 'domain_keyword',
+        'DOMAIN-REGEX': 'domain_regex', 'IP-CIDR': 'ip_cidr', 'IP-CIDR6': 'ip_cidr',
+        'SRC-IP-CIDR': 'source_ip_cidr', 'GEOIP': 'geoip', 'DST-PORT': 'port',
+        'SRC-PORT': 'source_port', 'PORT-RANGE': 'port_range', 'SRC-PORT-RANGE': 'source_port_range',
+        'PROCESS-NAME': 'process_name', 'PROCESS-PATH': 'process_path',
+        'PACKAGE-NAME': 'package_name', 'USER': 'user', 'USER-ID': 'user_id',
+        'CLASH-MODE': 'clash_mode', 'WIFI-SSID': 'wifi_ssid', 'WIFI-BSSID': 'wifi_bssid',
+        'RULE-SET': 'rule_set', 'USER-AGENT': 'user_agent'
     }
 
-    def __init__(self, config: MergeConfig) -> None:
-        self._config = config
-        self._max_domain_depth = config.max_domain_depth
-        self._enable_dga = config.enable_dga_filter
+    def __init__(self, c: MergeConfig):
+        self._cfg, self._dga = c, c.enable_dga_filter
 
-    def parse(self, source: Union[bytes, Path], url: str, weight: float) -> ParsedRuleSet:
-        dom: list[DomainRule] = []
-        ip: list[IPCIDRRule] = []
-
+    def parse(self, src: Union[bytes, Path], url: str) -> ParsedRuleSet:
+        dom, ip, gen = [], [], []
+        
         try:
-            if isinstance(source, Path):
-                with source.open('rb') as f:
-                    head = f.read(4096)
-                is_json = _looks_like_json(head)
-            else:
-                is_json = _looks_like_json(source)
-        except OSError as e:
-            logger.warning(f"File read error for {url}: {e}")
-            return ParsedRuleSet(url, weight, (), (), timestamp=time.time())
+            if isinstance(src, Path):
+                with src.open('rb') as f: header = f.read(1024)
+            else: header = src[:1024]
+            is_j = header.find(b'{') != -1
+        except OSError: 
+            return ParsedRuleSet(url, (), (), (), time.time())
+        
+        def _add(typ: Optional[str], val: str, is_excl: bool, attrs: str = "") -> None:
+            if typ in ('domain', 'domain_suffix', 'domain_wildcard') and val:
+                n = val[2:].strip().lower().strip('.') if val.startswith('*.') else val.strip().lower().strip('.')
+                if not n.isascii():
+                    try: n = n.encode('idna').decode('ascii')
+                    except UnicodeError: return
+                if not n or len(n) > self._cfg.max_domain_length or ' ' in n: return
+                if not all(RE_DOMAIN_LABEL.match(p) for p in n.split('.')): return
+                if self._dga and EntropyAssessor.assess(n) == EntropyLevel.DGA_CONFIRMED: return
+                mt = MatchType.WILDCARD if typ == 'domain_wildcard' or val.startswith('*.') else (MatchType.SUFFIX if typ == 'domain_suffix' else MatchType.EXACT)
+                dom.append(DomainRule(mt, n, is_excl, 0, attrs))
+            elif typ in ('domain_keyword', 'domain_regex'):
+                dom.append(DomainRule(MatchType.KEYWORD if typ == 'domain_keyword' else MatchType.REGEX, val, is_excl, 0, attrs))
+            elif typ in ('ip_cidr', 'source_ip_cidr'):
+                m = RE_IPV4_MAPPED_IPV6.match(val)
+                if m:
+                    v4_ip = m.group(1)
+                    prefix = int(m.group(2)) if m.group(2) else 32
+                    if prefix >= 96: prefix -= 96
+                    val = f"{v4_ip}/{prefix}"
+                try: 
+                    net = ipaddress.ip_network(val, strict=False)
+                    if net.version == 4 or self._cfg.enable_ipv6: ip.append(IPCIDRRule(int(net.network_address), int(net.broadcast_address), net.prefixlen, net.version, is_excl, attrs))
+                except ValueError: pass
+            elif typ: gen.append(GenericRule(typ, val, is_excl, attrs))
 
-        if is_json:
+        if is_j:
             try:
-                if USE_ORJSON:
-                    if isinstance(source, Path):
-                        with source.open('rb') as f:
-                            raw_bytes = f.read()
-                    else:
-                        raw_bytes = source
-                    
-                    if raw_bytes.startswith(b'\xef\xbb\xbf'):
-                        raw_bytes = raw_bytes[3:]
-                    data = orjson.loads(raw_bytes)
-                    del raw_bytes  # 立即釋放降低峰值內存
-                else:
-                    if isinstance(source, Path):
-                        with source.open('r', encoding='utf-8-sig', errors='ignore') as f:
-                            data = json.load(f)
-                    else:
-                        data = json.loads(source.decode('utf-8-sig', errors='ignore'))
-
-                rules = data.get('rules', []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
-                
-                for rule in rules:
-                    if not isinstance(rule, dict): continue
-                    is_excl = rule.get('invert', False)
-                    for k, v in rule.items():
+                if isinstance(src, Path):
+                    with src.open('rb') as f: raw = f.read()
+                else: raw = src
+                if raw.startswith(b'\xef\xbb\xbf'): raw = raw[3:]
+                data = orjson.loads(raw) if USE_ORJSON else json.loads(raw.decode('utf-8', errors='ignore'))
+                del raw 
+                rules_node = data.get('rules', []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                for r in rules_node:
+                    if not isinstance(r, dict): continue
+                    is_excl = r.get('invert', False)
+                    for k, v in r.items():
                         if k == 'invert': continue
-                        mt = self.RULE_TYPE_MAP.get(k.upper(), k)
-                        if isinstance(v, list):
-                            for val in v:
-                                if (s := str(val).strip()): self._add_rule(mt, s, is_excl, dom, ip)
-                        elif (s := str(v).strip()):
-                            self._add_rule(mt, s, is_excl, dom, ip)
-                return ParsedRuleSet(url, weight, tuple(dom), tuple(ip), timestamp=time.time())
-            except (ValueError, TypeError, JSONDecodeErrorType, MemoryError) as e:
-                logger.debug(f"JSON parsing failed for {url}, falling back to text: {e}")
-                dom.clear()
-                ip.clear()
-                # 如果是 srs 解碼產生的假 JSON，就不要回退到文本解析
-                if url.endswith('.srs'):
-                    return ParsedRuleSet(url, weight, (), (), timestamp=time.time())
-
-        def _process_text_stream(stream: Iterable[str]) -> None:
-            for line in stream:
-                line = line.strip()
-                if len(line) > MAX_LINE_LENGTH or not line or line.startswith(('#', '//', ';')): 
-                    continue
-                is_excl = line.startswith('!')
-                val = line[1:].strip() if is_excl else line
-                if ',' in val:
-                    parts = val.split(',', 2)
-                    if len(parts) >= 2 and (m := self.RULE_TYPE_MAP.get(parts[0].upper())):
-                        self._add_rule(m, parts[1].strip(), is_excl, dom, ip)
-                else:
-                    self._add_rule('domain', val, is_excl, dom, ip)
-
+                        mt = self.RMAP.get(k.upper(), k)
+                        vals = v if isinstance(v, list) else [v]
+                        
+                        # 修復：限制抽取，防止 JSON 根節點屬性污染
+                        extra_attrs = [f"{ek}={ev}" for ek, ev in r.items() if ek not in ('invert', k, 'version', 'rules') and not isinstance(ev, (list, dict))]
+                        attr_str = ",".join(extra_attrs)
+                        
+                        for val in vals:
+                            if str(val).strip(): _add(mt, str(val).strip(), is_excl, attr_str)
+                return ParsedRuleSet(url, tuple(dom), tuple(ip), tuple(gen), time.time())
+            except Exception as e: logger.debug(f"JSON parsing fallback for {url}: {e}")
+            
+        def _stream(iterator):
+            for ln in iterator:
+                ln = ln.strip()
+                if not ln or ln.startswith(('#', '//', ';')): continue
+                is_excl = ln.startswith('!')
+                v = ln[1:].strip() if is_excl else ln
+                p = v.split(',')
+                if len(p) >= 2 and p[0].upper() in self.RMAP: 
+                    _add(self.RMAP[p[0].upper()], p[1].strip(), is_excl, ','.join(p[2:]).strip())
+                else: 
+                    _add('domain', v, is_excl, "")
+                
         try:
-            if isinstance(source, Path):
-                with open(source, 'r', encoding='utf-8-sig', errors='ignore') as f:
-                    _process_text_stream(f)
+            if isinstance(src, Path):
+                with open(src, 'r', encoding='utf-8-sig', errors='ignore') as f: 
+                    f.seek(0)
+                    _stream(f)
             else:
-                with io.TextIOWrapper(io.BytesIO(source), encoding='utf-8-sig', errors='ignore') as f:
-                    _process_text_stream(f)
-        except OSError as e:
-            logger.warning(f"Text streaming failed for {url}: {e}")
-            return ParsedRuleSet(url, weight, (), (), timestamp=time.time())
+                with io.TextIOWrapper(io.BytesIO(src), encoding='utf-8-sig') as f: 
+                    _stream(f)
+        except OSError: pass
+        return ParsedRuleSet(url, tuple(dom), tuple(ip), tuple(gen), time.time())
 
-        return ParsedRuleSet(url, weight, tuple(dom), tuple(ip), timestamp=time.time())
-
-    def _add_rule(self, typ: Optional[str], val: str, is_excl: bool, dom: list[DomainRule], ip: list[IPCIDRRule]) -> None:
-        if typ in ('domain', 'domain_suffix', 'domain_wildcard'):
-            if not val: return
-            expected_type = MatchType.WILDCARD if typ == 'domain_wildcard' else (MatchType.SUFFIX if typ == 'domain_suffix' else MatchType.EXACT)
-            clean = val[2:] if val.startswith('*.') else val
-            if val.startswith('*.'): 
-                expected_type = MatchType.WILDCARD
-            
-            norm = self._normalize_domain(clean)
-            if not norm: return
-            
-            # DGA 過濾器
-            if self._enable_dga and EntropyAssessor.assess(norm) == EntropyLevel.DGA_CONFIRMED:
-                return
-
-            dom.append(DomainRule(val, expected_type, norm, is_excl))
-            
-        elif typ == 'ip_cidr':
-            try:
-                net = ipaddress.ip_network(val, strict=False)
-                if net.version == 6 and not self._config.enable_ipv6: return
-                ip.append(IPCIDRRule(net, val, is_excl))
-            except ValueError:
-                pass
-
-    def _normalize_domain(self, d: str) -> Optional[str]:
-        d = d.strip().lower().strip('.')
-        if not d or len(d) > MAX_DOMAIN_LENGTH or ' ' in d: return None
-        if not d.isascii():
-            try: d = d.encode('idna').decode('ascii')
-            except UnicodeError: return None
-        if len(d) > MAX_DOMAIN_LENGTH: return None
-        parts = d.split('.')
-        if len(parts) > self._max_domain_depth: return None
-        for part in parts:
-            if not part or len(part) > 63 or not RE_DOMAIN_LABEL.match(part): return None
-        return d
-
-
-# ==========================================
-# 下載與分發調度模塊
-# ==========================================
-def create_session() -> requests.Session:
-    s = requests.Session()
-    retry = Retry(total=DEFAULT_RETRIES, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=1, pool_maxsize=1)
-    s.mount('http://', adapter)
-    s.mount('https://', adapter)
-    s.headers.update({"User-Agent": "StrictRuleMerger/9.0"})
-    return s
-
-def resolve_hostname(hostname: str, config: MergeConfig) -> list[str]:
+def resolve_hostname(hostname: str) -> List[str]:
     with _DNS_LOCK:
         if hostname in _DNS_CACHE:
             ts, ips = _DNS_CACHE[hostname]
@@ -1411,726 +1029,374 @@ def resolve_hostname(hostname: str, config: MergeConfig) -> list[str]:
                 _DNS_CACHE.move_to_end(hostname)
                 return ips
             del _DNS_CACHE[hostname]
-
         if hostname in _DNS_PENDING:
-            event = _DNS_PENDING[hostname]
-            wait_for_event = True
+            ev, wait = _DNS_PENDING[hostname], True
         else:
-            event = threading.Event()
-            _DNS_PENDING[hostname] = event
-            wait_for_event = False
-
-    if wait_for_event:
-        event.wait(timeout=10)
+            ev, wait = threading.Event(), False
+            _DNS_PENDING[hostname] = ev
+    if wait:
+        ev.wait(10)
         with _DNS_LOCK: return _DNS_CACHE.get(hostname, (0, []))[1]
-
     ips = []
     try:
         results = socket.getaddrinfo(hostname, None)
-        ips_set = set()
         for res in results:
             ip_str = res[4][0].split('%')[0]
-            if ip_str in ips_set: continue
             try:
-                ip = ipaddress.ip_address(ip_str)
-                if ip.is_link_local or (not config.enable_ipv6 and ip.version == 6): continue
-                if not config.url_allow_private_ips and (ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_multicast): continue
-                ips_set.add(ip_str)
-                ips.append(ip_str)
-            except ValueError: continue
-    except Exception: 
-        pass
-    finally:
-        with _DNS_LOCK:
-            _DNS_CACHE[hostname] = (time.time(), ips)
-            _DNS_CACHE.move_to_end(hostname)
-            if len(_DNS_CACHE) > MAX_DNS_CACHE: _DNS_CACHE.popitem(last=False)
-            _DNS_PENDING.pop(hostname, None)
-            event.set()
+                if not ipaddress.ip_address(ip_str).is_link_local: ips.append(ip_str)
+            except ValueError: pass
+        ips = list(set(ips))
+    except Exception: pass
+    with _DNS_LOCK:
+        _DNS_CACHE[hostname] = (time.time(), ips)
+        _DNS_CACHE.move_to_end(hostname)
+        if len(_DNS_CACHE) > MAX_DNS_CACHE: _DNS_CACHE.popitem(last=False)
+        _DNS_PENDING.pop(hostname, None)
+        ev.set()
     return ips
 
-
-def download_file_stream(url: str, config: MergeConfig, temp_dir: Path) -> tuple[Optional[bytes], Optional[Path], Optional[str]]:
-    redirect_count = 0
-    current_url = url
-    visited = set()
-    tmp_path = None
-    success = False
-
-    try:
-        while redirect_count < 5:
-            if current_url in visited: return None, None, "redirect_loop"
-            visited.add(current_url)
-
-            allowed, reason = config.is_url_allowed(current_url)
-            if not allowed: return None, None, "url_not_allowed"
-
-            parsed_current = urlparse(current_url)
-            current_hostname = parsed_current.hostname
-            if not current_hostname: return None, None, "no_hostname"
-
-            current_public_ips = resolve_hostname(current_hostname, config)
-            if not current_public_ips: return None, None, "no_public_ips"
-
-            last_err = None
-            tmp_path = None
-            redirected_this_loop = False
-
-            for attempt_ip in current_public_ips:
-                _dns_context.forced_host = current_hostname
-                _dns_context.forced_ip = attempt_ip
-
-                try:
-                    with create_session() as session:
-                        with session.get(
-                            current_url, stream=True,
-                            timeout=(config.download_timeout_connect, config.download_timeout_read),
-                            verify=config.verify_ssl, allow_redirects=False
-                        ) as resp:
-                            if resp.status_code in (301, 302, 303, 307, 308):
-                                location = resp.headers.get('Location')
-                                if not location: return None, None, "redirect_without_location"
-                                current_url = urljoin(current_url, location)
-                                redirect_count += 1
-                                redirected_this_loop = True
-                                break
-
-                            resp.raise_for_status()
-                            if 'html' in resp.headers.get('content-type', '').lower() and not url.endswith('.html'):
-                                return None, None, "html_content"
-
-                            buffer = bytearray()
-                            use_file = False
-                            total = html_check_count = 0
-
-                            for chunk in resp.iter_content(128 * 1024):
-                                if not chunk: continue
-                                if html_check_count < HTML_CHECK_THRESHOLD:
-                                    if RE_HTML_STRICT.search(chunk): return None, None, "html_detected"
-                                    html_check_count += 1
-                                total += len(chunk)
-                                if total > config.max_download_size: return None, None, "size_exceeded"
-
-                                if not use_file:
-                                    buffer.extend(chunk)
-                                    if total > SMALL_FILE_THRESHOLD:
-                                        use_file = True
-                                        fd, path_str = tempfile.mkstemp(suffix='.tmp', dir=str(temp_dir))
-                                        tmp_path = Path(path_str)
-                                        try:
-                                            tmp_file = os.fdopen(fd, 'wb')
-                                        except Exception:
-                                            os.close(fd)
-                                            raise
-                                        with tmp_file:
-                                            tmp_file.write(buffer)
-                                            buffer.clear()
-                                            for subsequent_chunk in resp.iter_content(128 * 1024):
-                                                if not subsequent_chunk: continue
-                                                total += len(subsequent_chunk)
-                                                if total > config.max_download_size: return None, None, "size_exceeded"
-                                                tmp_file.write(subsequent_chunk)
-                                        break
-
-                            if total == 0: return None, None, "empty_content"
-                            success = True
-                            return (None, tmp_path, None) if use_file else (bytes(buffer), None, None)
-
-                except requests.RequestException as e:
-                    if tmp_path and tmp_path.exists(): tmp_path.unlink(missing_ok=True)
-                    tmp_path = None
-                    last_err = e
-                finally:
-                    _dns_context.forced_host = None
-                    _dns_context.forced_ip = None
-
-            if redirected_this_loop: continue
-
-            if isinstance(last_err, requests.HTTPError):
-                status = last_err.response.status_code if last_err.response else 0
-                if 500 <= status < 600: raise TransientError(f"HTTP 5xx error for {url}") from last_err
-                elif status == 429: raise TransientError(f"HTTP 429 Too Many Requests for {url}") from last_err
-                elif 400 <= status < 500: return None, None, f"http_error_{status}"
-                return None, None, f"http_error_{status}" if status else "http_error_unknown"
-            elif isinstance(last_err, (requests.Timeout, requests.ConnectionError)):
-                raise TransientError("connection error") from last_err
-            elif last_err:
-                return None, None, f"request_error: {type(last_err).__name__}"
-
-            return None, None, "no_valid_ips"
-
-        return None, None, "too_many_redirects"
-    finally:
-        if not success and tmp_path and tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
-
-def download_sources(task_cfg: MergeConfig, sources_conf: list[Union[str, dict[str, Any]]], temp_dir: Path, cache: Optional[WALBackend]) -> tuple[list[ParsedRuleSet], list[str]]:
-    parser = RuleParser(task_cfg)
-    sources: list[ParsedRuleSet] = []
-    parse_errors: list[str] = []
-    batch_updates: dict[str, Any] = {}
-
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=task_cfg.max_concurrent_downloads)
-    future_to_url = {}
-    interrupted = False
-    try:
-        for src_conf in sources_conf:
-            url = src_conf if isinstance(src_conf, str) else src_conf.get('url')
-            if not url: continue
-            weight = 1.0 if isinstance(src_conf, str) else float(src_conf.get('weight', 1.0))
-            future = executor.submit(_download_single_source, task_cfg, url, weight, temp_dir, cache, parser)
-            future_to_url[future] = url
-
-        for future in concurrent.futures.as_completed(future_to_url):
-            url = future_to_url[future]
-            try:
-                ps, error, cache_update = future.result()
-                if ps:
-                    sources.append(ps)
-                    if cache_update: batch_updates.update(cache_update)
-                elif error:
-                    parse_errors.append(f"{url}: {error}")
-            except Exception as e:
-                parse_errors.append(f"{url}: unexpected error: {str(e)[:50]}")
-    except (KeyboardInterrupt, SystemExit):
-        interrupted = True
-        for fu in future_to_url: fu.cancel()
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    finally:
-        if not interrupted: executor.shutdown(wait=True)
-
-    if cache and batch_updates:
-        if not cache.put_batch(batch_updates):
-            logger.warning("Failed to write cache updates")
-
-    return sources, parse_errors
-
-def _download_single_source(task_cfg: MergeConfig, url: str, weight: float, temp_dir: Path, cache: Optional[WALBackend], parser: RuleParser) -> tuple[Optional[ParsedRuleSet], Optional[str], Optional[dict[str, Any]]]:
-    cache_key = f"parsed:{CACHE_VERSION}:{url}"
+def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend], parser: RuleParser) -> Tuple[Optional[ParsedRuleSet], Optional[dict]]:
+    ckey = f"p:{CACHE_VERSION}:{url}"
     if cache:
-        loaded = cache.get(cache_key)
-        if isinstance(loaded, dict):
-            try:
-                dom_rules = tuple(DomainRule(d['pattern'], MatchType(d['match_type']), d['normalized'], d['is_exclusion'], d.get('specificity_score', 0)) for d in loaded.get('domain_rules', []))
-                ip_rules = tuple(IPCIDRRule(ipaddress.ip_network(d['network']), d['original_str'], d['is_exclusion']) for d in loaded.get('ip_rules', []))
-                cached_ps = ParsedRuleSet(loaded['url'], loaded['weight'], dom_rules, ip_rules, loaded['timestamp'], loaded['content_hash'])
-                if time.time() - cached_ps.timestamp < task_cfg.max_source_age_days * 86400:
-                    return ParsedRuleSet(cached_ps.url, weight, cached_ps.domain_rules, cached_ps.ip_rules, cached_ps.timestamp, cached_ps.content_hash), None, None
-            except Exception as e:
-                logger.warning(f"Failed to load cached source {url}: {e}")
+        l = cache.get(ckey)
+        if l and time.time() - l.get('ts', 0) < cfg.max_source_age_days * 86400:
+            doms = tuple(DomainRule(MatchType(r['match_type']), r['normalized'], r.get('is_exclusion', False), r.get('specificity_score', 0), r.get('attrs', '')) for r in l.get('d', []))
+            ips = tuple(IPCIDRRule(r['s'], r['e'], r['p'], r['v'], r.get('i', False), r.get('attrs', '')) for r in l.get('i', []))
+            gens = tuple(GenericRule(r['t'], r['v'], r.get('i', False), r.get('attrs', '')) for r in l.get('g', []))
+            return ParsedRuleSet(l['url'], doms, ips, gens, l['ts'], l['hash']), None
 
-    src_retry = 0
-    while src_retry <= MAX_DOWNLOAD_RETRIES:
-        tmp_path = None
-        srs_file = None
+    for _ in range(MAX_DOWNLOAD_RETRIES):
+        rc, curl, vis, tmp, ok = 0, url, set(), None, False
         try:
-            data, tmp_path, err = download_file_stream(url, task_cfg, temp_dir)
-            if data is None and tmp_path is None:
-                if err: return None, err, None
+            while rc < 5:
+                if curl in vis: break
+                vis.add(curl)
+                p = urlparse(curl)
+                if not p.hostname: break
+                ips = resolve_hostname(p.hostname)
+                if not ips: break
+                redir = False
+                for ip in ips:
+                    _dns_context.forced_host = p.hostname
+                    _dns_context.forced_ip = ip
+                    try:
+                        with requests.Session() as s:
+                            s.headers.update({'Connection': 'close'})
+                            s.mount('https://', HTTPAdapter(max_retries=Retry(total=1)))
+                            s.mount('http://', HTTPAdapter(max_retries=Retry(total=1)))
+                            with s.get(curl, stream=True, timeout=(cfg.download_timeout_connect, cfg.download_timeout_read), allow_redirects=False, headers={"User-Agent": "StrictRuleMerger/13.5 Ultimate"}) as resp:
+                                if resp.status_code in (301, 302, 303, 307, 308):
+                                    curl = urljoin(curl, resp.headers.get('Location', ''))
+                                    rc, redir = rc + 1, True
+                                    break
+                                resp.raise_for_status()
+                                fd, pstr = tempfile.mkstemp(suffix='.tmp', dir=str(td))
+                                tmp = Path(pstr)
+                                html_check_count, is_html_error = 0, False
+                                with os.fdopen(fd, 'wb') as f:
+                                    for chunk in resp.iter_content(131072):
+                                        if not chunk: continue
+                                        if html_check_count < 3:
+                                            if RE_HTML_STRICT.search(chunk) and not curl.endswith('.html'):
+                                                is_html_error = True
+                                                break
+                                            html_check_count += 1
+                                        f.write(chunk)
+                                if is_html_error: raise TransientError("HTML content detected")
+                                ok = True
+                                break
+                    except (requests.RequestException, TransientError):
+                        if tmp and tmp.exists():
+                            tmp.unlink(missing_ok=True)
+                            tmp = None
+                    finally:
+                        _dns_context.forced_host, _dns_context.forced_ip = None, None
+                if redir: continue
                 break
-
-            # 專門處理由 URL 下載回來的二進制 SRS 格式文件
-            if url.endswith('.srs'):
-                if not task_cfg.core_bin_path or not task_cfg.validate_core_path():
-                    return None, "core_bin_path invalid or missing for srs decompile", None
-                
-                srs_file = tmp_path
-                # 如果文件較小存在內存中，需寫入臨時文件交給 sb-core
-                if data is not None:
-                    fd, p = tempfile.mkstemp(suffix='.srs', dir=str(temp_dir))
-                    srs_file = Path(p)
-                    with os.fdopen(fd, 'wb') as f:
-                        f.write(data)
-                elif srs_file is None:
-                    return None, "srs content is empty", None
-                
-                json_file = srs_file.with_suffix('.json')
-                try:
-                    subprocess.run(
-                        [str(Path(task_cfg.core_bin_path).expanduser()), "rule-set", "decompile", "--output", str(json_file), str(srs_file)],
-                        check=True, capture_output=True, text=True, timeout=120
-                    )
-                    tmp_path = json_file
-                    data = None 
-                except subprocess.CalledProcessError as e:
-                    return None, f"srs decompile error: {e.stderr}", None
-                except Exception as e:
-                    return None, f"srs decompile error: {e}", None
-                finally:
-                    if srs_file and srs_file != tmp_path and srs_file.exists():
-                        srs_file.unlink(missing_ok=True)
-
+        finally: pass
+        if not ok or not tmp: continue
+        
+        srs = None
+        if url.endswith('.srs') and cfg.validate_core_path():
+            srs, json_f = tmp, tmp.with_suffix('.json')
             try:
-                if data is not None: ps = parser.parse(data, url, weight)
-                elif tmp_path:
-                    ps = parser.parse(tmp_path, url, weight)
-                else: continue
+                subprocess.run([str(Path(cfg.core_bin_path).expanduser().absolute()), "rule-set", "decompile", "--output", str(json_f), str(srs)], check=True, capture_output=True, timeout=cfg.compile_timeout_seconds)
+                tmp = json_f
+            except Exception: pass
+            finally: srs.unlink(missing_ok=True)
+            
+        try:
+            ps = parser.parse(tmp, url)
+            ts = None
+            if cache and (ps.domain_rules or ps.ip_rules or ps.generic_rules):
+                d_rules = [{'match_type': r.match_type.value, 'normalized': r.normalized, 'is_exclusion': r.is_exclusion, 'specificity_score': r.specificity_score, 'attrs': r.attrs} for r in ps.domain_rules]
+                i_rules = [{'s': r.start_int, 'e': r.end_int, 'p': r.prefixlen, 'v': r.version, 'i': r.is_exclusion, 'attrs': r.attrs} for r in ps.ip_rules]
+                g_rules = [{'t': r.type, 'v': r.val, 'i': r.is_exclusion, 'attrs': r.attrs} for r in ps.generic_rules]
+                ts = {ckey: {'url': ps.url, 'ts': ps.ts, 'hash': ps.hash, 'd': d_rules, 'i': i_rules, 'g': g_rules}}
+            return ps, ts
+        except Exception: pass
+        finally: tmp.unlink(missing_ok=True)
+    return None, None
 
-                if ps.domain_rules or ps.ip_rules:
-                    to_store = None
-                    if cache:
-                        to_store = {cache_key: {
-                            'url': ps.url, 'weight': ps.weight,
-                            'domain_rules': [{'pattern': r.pattern, 'match_type': r.match_type.value, 'normalized': r.normalized, 'is_exclusion': r.is_exclusion, 'specificity_score': r.specificity_score} for r in ps.domain_rules],
-                            'ip_rules': [{'network': str(r.network), 'original_str': r.original_str, 'is_exclusion': r.is_exclusion} for r in ps.ip_rules],
-                            'timestamp': ps.timestamp, 'content_hash': ps.content_hash
-                        }}
-                    return ps, None, to_store
-                return None, "no valid rules", None
-            except Exception as e:
-                return None, str(e)[:50], None
-        except TransientError:
-            src_retry += 1
-            if src_retry <= MAX_DOWNLOAD_RETRIES:
-                time.sleep(min(2 ** src_retry, MAX_BACKOFF_SECONDS))
-                continue
-            return None, f"transient error after {MAX_DOWNLOAD_RETRIES} retries", None
-        finally:
-            if tmp_path and tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
-
-    return None, f"download failed after {MAX_DOWNLOAD_RETRIES + 1} attempts", None
-
-
-# ==========================================
-# 規則合併與輸出模塊
-# ==========================================
-class FlatDomainMerger:
-    __slots__ = ('rules',)
-
-    def __init__(self) -> None:
-        self.rules: dict[tuple[str, MatchType, bool], tuple[float, DomainRule, int]] = {}
-
-    def add_rule(self, rule: DomainRule, weight: float, config: MergeConfig, rule_index: int) -> None:
-        key = (rule.normalized, rule.match_type, rule.is_exclusion)
-        existing = self.rules.get(key)
-        if existing:
-            existing_weight, existing_rule, existing_idx = existing
-            if weight > existing_weight or (weight == existing_weight and config.conflict_resolution == 'specificity' and rule.specificity_score > existing_rule.specificity_score):
-                self.rules[key] = (weight, rule, rule_index)
+def _verify_rule_group(name: str, bdd: Optional[BDDRuleVerifier], smt_executor: Optional[concurrent.futures.ProcessPoolExecutor], smt_cfg: Optional[MergeConfig], cov: CoverageChecker, 
+                       pa_dom: List[DomainRule], pd_dom: List[DomainRule], c_dom: List[DomainRule], 
+                       pa_ip: List[IPCIDRRule], pd_ip: List[IPCIDRRule], c_ip: List[IPCIDRRule], 
+                       src_url: str, is_deny: bool, res: Dict[str, Any]) -> Tuple[bool, float]:
+    ip_ok, dom_ok, ip_conf, dom_conf = True, True, 1.0, 1.0
+    if c_ip:
+        if bdd:
+            try:
+                ip_ok, ip_conf = bdd.verify(pd_ip, [], c_ip, True) if is_deny else bdd.verify(pa_ip, pd_ip, c_ip, False)
+                if not ip_ok: res['issues'].append({'source': src_url, 'verifier': 'BDD_IP', 'type': f"{name}_ip_not_subset", 'confidence': ip_conf})
+            except Exception: pass
+        elif smt_executor and smt_cfg and smt_cfg.enable_smt_verification:
+            try:
+                verifier = ProcessIsolatedSMTVerifier(smt_cfg)
+                if is_deny: ip_ok, ip_conf, msg = verifier.verify(smt_executor, [], pd_ip, c_ip, True) 
+                else: ip_ok, ip_conf, msg = verifier.verify(smt_executor, pa_ip, pd_ip, c_ip, False)
+                if not ip_ok: res['issues'].append({'source': src_url, 'verifier': 'SMT_IP', 'type': f"{name}_ip_not_subset", 'confidence': ip_conf, 'message': msg})
+            except Exception: pass
         else:
-            self.rules[key] = (weight, rule, rule_index)
+            ip_conf = cov.calculate(c_ip)
+            ip_ok = ip_conf >= 1.0
+            if not ip_ok: res['issues'].append({'source': src_url, 'verifier': 'Coverage_IP', 'type': f"{name}_ip_not_covered", 'confidence': ip_conf})
 
-    def collect_rules(self) -> tuple[list[tuple[DomainRule, float]], list[tuple[DomainRule, float]]]:
-        allow, deny = [], []
-        for (_, _, is_excl), (weight, rule, _) in self.rules.items():
-            (deny if is_excl else allow).append((rule, weight))
-        
-        allow.sort(key=lambda x: (-x[1], -x[0].specificity_score, x[0].normalized, int(x[0].is_exclusion)))
-        deny.sort(key=lambda x: (-x[1], -x[0].specificity_score, x[0].normalized, int(x[0].is_exclusion)))
-        return allow, deny
+    if c_dom:
+        dom_conf = cov.calculate(c_dom)
+        dom_ok = dom_conf >= 1.0
+        if not dom_ok: res['issues'].append({'source': src_url, 'verifier': 'Coverage_DOM', 'type': f"{name}_dom_not_covered", 'confidence': dom_conf})
+    return (ip_ok and dom_ok), min(ip_conf, dom_conf)
 
-class WeightedCIDRMerger:
-    __slots__ = ('config', 'groups')
-
-    def __init__(self, config: MergeConfig) -> None:
-        self.config = config
-        self.groups: dict[float, list[tuple[IPNetworkType, bool]]] = defaultdict(list)
-
-    def add_rule(self, net: IPNetworkType, is_allow: bool, weight: float) -> None:
-        self.groups[weight].append((net, is_allow))
-
-    def get_result(self) -> tuple[list[tuple[IPCIDRRule, float]], list[tuple[IPCIDRRule, float]]]:
-        weights = sorted(self.groups.keys(), reverse=True)
-        final_allow_dict: dict[IPNetworkType, float] = {}
-        final_deny_dict: dict[IPNetworkType, float] = {}
-
-        for w in weights:
-            allow_this, deny_this = [], []
-            for net, is_allow in self.groups[w]:
-                (allow_this if is_allow else deny_this).append(net)
-
-            temp_allow_dict, temp_deny_dict = {}, {}
-
-            if deny_this:
-                try:
-                    for net in SweepLineCIDRManager.subtract(deny_this, itertools.chain(final_allow_dict.keys(), final_deny_dict.keys()), self.config.max_cidr_fragmentation, self.config.enable_cidr_approximation, self.config.cidr_approximation_max_loss_rate, self.config.strict_zero_loss):
-                        if net not in temp_deny_dict: temp_deny_dict[net] = w
-                except CIDRFragmentationError as e:
-                    if self.config.strict_zero_loss: raise
-                    if self.config.enable_cidr_approximation and e.cidrs:
-                        for net in SweepLineCIDRManager.approximate_collapse(e.cidrs, self.config.max_cidr_fragmentation)[0]:
-                            if net not in temp_deny_dict: temp_deny_dict[net] = w
-
-            if allow_this:
-                try:
-                    for net in SweepLineCIDRManager.subtract(allow_this, itertools.chain(final_allow_dict.keys(), final_deny_dict.keys(), temp_deny_dict.keys()), self.config.max_cidr_fragmentation, self.config.enable_cidr_approximation, self.config.cidr_approximation_max_loss_rate, self.config.strict_zero_loss):
-                        if net not in temp_allow_dict: temp_allow_dict[net] = w
-                except CIDRFragmentationError as e:
-                    if self.config.strict_zero_loss: raise
-                    if self.config.enable_cidr_approximation and e.cidrs:
-                        for net in SweepLineCIDRManager.approximate_collapse(e.cidrs, self.config.max_cidr_fragmentation)[0]:
-                            if net not in temp_allow_dict: temp_allow_dict[net] = w
-
-            final_deny_dict.update({k: v for k, v in temp_deny_dict.items() if k not in final_deny_dict})
-            final_allow_dict.update({k: v for k, v in temp_allow_dict.items() if k not in final_allow_dict})
-
-        def _group_by_weight(rule_dict: dict[IPNetworkType, float], is_deny: bool) -> list[tuple[IPCIDRRule, float]]:
-            by_weight: dict[float, list[IPNetworkType]] = defaultdict(list)
-            for net, w in rule_dict.items(): by_weight[w].append(net)
-            results = []
-            for w in sorted(by_weight.keys(), reverse=True):
-                if nets := by_weight[w]:
-                    for cnet in ipaddress.collapse_addresses(nets):
-                        results.append((IPCIDRRule(cnet, str(cnet), is_deny), w))
-            return results
-
-        allow_results = _group_by_weight(final_allow_dict, False)
-        deny_results = _group_by_weight(final_deny_dict, True)
-        allow_results.sort(key=lambda x: (-x[1], x[0].version, -x[0].prefixlen, x[0].start_int))
-        deny_results.sort(key=lambda x: (-x[1], x[0].version, -x[0].prefixlen, x[0].start_int))
-        return allow_results, deny_results
-
-def merge_ip_rules(parsed_sets: list[ParsedRuleSet], config: MergeConfig) -> tuple[list[tuple[IPCIDRRule, float]], list[tuple[IPCIDRRule, float]]]:
-    merger = WeightedCIDRMerger(config)
-    for src in sorted(parsed_sets, key=lambda x: -x.weight):
-        for r in src.ip_rules: merger.add_rule(r.network, not r.is_exclusion, src.weight)
-    return merger.get_result()
-
-def merge_domains(parsed_sets: list[ParsedRuleSet], config: MergeConfig) -> tuple[list[tuple[DomainRule, float]], list[tuple[DomainRule, float]]]:
-    merger = FlatDomainMerger()
-    idx = 0
-    for src in sorted(parsed_sets, key=lambda x: -x.weight):
-        for r in src.domain_rules:
-            merger.add_rule(r, src.weight, config, idx)
-            idx += 1
-            
-    allow, deny = merger.collect_rules()
-    
-    # 應用字典樹壓縮剪枝
-    if config.enable_trie_compression:
-        def _optimize(rule_list):
-            trie = DomainTrieOptimizer()
-            weight_map = {r: w for r, w in rule_list}
-            for r, _ in rule_list: 
-                trie.insert(r, weight_map[r])
-            optimized_rules = trie.optimize()
-            return optimized_rules
-            
-        allow = _optimize(allow)
-        deny = _optimize(deny)
-        
-    return allow, deny
-
-def _verify_rule_group(
-    group_name: str, bdd_verifier: Optional[BDDRuleVerifier], smt_verifier: Optional[SMTVerifier],
-    coverage_checker: CoverageChecker, p_dom_allow: list[DomainRule], p_dom_deny: list[DomainRule], c_dom: list[DomainRule],
-    p_ip_allow: list[IPCIDRRule], p_ip_deny: list[IPCIDRRule], c_ip: list[IPCIDRRule], parent_digest: int,
-    source_url: str, is_deny: bool, results: dict[str, Any]
-) -> tuple[bool, float]:
-
-    if not c_dom and not c_ip: return True, 1.0
-
-    if bdd_verifier and not c_dom:
-        try:
-            ok, conf = bdd_verifier.verify_deny_subset(p_ip_deny, c_ip) if is_deny else bdd_verifier.verify_subset_strict(p_ip_allow, p_ip_deny, c_ip)
-            if not ok: results['issues'].append({'source': source_url, 'verifier': 'BDD', 'type': f"{group_name}_not_subset", 'confidence': conf})
-            return ok, conf
-        except Exception as e:
-            logger.debug(f"BDD {group_name} verification failed, falling back to SMT: {e}")
-
-    if smt_verifier and smt_verifier.enabled:
-        try:
-            if is_deny: ok, conf, msg = smt_verifier.verify_deny_subset(p_dom_deny, c_dom, p_ip_deny, c_ip, parent_digest)
-            else: ok, conf, msg = smt_verifier.verify_allow_subset(p_dom_allow, p_dom_deny, c_dom, p_ip_allow, p_ip_deny, c_ip, parent_digest)
-            if not ok: results['issues'].append({'source': source_url, 'verifier': 'SMT', 'type': f"{group_name}_not_subset", 'confidence': conf, 'message': msg})
-            return ok, conf
-        except Exception as e:
-            results['issues'].append({'source': source_url, 'verifier': 'SMT', 'type': 'error', 'message': f"{group_name} error: {str(e)[:100]}"})
-            return False, 0.0
-
-    ok = True
-    conf = coverage_checker.calculate(itertools.chain(c_dom, c_ip))
-    if conf < 1.0:
-        ok = False
-        results['issues'].append({'source': source_url, 'verifier': 'none', 'type': f"{group_name}_not_covered", 'confidence': conf})
-    return ok, conf
-
-def run_verifications(
-    parsed_sets: list[ParsedRuleSet], p_dom_allow: list[DomainRule], p_dom_deny: list[DomainRule],
-    p_ip_allow: list[IPCIDRRule], p_ip_deny: list[IPCIDRRule], bdd_verifier: Optional[BDDRuleVerifier], 
-    smt_verifier: Optional[SMTVerifier], config: MergeConfig
-) -> dict[str, Any]:
-    results: dict[str, Any] = {
-        'bdd_enabled': bool(bdd_verifier and config.enable_bdd_verification),
-        'smt_enabled': bool(smt_verifier and smt_verifier.enabled and config.enable_smt_verification),
-        'issues': [], 'stats': {}
-    }
-
-    parent_digest = rules_digest(itertools.chain(p_dom_allow, p_ip_allow, p_dom_deny, p_ip_deny))
+def run_verifications(parsed_sets: List[ParsedRuleSet], p_dom_allow: List[DomainRule], p_dom_deny: List[DomainRule], p_ip_allow: List[IPCIDRRule], p_ip_deny: List[IPCIDRRule], bdd_verifier: Optional[BDDRuleVerifier], smt_executor: Optional[concurrent.futures.ProcessPoolExecutor], config: MergeConfig) -> Dict[str, Any]:
+    results, total_sources, passed, coverages = {'issues': [], 'stats': {}}, 0, 0, []
     coverage_checker = CoverageChecker(itertools.chain(p_dom_allow, p_ip_allow, p_dom_deny, p_ip_deny))
-    total_sources, passed, coverages = 0, 0, []
-
     for src in sorted(parsed_sets, key=lambda x: -x.weight)[:config.max_verification_sources]:
-        c_dom_allow = [r for r in src.domain_rules if not r.is_exclusion]
-        c_ip_allow = [r for r in src.ip_rules if not r.is_exclusion]
-        c_dom_deny = [r for r in src.domain_rules if r.is_exclusion]
-        c_ip_deny = [r for r in src.ip_rules if r.is_exclusion]
-
-        if not (c_dom_allow or c_ip_allow or c_dom_deny or c_ip_deny): continue
+        ca = [r for r in src.domain_rules if not r.is_exclusion]
+        cia = [r for r in src.ip_rules if not r.is_exclusion]
+        cd = [r for r in src.domain_rules if r.is_exclusion]
+        cid = [r for r in src.ip_rules if r.is_exclusion]
+        if not (ca or cia or cd or cid): continue
         total_sources += 1
         src_passed, cov_components = True, []
-
-        def check(name: str, is_deny: bool, c_d: list[DomainRule], c_i: list[IPCIDRRule]) -> None:
+        def check(name: str, is_deny: bool, c_d: List[DomainRule], c_i: List[IPCIDRRule]) -> None:
             nonlocal src_passed
             if c_d or c_i:
-                ok, conf = _verify_rule_group(name, bdd_verifier, smt_verifier, coverage_checker,
-                                               p_dom_allow, p_dom_deny, c_d,
-                                               p_ip_allow, p_ip_deny, c_i,
-                                               parent_digest, src.url, is_deny, results)
+                ok, conf = _verify_rule_group(name, bdd_verifier, smt_executor, config, coverage_checker, p_dom_allow, p_dom_deny, c_d, p_ip_allow, p_ip_deny, c_i, src.url, is_deny, results)
                 src_passed = src_passed and ok
                 cov_components.append(conf)
-
-        check('domain_allow', False, c_dom_allow, [])
-        check('ip_allow', False, [], c_ip_allow)
-        check('domain_deny', True, c_dom_deny, [])
-        check('ip_deny', True, [], c_ip_deny)
-
+        check('domain_allow', False, ca, cia)
+        check('domain_deny', True, cd, cid)
         if src_passed: passed += 1
         coverages.append(min(cov_components) if cov_components else 1.0)
-
-    if total_sources > 0:
-        results['stats'] = {
-            'total_sources': total_sources, 'passed': passed,
-            'pass_rate': passed / total_sources, 'avg_coverage': sum(coverages) / len(coverages)
-        }
+    if total_sources > 0: results['stats'] = {'total_sources': total_sources, 'passed': passed, 'pass_rate': passed / total_sources, 'avg_coverage': sum(coverages) / len(coverages)}
     return results
 
-def write_output(name: str, sorted_rules: list[tuple[RuleType, float]], out_path: Path, config: MergeConfig) -> tuple[str, str]:
-    is_surge = config.output_format == 'surge'
-    is_clash = config.output_format == 'clash'
-    out_srs = None
+# 修復 2.2：移除對大小寫的嚴格校驗，僅校驗已知的無策略修飾符
+def _format_policy(attrs: str, default_pol: str) -> str:
+    if not attrs: return default_pol
+    first_attr = attrs.split(',')[0].strip()
+    if first_attr.upper() in ('NO-RESOLVE', 'EXTENDED-MATCHING'):
+        return f"{default_pol},{attrs}"
+    return attrs
 
-    if is_surge or is_clash:
-        prefix = "  - " if is_clash else ""
-        with open(out_path, 'w', encoding='utf-8') as f:
-            if is_clash: f.write("payload:\n")
-            for rule, _ in sorted_rules:
-                policy = config.deny_policy if rule.is_exclusion else config.allow_policy
-                if isinstance(rule, DomainRule):
-                    if rule.match_type == MatchType.EXACT: typ, val = 'DOMAIN', rule.normalized
-                    elif rule.match_type == MatchType.SUFFIX: typ, val = 'DOMAIN-SUFFIX', rule.normalized
-                    elif rule.match_type == MatchType.WILDCARD: typ, val = 'DOMAIN-WILDCARD', f"*.{rule.normalized}"
-                    else: continue
-                else:
-                    typ, val = ('IP-CIDR6' if rule.version == 6 else 'IP-CIDR'), rule.original_str
-                f.write(f"{prefix}{typ},{val}{',' + policy if policy else ''}\n")
-    else:
-        json_rules = []
-        for rule, _ in sorted_rules:
-            if isinstance(rule, DomainRule):
-                if rule.match_type == MatchType.EXACT: typ, val = 'domain', rule.normalized
-                elif rule.match_type in (MatchType.SUFFIX, MatchType.WILDCARD): typ, val = 'domain_suffix', rule.normalized
-                else: continue
-            else:
-                typ, val = 'ip_cidr', rule.original_str
-
-            entry: dict[str, Any] = {typ: val}
-            if rule.is_exclusion: entry['invert'] = True
-            json_rules.append(entry)
-
-        final_data = {"version": 1, "rules": json_rules}
-
-        if USE_ORJSON:
-            with open(out_path, 'wb') as f_bin:
-                f_bin.write(orjson.dumps(final_data, option=orjson.OPT_INDENT_2 | getattr(orjson, 'OPT_SORT_KEYS', 0)))
-        else:
-            with open(out_path, 'w', encoding='utf-8') as f_txt:
-                json.dump(final_data, f_txt, indent=2, ensure_ascii=False, sort_keys=True)
-
-    if config.core_bin_path and config.core_bin_path.strip():
-        core_path = Path(config.core_bin_path).expanduser()
-        out_srs = out_path.with_suffix('.srs')
-        if core_path.exists() and os.access(str(core_path), os.X_OK):
-            try:
-                proc = subprocess.run(
-                    [str(core_path), "rule-set", "compile", "--output", str(out_srs), str(out_path)],
-                    capture_output=True, text=True, timeout=config.compile_timeout_seconds
-                )
-                if proc.returncode != 0: raise RuntimeError(f"Compile failed: {proc.stderr}")
-            except subprocess.TimeoutExpired:
-                raise RuntimeError("Compile timeout")
-            except Exception as e:
-                raise RuntimeError(f"Compile error: {e}")
-
-    try:
-        target_path = out_srs if out_srs and out_srs.exists() else out_path
-        sz_val = f"{target_path.stat().st_size / 1024:.1f}KB"
-    except OSError:
-        sz_val = "0KB"
-    return sz_val, f"Merged {len(sorted_rules)} rules"
-
-def _sort_rules(item: tuple[RuleType, float]) -> tuple[float, int, int, Union[str, int], int]:
-    rule, weight = item
-    if isinstance(rule, DomainRule):
-        return (-weight, 0, -rule.specificity_score, rule.normalized, int(rule.is_exclusion))
-    return (-weight, 1, rule.version, -rule.prefixlen, rule.start_int)
-
-def worker(task: dict[str, Any], global_config: MergeConfig, smt_verifier: Optional[SMTVerifier] = None) -> tuple[str, str, str, str]:
+def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[SemanticLineageAnalyzer] = None, smt_executor: Optional[concurrent.futures.ProcessPoolExecutor] = None) -> Tuple[str, str, str, str]:
     name = task.get('name', '')
-    if not name or not RE_TASK_NAME.match(name) or len(name) > MAX_TASK_NAME_LENGTH:
-        raise ValueError(f"Invalid task name: {name}")
-
-    temp_dir: Optional[Path] = None
-    bdd_verifier: Optional[BDDRuleVerifier] = None
-    cache: Optional[WALBackend] = None
-
+    if not name or not RE_TASK_NAME.match(name): return (name, "❌", "Invalid name", "0KB")
+    td, cache = None, None
     try:
-        temp_dir = Path(tempfile.mkdtemp(prefix=f"sb_merge_{name}_"))
-        task_cfg = MergeConfig.from_dict(task.get('config', {}), global_config)
-
-        if task_cfg.core_bin_path and not task_cfg.validate_core_path():
-            raise SecurityViolationError(f"Core path validation failed: {task_cfg.core_bin_path}")
-        if task_cfg.core_bin_path and task_cfg.output_format != 'json':
-            raise SecurityViolationError("core compilation requires output_format='json'")
-
-        out_path = task_cfg.output_dir / f"merged-{task_cfg.output_format}" / f"{name}.{'list' if task_cfg.output_format == 'surge' else 'yaml' if task_cfg.output_format == 'clash' else 'json'}"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if task_cfg.enable_cache:
-            cache_dir = Path.cwd() / ".cache" / "rule_merger" / name
+        td = Path(tempfile.mkdtemp(prefix=f"sb_merge_{name}_"))
+        cfg = MergeConfig.from_dict(task.get('config', {}), global_cfg)
+        out_p = cfg.output_dir / f"merged-{cfg.output_format}" / f"{name}.{'list' if cfg.output_format == 'surge' else 'yaml' if cfg.output_format == 'clash' else 'json'}"
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        min_score_threshold = float(task.get('min_score', 0.0))
+        
+        if cfg.enable_cache:
+            cdir = Path.cwd() / ".cache" / "rule_merger" / name
             try:
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                cache = WALBackend(cache_dir / "source_cache", task_cfg)
-            except OSError as e:
-                logger.warning(f"Failed to create cache directory {cache_dir}: {e}, caching disabled")
+                cdir.mkdir(parents=True, exist_ok=True)
+                cache = WALBackend(cdir / "source_cache", cfg)
+            except OSError: pass
 
-        sources, parse_errors = download_sources(task_cfg, task.get('sources', []), temp_dir, cache)
+        parser, sources, upd = RuleParser(cfg), [], {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=cfg.max_concurrent_downloads) as ex:
+            futs = {}
+            for s in task.get('sources', []):
+                s_url = s if isinstance(s, str) else s.get('url')
+                s_weight = 1.0 if isinstance(s, str) else float(s.get('weight', 1.0))
+                if s_url: futs[ex.submit(_dl_single, cfg, s_url, td, cache, parser)] = (s_url, s_weight)
+            for fu in concurrent.futures.as_completed(futs):
+                ps, u = fu.result()
+                if ps:
+                    _, manual_weight = futs[fu]
+                    ps.weight = ps.initial_weight = manual_weight
+                    sources.append(ps)
+                    upd.update(u or {})
+        if cache and upd: cache.put_batch(upd)
+        if not sources: return (name, "⚠️", "No valid sources", "0KB")
 
-        if not sources: return (name, "⚠️", f"No valid sources ({len(parse_errors)} errors)" if parse_errors else "No valid sources", "0KB")
-        if parse_errors: logger.warning(f"[{name}] Parse errors: {'; '.join(parse_errors[:3])}")
+        if cfg.enable_reputation: DynamicReputationEngine(sources, cache, cfg).evaluate()
+        if lin:
+            sigs = [SourceSignature.from_parsed(s) for s in sources]
+            red = lin.compute(sources, sigs)
+            sig_map = {s.hash: s for s in sigs}
+            for s in sources:
+                if s.hash in sig_map: s.weight *= sig_map[s.hash].originality
+                
+        if min_score_threshold <= 0:
+            min_score_threshold = max(0.01, (sum(s.weight for s in sources) / len(sources)) * 0.35)
 
-        # 核心內存優化：解析完後強行清理無用字典與緩存
-        gc.collect()
+        rule_scores, dom_objs, ip_objs, gen_objs = defaultdict(float), {}, {}, {}
+        for src in sources:
+            for r in src.domain_rules:
+                rule_scores[r._hash] += src.weight
+                if r._hash not in dom_objs: dom_objs[r._hash] = (src.weight, r)
+                else:
+                    existing_w, existing_r = dom_objs[r._hash]
+                    if src.weight > existing_w: dom_objs[r._hash] = (src.weight, r)
+                    elif src.weight == existing_w and cfg.conflict_resolution == 'specificity':
+                        if r.specificity_score > existing_r.specificity_score: dom_objs[r._hash] = (src.weight, r)
+            for r in src.ip_rules:
+                rule_scores[r._hash] += src.weight
+                ip_objs[r._hash] = r
+            for r in src.generic_rules:
+                rule_scores[r._hash] += src.weight
+                if r._hash not in gen_objs: gen_objs[r._hash] = (src.weight, r)
+                else:
+                    existing_w, _ = gen_objs[r._hash]
+                    if src.weight > existing_w: gen_objs[r._hash] = (src.weight, r)
 
-        allow_rules_weights, deny_rules_weights = merge_domains(sources, task_cfg)
-        allow_ip_weights, deny_ip_weights = merge_ip_rules(sources, task_cfg)
-
-        p_dom_allow = [r for r, _ in allow_rules_weights]
-        p_dom_deny = [r for r, _ in deny_rules_weights]
-        p_ip_allow = [r for r, _ in allow_ip_weights]
-        p_ip_deny = [r for r, _ in deny_ip_weights]
-
-        all_rules = list(itertools.chain(allow_rules_weights, deny_rules_weights, allow_ip_weights, deny_ip_weights))
-        all_rules.sort(key=_sort_rules)
-
-        if task_cfg.enable_bdd_verification:
-            engine = BDDEngine(node_cache_max=task_cfg.bdd_node_limit, op_cache_max=task_cfg.bdd_lru_cache_size)
-            bdd_verifier = BDDRuleVerifier(engine, max_cache_size=task_cfg.max_bdd_var_cache_size)
-
-        verify_results = run_verifications(sources, p_dom_allow, p_dom_deny, p_ip_allow, p_ip_deny, bdd_verifier, smt_verifier, task_cfg)
-        stats, issues = verify_results.get('stats', {}), verify_results.get('issues', [])
-        if stats: logger.info(f"[{name}] Verification: {stats.get('passed', 0)}/{stats.get('total_sources', 0)} passed, avg coverage {stats.get('avg_coverage', 0):.2%}")
-        for issue in issues: logger.warning(f"[{name}] Verification issue: {issue}")
-
-        sz, summary = write_output(name, all_rules, out_path, task_cfg)
+        allow_trie, deny_trie, others, ip_weights = DomainTrieOptimizer(), DomainTrieOptimizer(), set(), []
+        for h, score in rule_scores.items():
+            if score >= min_score_threshold:
+                if h in dom_objs:
+                    _, r = dom_objs[h]
+                    if r.match_type in (MatchType.KEYWORD, MatchType.REGEX): others.add(r)
+                    else: (deny_trie if r.is_exclusion else allow_trie).insert(r)
+                elif h in ip_objs: ip_weights.append((score, ip_objs[h]))
+                elif h in gen_objs: 
+                    others.add(gen_objs[h][1])
+                
+        if cfg.enable_trie_compression:
+            p_dom_a = allow_trie.optimize(False)
+            p_dom_d = deny_trie.optimize(True)
+        else:
+            p_dom_a = [r for h, (w, r) in dom_objs.items() if rule_scores[h] >= min_score_threshold and not r.is_exclusion]
+            p_dom_d = [r for h, (w, r) in dom_objs.items() if rule_scores[h] >= min_score_threshold and r.is_exclusion]
+            
+        v4_a_ivs, v4_d_ivs = IntervalMerger.resolve_weighted_ips(ip_weights, 4)
+        v6_a_ivs, v6_d_ivs = IntervalMerger.resolve_weighted_ips(ip_weights, 6)
         
-        # 內存回收：寫入磁盤後釋放數組對象
-        del all_rules, allow_rules_weights, deny_rules_weights, allow_ip_weights, deny_ip_weights
-        gc.collect()
+        try:
+            f_a_ip_strs = IntervalMerger.to_cidrs(v4_a_ivs, 4, cfg) + IntervalMerger.to_cidrs(v6_a_ivs, 6, cfg)
+            f_d_ip_strs = IntervalMerger.to_cidrs(v4_d_ivs, 4, cfg) + IntervalMerger.to_cidrs(v6_d_ivs, 6, cfg)
+        except CIDRFragmentationError as e: 
+            logger.error(f"[{name}] Task Failed: {e}")
+            return (name, "❌", "CIDR Limit Exceeded & Fallback Failed", "0KB")
         
-        return (name, "⚠️" if issues else "✅", summary, sz)
+        issues = []
+        if cfg.enable_bdd_verification or (HAS_Z3 and cfg.enable_smt_verification):
+            eng = BDDEngine(cfg.bdd_node_limit, cfg.bdd_lru_cache_size)
+            bdd = BDDRuleVerifier(eng, cfg.max_bdd_var_cache_size) if cfg.enable_bdd_verification else None
+            va_ips = [IPCIDRRule(int(ipaddress.ip_network(s, strict=False).network_address), int(ipaddress.ip_network(s, strict=False).broadcast_address), ipaddress.ip_network(s, strict=False).prefixlen, 6 if ':' in s else 4, False) for s, _ in f_a_ip_strs]
+            vd_ips = [IPCIDRRule(int(ipaddress.ip_network(s, strict=False).network_address), int(ipaddress.ip_network(s, strict=False).broadcast_address), ipaddress.ip_network(s, strict=False).prefixlen, 6 if ':' in s else 4, True) for s, _ in f_d_ip_strs]
+            verify_results = run_verifications(sources, p_dom_a, p_dom_d, va_ips, vd_ips, bdd, smt_executor, cfg)
+            for iss in verify_results.get('issues', []): issues.append(f"{iss['type']} ({iss['verifier']})")
+            if bdd: eng.clear()
 
-    except (SecurityViolationError, KeyboardInterrupt, SystemExit):
-        raise
+        all_d = p_dom_a + p_dom_d + list(others)
+        all_d.sort(key=lambda r: (int(not getattr(r, 'is_exclusion', False)), -getattr(r, 'specificity_score', 0), getattr(r, 'normalized', getattr(r, 'val', ''))))
+        
+        is_sg, is_cl = cfg.output_format == 'surge', cfg.output_format == 'clash'
+        if is_sg or is_cl:
+            pf = "  - " if is_cl else ""
+            with open(out_p, 'w', encoding='utf-8') as f:
+                if is_cl: f.write("payload:\n")
+                for r in all_d:
+                    pol = _format_policy(getattr(r, 'attrs', ''), cfg.deny_policy if getattr(r, 'is_exclusion', False) else cfg.allow_policy)
+                    if isinstance(r, GenericRule):
+                        typ_str = r.type.replace('_', '-').upper()
+                        f.write(f"{pf}{typ_str},{r.val},{pol}\n")
+                        continue
+                    
+                    typ = 'DOMAIN' if r.match_type == MatchType.EXACT else 'DOMAIN-SUFFIX' if r.match_type == MatchType.SUFFIX else 'DOMAIN-KEYWORD' if r.match_type == MatchType.KEYWORD else 'DOMAIN-REGEX' if r.match_type == MatchType.REGEX else 'DOMAIN-WILDCARD'
+                    val = f"*.{r.normalized}" if r.match_type == MatchType.WILDCARD else r.normalized
+                    f.write(f"{pf}{typ},{val},{pol}\n")
+                    
+                for s, attr in f_a_ip_strs: 
+                    f.write(f"{pf}IP-CIDR{'6' if ':' in s else ''},{s},{_format_policy(attr, cfg.allow_policy)}\n")
+                for s, attr in f_d_ip_strs: 
+                    f.write(f"{pf}IP-CIDR{'6' if ':' in s else ''},{s},{_format_policy(attr, cfg.deny_policy)}\n")
+        else:
+            # 修復 2.3：JSON 輸出分支徹底剝離 attrs，保證產出的 Sing-box JSON 不含非標準字段
+            rbt = defaultdict(list)
+            for r in all_d:
+                if isinstance(r, GenericRule):
+                    rbt[(r.type, r.is_exclusion)].append(r.val)
+                    continue
+                typ = 'domain' if r.match_type == MatchType.EXACT else 'domain_suffix' if r.match_type == MatchType.SUFFIX else 'domain_keyword' if r.match_type == MatchType.KEYWORD else 'domain_regex' if r.match_type == MatchType.REGEX else 'domain_wildcard'
+                rbt[(typ, r.is_exclusion)].append(r.normalized)
+            for s, _ in f_a_ip_strs: rbt[('ip_cidr', False)].append(s)
+            for s, _ in f_d_ip_strs: rbt[('ip_cidr', True)].append(s)
+            
+            jr = [{'invert': True, **{t: v}} if excl else {t: v} for (t, excl), v in rbt.items()]
+                
+            fd = {"version": 1, "rules": jr}
+            if USE_ORJSON: out_p.write_bytes(orjson.dumps(fd, option=orjson.OPT_INDENT_2))
+            else: out_p.write_text(json.dumps(fd, indent=2, ensure_ascii=False), encoding='utf-8')
+
+        out_srs = None
+        if cfg.core_bin_path and cfg.validate_core_path() and cfg.output_format == 'json':
+            out_srs = out_p.with_suffix('.srs')
+            try: subprocess.run([str(Path(cfg.core_bin_path).expanduser().absolute()), "rule-set", "compile", "--output", str(out_srs), str(out_p)], check=True, capture_output=True)
+            except Exception: pass
+
+        sz = f"{(out_srs if out_srs and out_srs.exists() else out_p).stat().st_size / 1024:.1f}KB"
+        rcnt = len(all_d) + len(f_a_ip_strs) + len(f_d_ip_strs)
+        if issues: return (name, "⚠️", f"Issues: {len(issues)} | Processed: {rcnt}", sz)
+        return (name, "✅", f"Tiered Merged: {rcnt} rules", sz)
+
     except Exception as e:
-        logger.exception(f"[{name}] Error")
+        logger.exception(f"[{name}] Task Error")
         return (name, "❌", str(e)[:100], "0KB")
     finally:
-        if bdd_verifier:
-            try: bdd_verifier.clear()
-            except Exception: pass
-        if smt_verifier:
-            try: smt_verifier.clear_thread_state()
-            except Exception: pass
-        if temp_dir and temp_dir.exists():
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-def _check_module_version(mod_name: str, module: Any, min_ver: tuple[int, int, int]) -> None:
-    if module is None: return
-    try:
-        if mod_name == "z3": v_str = ".".join(map(str, module.get_version()[:3]))
-        else:
-            v_str = getattr(module, '__version__', getattr(module, 'version', '0.0.0'))
-            if isinstance(v_str, tuple): v_str = ".".join(map(str, v_str))
-        if parse_version(v_str) < min_ver:
-            logger.warning(f"{mod_name} version < {'.'.join(map(str, min_ver))} may have compatibility issues")
-    except Exception as e:
-        logger.warning(f"Failed to check version for {mod_name}: {e}")
-
-_SMT_WARNING_SHOWN = False
+        if td and td.exists(): shutil.rmtree(td, ignore_errors=True)
 
 def main() -> int:
-    sys.setrecursionlimit(2000)
-
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-    _check_module_version("orjson", orjson if USE_ORJSON else None, (3, 0, 0))
-    _check_module_version("msgpack", msgpack if USE_MSGPACK else None, (1, 0, 0))
-    _check_module_version("z3", z3 if HAS_Z3 else None, (4, 8, 0))
-    _check_module_version("requests", requests, (2, 25, 0))
-
-    logger.info("Rule Merger starting...")
-    if not USE_ORJSON: logger.info("orjson not available, using standard json (slower)")
-    if not USE_MSGPACK: logger.info("msgpack not available, using json for cache (slower)")
-
     cfg, cfg_path, tasks = DEFAULT_CONFIG, Path(DEFAULT_CONFIG.config_file), []
-    if not cfg_path.exists():
-        logger.warning(f"Config file not found: {cfg_path}, using default configuration (no tasks)")
-    else:
+    if cfg_path.exists():
         try:
-            with open(cfg_path, 'rb') as f:
-                data = orjson.loads(f.read()) if USE_ORJSON else json.loads(f.read().decode('utf-8'))
-            if not isinstance(data, dict):
-                logger.error(f"Config file is not a JSON object: {type(data).__name__}, using default configuration")
-                data = {}
+            data = orjson.loads(cfg_path.read_bytes()) if USE_ORJSON else json.loads(cfg_path.read_text('utf-8'))
             cfg = MergeConfig.from_dict(data.get('global', {}), cfg)
             tasks = data.get('merge_tasks', [])
-        except Exception as e:
-            logger.error(f"Failed to load config: {e}, using default configuration")
+        except Exception: pass
 
-    if not tasks:
-        logger.warning("No merge tasks in config, exiting")
-        return 0
-
-    task_names = [t.get('name') for t in tasks if isinstance(t, dict)]
-    if len(task_names) != len(set(task_names)):
-        logger.error("Duplicate task names found in configuration. Task names must be unique.")
-        return 1
-
-    global _SMT_WARNING_SHOWN
-    if not HAS_Z3 and cfg.enable_smt_verification:
-        logger.warning("z3 not installed, SMT verification disabled")
-    elif cfg.enable_smt_verification and HAS_Z3 and not _SMT_WARNING_SHOWN:
-        logger.warning("SMT verification with domain strings can be extremely slow. Consider disabling or adjusting smt_progressive_timeout.")
-        _SMT_WARNING_SHOWN = True
-
-    smt_verifier = SMTVerifier(cfg) if (cfg.enable_smt_verification and HAS_Z3) else None
-
-    executor = None
-    futures = []
-    interrupted = False
+    if not tasks: return 0
+    lin = SemanticLineageAnalyzer(Path(cfg.lineage_state_file), cfg.enable_lineage)
+    res, exe, intr, smt_executor = [], None, False, None
+    if HAS_Z3 and cfg.enable_smt_verification:
+        smt_ctx = mp.get_context('spawn') if hasattr(mp, 'get_context') else mp
+        smt_executor = concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=smt_ctx)
     try:
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(cfg.max_workers, len(tasks)), thread_name_prefix="Worker")
-        futures = [executor.submit(worker, t, cfg, smt_verifier) for t in tasks]
-        for f in concurrent.futures.as_completed(futures):
+        exe = concurrent.futures.ThreadPoolExecutor(max_workers=min(cfg.max_workers, len(tasks)))
+        futs = [exe.submit(worker, t, cfg, lin, smt_executor) for t in tasks]
+        for f in concurrent.futures.as_completed(futs):
+            try: res.append(f.result())
+            except Exception as e: logger.error(f"Execution Error: {e}")
+        if smf := os.getenv('GITHUB_STEP_SUMMARY'):
             try:
-                r = f.result()
-                logger.info(f"[{r[0]}] {r[1]} {r[2]} ({r[3]})")
-            except Exception as e:
-                logger.error(f"Task error: {e}", exc_info=True)
+                with open(smf, 'a', encoding='utf-8') as f:
+                    f.write("## Custom Merge Report\n| Task | Status | Details | Size |\n|---|---|---|---|\n")
+                    for r in sorted(res, key=lambda x: x[0]): f.write(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} |\n")
+            except OSError: pass
     except KeyboardInterrupt:
-        interrupted = True
-        logger.info("Interrupted")
-        for fu in futures: fu.cancel()
-        if executor: executor.shutdown(wait=False, cancel_futures=True)
+        intr = True
+        for fu in futs: fu.cancel()
+        if exe: exe.shutdown(wait=False, cancel_futures=True)
         return 130
     finally:
-        if executor and not interrupted:
-            executor.shutdown(wait=True)
-
-    return 0
+        if exe and not intr: exe.shutdown(wait=True)
+        if smt_executor: smt_executor.shutdown(wait=True)
+    return 1 if any(r[1] == "❌" for r in res) else 0
 
 if __name__ == '__main__':
     sys.exit(main())
