@@ -64,7 +64,7 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 60
+CACHE_VERSION = 61
 MAX_DOWNLOAD_RETRIES = 3
 MAX_DNS_CACHE = 1024
 MAX_BDD_DEPTH = 600
@@ -419,7 +419,6 @@ class DomainTrieOptimizer:
         parts = domain.split('.')
         for i, part in enumerate(reversed(parts)):
             if (node.types & (1 << MatchType.SUFFIX.value)): return True
-            # 修復 2.1：嚴格限制通配符不可覆蓋自身，必須 i < len(parts) - 1
             if (node.types & (1 << MatchType.WILDCARD.value)) and i < len(parts) - 1: return True
             if part not in node.children: return False
             node = node.children[part]
@@ -757,7 +756,7 @@ class ParsedRuleSet:
         self.compiled_regexes = []
         for r in d:
             if r.match_type == MatchType.REGEX:
-                try: self.compiled_regexes.append(re.compile(r.val, re.IGNORECASE))
+                try: self.compiled_regexes.append(re.compile(r.normalized, re.IGNORECASE)) # 已修正：將 val 改為 normalized
                 except re.error: pass
 
 class SourceSignature:
@@ -811,8 +810,8 @@ class SemanticLineageAnalyzer:
         p_gen = {(r.type, r.val, r.is_exclusion) for r in parent.generic_rules}
         if not c_gen.issubset(p_gen): return False
             
-        p_kws = [r.val for r in parent.domain_rules if r.match_type == MatchType.KEYWORD]
-        p_rex = {r.val for r in parent.domain_rules if r.match_type == MatchType.REGEX}
+        p_kws = [r.normalized for r in parent.domain_rules if r.match_type == MatchType.KEYWORD] # 已修正：將 val 改為 normalized
+        p_rex = {r.normalized for r in parent.domain_rules if r.match_type == MatchType.REGEX} # 已修正：將 val 改為 normalized
         
         for r in child.domain_rules:
             if r.match_type not in (MatchType.KEYWORD, MatchType.REGEX):
@@ -821,9 +820,9 @@ class SemanticLineageAnalyzer:
                 if not covered and parent.compiled_regexes: covered = any(pat.search(r.normalized) for pat in parent.compiled_regexes)
                 if not covered: return False
             elif r.match_type == MatchType.KEYWORD:
-                if not p_kws or not any(pk in r.val for pk in p_kws): return False
+                if not p_kws or not any(pk in r.normalized for pk in p_kws): return False # 已修正：將 val 改為 normalized
             elif r.match_type == MatchType.REGEX:
-                if r.val not in p_rex: return False
+                if r.normalized not in p_rex: return False # 已修正：將 val 改為 normalized
         return True
 
     def compute(self, parsed_srcs: List['ParsedRuleSet'], sigs: List[SourceSignature]) -> Set[int]:
@@ -989,7 +988,6 @@ class RuleParser:
                         mt = self.RMAP.get(k.upper(), k)
                         vals = v if isinstance(v, list) else [v]
                         
-                        # 修復：限制抽取，防止 JSON 根節點屬性污染
                         extra_attrs = [f"{ek}={ev}" for ek, ev in r.items() if ek not in ('invert', k, 'version', 'rules') and not isinstance(ev, (list, dict))]
                         attr_str = ",".join(extra_attrs)
                         
@@ -1084,7 +1082,7 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
                             s.headers.update({'Connection': 'close'})
                             s.mount('https://', HTTPAdapter(max_retries=Retry(total=1)))
                             s.mount('http://', HTTPAdapter(max_retries=Retry(total=1)))
-                            with s.get(curl, stream=True, timeout=(cfg.download_timeout_connect, cfg.download_timeout_read), allow_redirects=False, headers={"User-Agent": "StrictRuleMerger/13.5 Ultimate"}) as resp:
+                            with s.get(curl, stream=True, timeout=(cfg.download_timeout_connect, cfg.download_timeout_read), allow_redirects=False, headers={"User-Agent": "StrictRuleMerger/13.6 Ultimate"}) as resp:
                                 if resp.status_code in (301, 302, 303, 307, 308):
                                     curl = urljoin(curl, resp.headers.get('Location', ''))
                                     rc, redir = rc + 1, True
@@ -1191,7 +1189,6 @@ def run_verifications(parsed_sets: List[ParsedRuleSet], p_dom_allow: List[Domain
     if total_sources > 0: results['stats'] = {'total_sources': total_sources, 'passed': passed, 'pass_rate': passed / total_sources, 'avg_coverage': sum(coverages) / len(coverages)}
     return results
 
-# 修復 2.2：移除對大小寫的嚴格校驗，僅校驗已知的無策略修飾符
 def _format_policy(attrs: str, default_pol: str) -> str:
     if not attrs: return default_pol
     first_attr = attrs.split(',')[0].strip()
@@ -1327,7 +1324,6 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
                 for s, attr in f_d_ip_strs: 
                     f.write(f"{pf}IP-CIDR{'6' if ':' in s else ''},{s},{_format_policy(attr, cfg.deny_policy)}\n")
         else:
-            # 修復 2.3：JSON 輸出分支徹底剝離 attrs，保證產出的 Sing-box JSON 不含非標準字段
             rbt = defaultdict(list)
             for r in all_d:
                 if isinstance(r, GenericRule):
