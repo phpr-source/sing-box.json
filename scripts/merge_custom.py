@@ -64,7 +64,7 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 61
+CACHE_VERSION = 62
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 3
 MAX_DNS_CACHE = 1024
@@ -168,6 +168,7 @@ class MergeConfig:
 
     def validate_core_path(self) -> bool:
         if not self.core_bin_path: return False
+        if shutil.which(self.core_bin_path): return True
         p = Path(self.core_bin_path).expanduser().absolute()
         if not p.is_file(): return False
         try: os.chmod(p, p.stat().st_mode | 0o111)
@@ -227,8 +228,7 @@ class DomainRule:
             self.specificity_score = score
         else: self.specificity_score = specificity_score
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: 
-        return type(self) is type(o) and self._hash == o._hash and self.normalized == o.normalized and self.match_type == o.match_type and self.is_exclusion == o.is_exclusion
+    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash and self.normalized == o.normalized and self.match_type == o.match_type and self.is_exclusion == o.is_exclusion
 
 class IPCIDRRule:
     __slots__ = ('is_exclusion', 'version', 'start_int', 'end_int', 'prefixlen', '_hash', 'attrs')
@@ -238,8 +238,7 @@ class IPCIDRRule:
         self.attrs = attrs
         self._hash = hash((self.version, self.start_int, self.prefixlen, self.is_exclusion))
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: 
-        return type(self) is type(o) and self._hash == o._hash and self.start_int == o.start_int and self.prefixlen == o.prefixlen and self.is_exclusion == o.is_exclusion
+    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash and self.start_int == o.start_int and self.prefixlen == o.prefixlen and self.is_exclusion == o.is_exclusion
 
 class GenericRule:
     __slots__ = ('type', 'val', 'is_exclusion', 'attrs', '_hash')
@@ -247,8 +246,7 @@ class GenericRule:
         self.type, self.val, self.is_exclusion, self.attrs = typ, val, is_exclusion, attrs
         self._hash = hash((self.type, self.val, self.is_exclusion))
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: 
-        return type(self) is type(o) and self._hash == o._hash and self.type == o.type and self.val == o.val and self.is_exclusion == o.is_exclusion
+    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash and self.type == o.type and self.val == o.val and self.is_exclusion == o.is_exclusion
 
 RuleType = Union[DomainRule, IPCIDRRule, GenericRule]
 
@@ -995,7 +993,7 @@ class RuleParser:
                     is_excl = r.get('invert', False)
                     for k, v in r.items():
                         if k == 'invert': continue
-                        mt = self.RMAP.get(k.upper(), k)
+                        mt = self.RMAP.get(k.upper().replace('_', '-'), k)
                         vals = v if isinstance(v, list) else [v]
                         
                         extra_attrs = [f"{ek}={ev}" for ek, ev in r.items() if ek not in ('invert', k, 'version', 'rules') and not isinstance(ev, (list, dict))]
@@ -1128,7 +1126,8 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
         if url.endswith('.srs') and cfg.validate_core_path():
             srs, json_f = tmp, tmp.with_suffix('.json')
             try:
-                subprocess.run([str(Path(cfg.core_bin_path).expanduser().absolute()), "rule-set", "decompile", "--output", str(json_f), str(srs)], check=True, capture_output=True, timeout=cfg.compile_timeout_seconds)
+                cmd = shutil.which(cfg.core_bin_path) or str(Path(cfg.core_bin_path).expanduser().absolute())
+                subprocess.run([cmd, "rule-set", "decompile", "--output", str(json_f), str(srs)], check=True, capture_output=True, timeout=cfg.compile_timeout_seconds)
                 tmp = json_f
             except Exception: pass
             finally: srs.unlink(missing_ok=True)
@@ -1249,6 +1248,15 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             for s in sources:
                 if s.hash in sig_map: s.weight *= sig_map[s.hash].originality
                 
+        # >>> Weight Normalization Fix: 保障最優質的來源權重回復原設，避免全數低於 min_score <<<
+        if sources:
+            max_init_weight = max((s.initial_weight for s in sources), default=1.0)
+            max_current_weight = max((s.weight for s in sources), default=1.0)
+            if max_current_weight > 0 and max_init_weight > 0:
+                scale_factor = max_init_weight / max_current_weight
+                for s in sources:
+                    s.weight *= scale_factor
+                    
         if min_score_threshold <= 0:
             min_score_threshold = max(0.01, (sum(s.weight for s in sources) / len(sources)) * 0.35)
 
@@ -1353,7 +1361,9 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
         out_srs = None
         if cfg.core_bin_path and cfg.validate_core_path() and cfg.output_format == 'json':
             out_srs = out_p.with_suffix('.srs')
-            try: subprocess.run([str(Path(cfg.core_bin_path).expanduser().absolute()), "rule-set", "compile", "--output", str(out_srs), str(out_p)], check=True, capture_output=True)
+            try:
+                cmd = shutil.which(cfg.core_bin_path) or str(Path(cfg.core_bin_path).expanduser().absolute())
+                subprocess.run([cmd, "rule-set", "compile", "--output", str(out_srs), str(out_p)], check=True, capture_output=True)
             except Exception: pass
 
         sz = f"{(out_srs if out_srs and out_srs.exists() else out_p).stat().st_size / 1024:.1f}KB"
