@@ -227,7 +227,8 @@ class DomainRule:
             self.specificity_score = score
         else: self.specificity_score = specificity_score
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash and self.normalized == o.normalized
+    def __eq__(self, o: Any) -> bool: 
+        return type(self) is type(o) and self._hash == o._hash and self.normalized == o.normalized and self.match_type == o.match_type and self.is_exclusion == o.is_exclusion
 
 class IPCIDRRule:
     __slots__ = ('is_exclusion', 'version', 'start_int', 'end_int', 'prefixlen', '_hash', 'attrs')
@@ -237,7 +238,8 @@ class IPCIDRRule:
         self.attrs = attrs
         self._hash = hash((self.version, self.start_int, self.prefixlen, self.is_exclusion))
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash
+    def __eq__(self, o: Any) -> bool: 
+        return type(self) is type(o) and self._hash == o._hash and self.start_int == o.start_int and self.prefixlen == o.prefixlen and self.is_exclusion == o.is_exclusion
 
 class GenericRule:
     __slots__ = ('type', 'val', 'is_exclusion', 'attrs', '_hash')
@@ -245,7 +247,8 @@ class GenericRule:
         self.type, self.val, self.is_exclusion, self.attrs = typ, val, is_exclusion, attrs
         self._hash = hash((self.type, self.val, self.is_exclusion))
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash
+    def __eq__(self, o: Any) -> bool: 
+        return type(self) is type(o) and self._hash == o._hash and self.type == o.type and self.val == o.val and self.is_exclusion == o.is_exclusion
 
 RuleType = Union[DomainRule, IPCIDRRule, GenericRule]
 
@@ -876,7 +879,6 @@ class SemanticLineageAnalyzer:
             return red
 
 class DynamicReputationEngine:
-    # 修復: __init__ 正確接收三個傳入參數
     def __init__(self, sources: List['ParsedRuleSet'], cache: Optional[WALBackend], cfg: MergeConfig):
         self.sources = sources
         self.cache = cache
@@ -923,10 +925,6 @@ class DynamicReputationEngine:
             src.weight = src.initial_weight * smoothed_rep
             
             if self.cache: self.cache.put_batch({f"rep:{src.url}": {'rep': smoothed_rep, 'ts': time.time()}})
-                
-        max_w = max((s.weight for s in self.sources), default=1.0)
-        if max_w > 0: 
-            for s in self.sources: s.weight /= max_w
 
 class RuleParser:
     __slots__ = ('_cfg', '_dga')
