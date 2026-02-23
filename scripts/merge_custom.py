@@ -904,8 +904,6 @@ class DynamicReputationEngine:
             
             garbage_ratio = garbage / max(1, tot)
             
-            # 只有當來源品質極差 (垃圾規則>30%) 時才給予權重懲罰
-            # 確保乾淨清單能保持 1.0 的預設分數，防止與 min_score 發生浮點數衝突過濾
             if garbage_ratio > 0.3:
                 src.weight = src.initial_weight * math.exp(-5 * garbage_ratio)
             else:
@@ -1259,7 +1257,6 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
 
         allow_trie, deny_trie, others, ip_weights = DomainTrieOptimizer(), DomainTrieOptimizer(), set(), []
         for h, score in rule_scores.items():
-            # 增加 -0.001 精度容錯，以防止如 0.999 意外被 min_score_threshold=1.0 誤判踢除
             if score >= min_score_threshold - 0.001:
                 if h in dom_objs:
                     _, r = dom_objs[h]
@@ -1338,7 +1335,8 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
 
         out_srs = None
         if cfg.core_bin_path and cfg.validate_core_path() and cfg.output_format == 'json':
-            out_srs = out_p.with_suffix('.srs')
+            out_srs = cfg.output_dir / "merged-srs" / f"{name}.srs"
+            out_srs.parent.mkdir(parents=True, exist_ok=True)
             try: subprocess.run([str(Path(cfg.core_bin_path).expanduser().absolute()), "rule-set", "compile", "--output", str(out_srs), str(out_p)], check=True, capture_output=True)
             except Exception: pass
 
