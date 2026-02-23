@@ -64,7 +64,7 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 62
+CACHE_VERSION = 61
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 3
 MAX_DNS_CACHE = 1024
@@ -168,7 +168,6 @@ class MergeConfig:
 
     def validate_core_path(self) -> bool:
         if not self.core_bin_path: return False
-        if shutil.which(self.core_bin_path): return True
         p = Path(self.core_bin_path).expanduser().absolute()
         if not p.is_file(): return False
         try: os.chmod(p, p.stat().st_mode | 0o111)
@@ -228,7 +227,8 @@ class DomainRule:
             self.specificity_score = score
         else: self.specificity_score = specificity_score
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash and self.normalized == o.normalized and self.match_type == o.match_type and self.is_exclusion == o.is_exclusion
+    def __eq__(self, o: Any) -> bool: 
+        return type(self) is type(o) and self._hash == o._hash and self.normalized == o.normalized and self.match_type == o.match_type and self.is_exclusion == o.is_exclusion
 
 class IPCIDRRule:
     __slots__ = ('is_exclusion', 'version', 'start_int', 'end_int', 'prefixlen', '_hash', 'attrs')
@@ -238,7 +238,8 @@ class IPCIDRRule:
         self.attrs = attrs
         self._hash = hash((self.version, self.start_int, self.prefixlen, self.is_exclusion))
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash and self.start_int == o.start_int and self.prefixlen == o.prefixlen and self.is_exclusion == o.is_exclusion
+    def __eq__(self, o: Any) -> bool: 
+        return type(self) is type(o) and self._hash == o._hash and self.start_int == o.start_int and self.prefixlen == o.prefixlen and self.is_exclusion == o.is_exclusion
 
 class GenericRule:
     __slots__ = ('type', 'val', 'is_exclusion', 'attrs', '_hash')
@@ -246,7 +247,8 @@ class GenericRule:
         self.type, self.val, self.is_exclusion, self.attrs = typ, val, is_exclusion, attrs
         self._hash = hash((self.type, self.val, self.is_exclusion))
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash and self.type == o.type and self.val == o.val and self.is_exclusion == o.is_exclusion
+    def __eq__(self, o: Any) -> bool: 
+        return type(self) is type(o) and self._hash == o._hash and self.type == o.type and self.val == o.val and self.is_exclusion == o.is_exclusion
 
 RuleType = Union[DomainRule, IPCIDRRule, GenericRule]
 
@@ -883,25 +885,16 @@ class DynamicReputationEngine:
         self.cfg = cfg
 
     def evaluate(self) -> None:
-        N = len(self.sources)
-        if N == 0: return
-        freq = Counter()
-        for src in self.sources:
-            for r in src.domain_rules: freq[r._hash] += 1
-            for r in src.ip_rules: freq[r._hash] += 1
-            for r in src.generic_rules: freq[r._hash] += 1
-            
         for src in self.sources:
             tot = len(src.domain_rules) + len(src.ip_rules) + len(src.generic_rules)
             if tot == 0:
                 src.weight = 0.0
                 continue
+                
             garbage = 0
             for r in src.domain_rules:
                 if r.match_type in (MatchType.KEYWORD, MatchType.REGEX):
                     continue
-                if r.normalized.count('.') == 0: 
-                    pass 
                 if EntropyAssessor.assess(r.normalized) == EntropyLevel.DGA_CONFIRMED: 
                     garbage += 1
                     
@@ -909,20 +902,14 @@ class DynamicReputationEngine:
                 if r.version == 4 and r.prefixlen <= self.cfg.ipv4_garbage_threshold: garbage += 1
                 elif r.version == 6 and r.prefixlen <= self.cfg.ipv6_garbage_threshold: garbage += 1
             
-            align = sum(freq[r._hash] for r in itertools.chain(src.domain_rules, src.ip_rules, src.generic_rules)) / max(1, N * tot)
             garbage_ratio = garbage / max(1, tot)
             
-            h_rep = 1.0
-            if self.cache:
-                c_data = self.cache.get(f"rep:{src.url}")
-                if c_data and isinstance(c_data, dict):
-                    h_rep = c_data.get('rep', 1.0)
-            
-            fw = align * math.exp(-5 * garbage_ratio)
-            smoothed_rep = h_rep * 0.7 + fw * 0.3
-            src.weight = src.initial_weight * smoothed_rep
-            
-            if self.cache: self.cache.put_batch({f"rep:{src.url}": {'rep': smoothed_rep, 'ts': time.time()}})
+            # 只有當來源品質極差 (垃圾規則>30%) 時才給予權重懲罰
+            # 確保乾淨清單能保持 1.0 的預設分數，防止與 min_score 發生浮點數衝突過濾
+            if garbage_ratio > 0.3:
+                src.weight = src.initial_weight * math.exp(-5 * garbage_ratio)
+            else:
+                src.weight = src.initial_weight
 
 class RuleParser:
     __slots__ = ('_cfg', '_dga')
@@ -993,7 +980,7 @@ class RuleParser:
                     is_excl = r.get('invert', False)
                     for k, v in r.items():
                         if k == 'invert': continue
-                        mt = self.RMAP.get(k.upper().replace('_', '-'), k)
+                        mt = self.RMAP.get(k.upper(), k)
                         vals = v if isinstance(v, list) else [v]
                         
                         extra_attrs = [f"{ek}={ev}" for ek, ev in r.items() if ek not in ('invert', k, 'version', 'rules') and not isinstance(ev, (list, dict))]
@@ -1126,8 +1113,7 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
         if url.endswith('.srs') and cfg.validate_core_path():
             srs, json_f = tmp, tmp.with_suffix('.json')
             try:
-                cmd = shutil.which(cfg.core_bin_path) or str(Path(cfg.core_bin_path).expanduser().absolute())
-                subprocess.run([cmd, "rule-set", "decompile", "--output", str(json_f), str(srs)], check=True, capture_output=True, timeout=cfg.compile_timeout_seconds)
+                subprocess.run([str(Path(cfg.core_bin_path).expanduser().absolute()), "rule-set", "decompile", "--output", str(json_f), str(srs)], check=True, capture_output=True, timeout=cfg.compile_timeout_seconds)
                 tmp = json_f
             except Exception: pass
             finally: srs.unlink(missing_ok=True)
@@ -1248,15 +1234,6 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             for s in sources:
                 if s.hash in sig_map: s.weight *= sig_map[s.hash].originality
                 
-        # >>> Weight Normalization Fix: 保障最優質的來源權重回復原設，避免全數低於 min_score <<<
-        if sources:
-            max_init_weight = max((s.initial_weight for s in sources), default=1.0)
-            max_current_weight = max((s.weight for s in sources), default=1.0)
-            if max_current_weight > 0 and max_init_weight > 0:
-                scale_factor = max_init_weight / max_current_weight
-                for s in sources:
-                    s.weight *= scale_factor
-                    
         if min_score_threshold <= 0:
             min_score_threshold = max(0.01, (sum(s.weight for s in sources) / len(sources)) * 0.35)
 
@@ -1282,7 +1259,8 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
 
         allow_trie, deny_trie, others, ip_weights = DomainTrieOptimizer(), DomainTrieOptimizer(), set(), []
         for h, score in rule_scores.items():
-            if score >= min_score_threshold:
+            # 增加 -0.001 精度容錯，以防止如 0.999 意外被 min_score_threshold=1.0 誤判踢除
+            if score >= min_score_threshold - 0.001:
                 if h in dom_objs:
                     _, r = dom_objs[h]
                     if r.match_type in (MatchType.KEYWORD, MatchType.REGEX): others.add(r)
@@ -1295,8 +1273,8 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             p_dom_a = allow_trie.optimize(False)
             p_dom_d = deny_trie.optimize(True)
         else:
-            p_dom_a = [r for h, (w, r) in dom_objs.items() if rule_scores[h] >= min_score_threshold and not r.is_exclusion]
-            p_dom_d = [r for h, (w, r) in dom_objs.items() if rule_scores[h] >= min_score_threshold and r.is_exclusion]
+            p_dom_a = [r for h, (w, r) in dom_objs.items() if rule_scores[h] >= min_score_threshold - 0.001 and not r.is_exclusion]
+            p_dom_d = [r for h, (w, r) in dom_objs.items() if rule_scores[h] >= min_score_threshold - 0.001 and r.is_exclusion]
             
         v4_a_ivs, v4_d_ivs = IntervalMerger.resolve_weighted_ips(ip_weights, 4)
         v6_a_ivs, v6_d_ivs = IntervalMerger.resolve_weighted_ips(ip_weights, 6)
@@ -1361,9 +1339,7 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
         out_srs = None
         if cfg.core_bin_path and cfg.validate_core_path() and cfg.output_format == 'json':
             out_srs = out_p.with_suffix('.srs')
-            try:
-                cmd = shutil.which(cfg.core_bin_path) or str(Path(cfg.core_bin_path).expanduser().absolute())
-                subprocess.run([cmd, "rule-set", "compile", "--output", str(out_srs), str(out_p)], check=True, capture_output=True)
+            try: subprocess.run([str(Path(cfg.core_bin_path).expanduser().absolute()), "rule-set", "compile", "--output", str(out_srs), str(out_p)], check=True, capture_output=True)
             except Exception: pass
 
         sz = f"{(out_srs if out_srs and out_srs.exists() else out_p).stat().st_size / 1024:.1f}KB"
