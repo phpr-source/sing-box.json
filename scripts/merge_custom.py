@@ -12,6 +12,7 @@ import logging
 import math
 import multiprocessing as mp
 import os
+import random
 import re
 import shutil
 import socket
@@ -54,19 +55,16 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 try: import orjson; USE_ORJSON = True
 except ImportError: USE_ORJSON = False
-
 try: import msgpack; USE_MSGPACK = True
 except ImportError: USE_MSGPACK = False
-
 try: from blake3 import blake3; USE_BLAKE3 = True
 except ImportError: USE_BLAKE3 = False
-
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 62
+CACHE_VERSION = 63
 TARGET_FORMAT_VERSION = 4
-MAX_DOWNLOAD_RETRIES = 3
+MAX_DOWNLOAD_RETRIES = 4
 MAX_DNS_CACHE = 1024
 MAX_BDD_DEPTH = 600
 MAX_IP_RANGE_AGGREGATION_V4 = 2**24
@@ -118,7 +116,7 @@ class MergeConfig:
         self.max_concurrent_downloads = max(10, int(kwargs.get('max_concurrent_downloads', 0)) or self.max_workers)
         self.max_download_size = int(kwargs.get('max_download_size', 150 * 1024 * 1024))
         self.url_allow_private_ips = bool(kwargs.get('url_allow_private_ips', False))
-        self.download_timeout_connect = int(kwargs.get('download_timeout_connect', 10))
+        self.download_timeout_connect = int(kwargs.get('download_timeout_connect', 15))
         self.download_timeout_read = int(kwargs.get('download_timeout_read', 60))
         self.verify_ssl = bool(kwargs.get('verify_ssl', True))
         self.enable_ipv6 = bool(kwargs.get('enable_ipv6', True))
@@ -177,16 +175,10 @@ class MergeConfig:
 DEFAULT_CONFIG = MergeConfig()
 
 class MatchType(IntEnum):
-    EXACT = 1
-    SUFFIX = 2
-    WILDCARD = 3
-    KEYWORD = 4
-    REGEX = 5
+    EXACT = 1; SUFFIX = 2; WILDCARD = 3; KEYWORD = 4; REGEX = 5
 
 class EntropyLevel(IntEnum):
-    SAFE = 1
-    SUSPICIOUS = 2
-    DGA_CONFIRMED = 3
+    SAFE = 1; SUSPICIOUS = 2; DGA_CONFIRMED = 3
 
 class EntropyAssessor:
     @staticmethod
@@ -222,8 +214,7 @@ class DomainRule:
             self.specificity_score = score
         else: self.specificity_score = specificity_score
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: 
-        return type(self) is type(o) and self._hash == o._hash and self.normalized == o.normalized and self.match_type == o.match_type and self.is_exclusion == o.is_exclusion
+    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash and self.normalized == o.normalized and self.match_type == o.match_type and self.is_exclusion == o.is_exclusion
 
 class IPCIDRRule:
     __slots__ = ('is_exclusion', 'version', 'start_int', 'end_int', 'prefixlen', '_hash', 'attrs')
@@ -232,8 +223,7 @@ class IPCIDRRule:
         self.start_int, self.end_int, self.prefixlen, self.attrs = start_int, end_int, prefixlen, attrs
         self._hash = hash((self.version, self.start_int, self.prefixlen, self.is_exclusion))
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: 
-        return type(self) is type(o) and self._hash == o._hash and self.start_int == o.start_int and self.prefixlen == o.prefixlen and self.is_exclusion == o.is_exclusion
+    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash and self.start_int == o.start_int and self.prefixlen == o.prefixlen and self.is_exclusion == o.is_exclusion
 
 class GenericRule:
     __slots__ = ('type', 'val', 'is_exclusion', 'attrs', '_hash')
@@ -241,8 +231,7 @@ class GenericRule:
         self.type, self.val, self.is_exclusion, self.attrs = typ, val, is_exclusion, attrs
         self._hash = hash((self.type, self.val, self.is_exclusion))
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: 
-        return type(self) is type(o) and self._hash == o._hash and self.type == o.type and self.val == o.val and self.is_exclusion == o.is_exclusion
+    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash and self.type == o.type and self.val == o.val and self.is_exclusion == o.is_exclusion
 
 RuleType = Union[DomainRule, IPCIDRRule, GenericRule]
 
@@ -283,10 +272,8 @@ class IntervalMerger:
             if r.version != version: continue
             rw = int(round(w, 5) * 100000)
             events.extend([(r.start_int, 1, rw, r.is_exclusion, r.attrs, i), (r.end_int + 1, -1, rw, r.is_exclusion, r.attrs, i)])
-
         events.sort(key=lambda x: (x[0], -x[1]))
-        active_a, active_d = {}, {}
-        acc_a, acc_d = [], []
+        active_a, active_d, acc_a, acc_d = {}, {}, [], []
         i_idx, n, prev_x = 0, len(events), -1
 
         while i_idx < n:
@@ -300,7 +287,6 @@ class IntervalMerger:
                 elif max_a >= 0 and max_a > max_d:
                     attr = next((v[1] for k, v in sorted(active_a.items()) if v[0] == max_a), "")
                     acc_a.append((prev_x, x - 1, attr))
-
             while i_idx < n and events[i_idx][0] == x:
                 _, op, rw, is_excl, attrs, r_id = events[i_idx]
                 tgt = active_d if is_excl else active_a
@@ -317,7 +303,6 @@ class IntervalMerger:
                 if s <= le + 1 and attr == lattr: res[-1] = (ls, max(le, e), attr)
                 else: res.append((s, e, attr))
             return res
-
         return _merge_adj(acc_a), _merge_adj(acc_d)
 
     @staticmethod
@@ -354,8 +339,7 @@ class IntervalMerger:
                 try: exact_networks.extend((n, attr) for n in ipaddress.summarize_address_range(fn(s), fn(e)))
                 except (ValueError, TypeError): exact_networks.extend((n, attr) for n in _fast_cidr_split(s, e))
                     
-        if len(exact_networks) <= config.max_cidr_fragmentation: 
-            return [(str(n), a) for n, a in exact_networks]
+        if len(exact_networks) <= config.max_cidr_fragmentation: return [(str(n), a) for n, a in exact_networks]
             
         if not config.enable_cidr_approximation:
             if config.fallback_on_fragmentation:
@@ -396,9 +380,7 @@ class TrieNode:
         self.types = 0
 
 class DomainTrieOptimizer:
-    def __init__(self):
-        self.root = TrieNode()
-        
+    def __init__(self): self.root = TrieNode()
     def insert(self, rule: DomainRule) -> None:
         node = self.root
         for part in reversed(rule.normalized.split('.')):
@@ -423,8 +405,7 @@ class DomainTrieOptimizer:
             if parent_has_suffix: return
             cur = '.'.join(reversed(path))
             if is_suf:
-                res.append(DomainRule(MatchType.SUFFIX, cur, is_exclusion))
-                return
+                res.append(DomainRule(MatchType.SUFFIX, cur, is_exclusion)); return
             if node.types & (1 << MatchType.WILDCARD.value): res.append(DomainRule(MatchType.WILDCARD, cur, is_exclusion))
             if node.types & (1 << MatchType.EXACT.value): res.append(DomainRule(MatchType.EXACT, cur, is_exclusion))
             for lbl, ch in node.children.items():
@@ -580,8 +561,7 @@ class BDDRuleVerifier:
                 cr = self.eng.sat_ratio(c_bdd)
                 if cr == 0.0: return True, 1.0
                 return False, max(0.0, min(1.0, 1.0 - (self.eng.sat_ratio(diff) / cr)))
-            except BDDDepthExceededError:
-                return False, 0.0
+            except BDDDepthExceededError: return False, 0.0
         v4_pa = [r for r in pa if r.version==4]; v6_pa = [r for r in pa if r.version==6]
         v4_pd = [r for r in pd if r.version==4]; v6_pd = [r for r in pd if r.version==6]
         v4_ca = [r for r in ca if r.version==4]; v6_ca = [r for r in ca if r.version==6]
@@ -612,8 +592,7 @@ def _z3_worker(p_allow, p_deny, c_rules, is_deny, ver, timeouts):
             if res == z3.unsat: return True, 1.0, "unsat"
             elif res == z3.sat: return False, 0.0, "sat"
         return False, 0.0, "unknown"
-    except Exception as e:
-        return False, 0.0, f"err:{e}"
+    except Exception as e: return False, 0.0, f"err:{e}"
 
 class ProcessIsolatedSMTVerifier:
     def __init__(self, cfg: MergeConfig):
@@ -848,7 +827,6 @@ class SemanticLineageAnalyzer:
             return red
 
 class AdvancedTrustEvaluator:
-    """Implement fully dynamic weight consensus assessment."""
     def __init__(self, sources: List['ParsedRuleSet'], cache: Optional[WALBackend], cfg: MergeConfig):
         self.sources = sources
         self.cache = cache
@@ -856,8 +834,6 @@ class AdvancedTrustEvaluator:
 
     def evaluate(self) -> None:
         explicit_sources = [s for s in self.sources if s.is_explicit_weight]
-        implicit_sources = [s for s in self.sources if not s.is_explicit_weight]
-        
         trusted_rule_hashes = set()
         if explicit_sources:
             avg_explicit = sum(s.initial_weight for s in explicit_sources) / len(explicit_sources)
@@ -999,8 +975,7 @@ def resolve_hostname(hostname: str) -> List[str]:
             if time.time() - ts < 300:
                 _DNS_CACHE.move_to_end(hostname); return ips
             del _DNS_CACHE[hostname]
-        if hostname in _DNS_PENDING:
-            ev, wait = _DNS_PENDING[hostname], True
+        if hostname in _DNS_PENDING: ev, wait = _DNS_PENDING[hostname], True
         else:
             ev, wait = threading.Event(), False
             _DNS_PENDING[hostname] = ev
@@ -1035,10 +1010,10 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
             gens = tuple(GenericRule(r['t'], r['v'], r.get('i', False), r.get('attrs', '')) for r in l.get('g', []))
             return ParsedRuleSet(l['url'], doms, ips, gens, l['ts'], l['hash']), None
 
-    for _ in range(MAX_DOWNLOAD_RETRIES):
-        rc, curl, vis, tmp, ok = 0, url, set(), None, False
+    for rc in range(MAX_DOWNLOAD_RETRIES):
+        curl, vis, tmp, ok = url, set(), None, False
         try:
-            while rc < 5:
+            while len(vis) < 5:
                 if curl in vis: break
                 vis.add(curl)
                 p = urlparse(curl)
@@ -1054,10 +1029,10 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
                             s.headers.update({'Connection': 'close'})
                             s.mount('https://', HTTPAdapter(max_retries=Retry(total=1)))
                             s.mount('http://', HTTPAdapter(max_retries=Retry(total=1)))
-                            with s.get(curl, stream=True, timeout=(cfg.download_timeout_connect, cfg.download_timeout_read), allow_redirects=False, headers={"User-Agent": "StrictRuleMerger/13.7 Ultimate"}) as resp:
+                            with s.get(curl, stream=True, timeout=(cfg.download_timeout_connect, cfg.download_timeout_read), allow_redirects=False, headers={"User-Agent": "StrictRuleMerger/13.8 Ultimate"}) as resp:
                                 if resp.status_code in (301, 302, 303, 307, 308):
                                     curl = urljoin(curl, resp.headers.get('Location', ''))
-                                    rc, redir = rc + 1, True
+                                    redir = True
                                     break
                                 resp.raise_for_status()
                                 fd, pstr = tempfile.mkstemp(suffix='.tmp', dir=str(td))
@@ -1079,28 +1054,31 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
                 if redir: continue
                 break
         finally: pass
-        if not ok or not tmp: continue
+        if ok and tmp: break
+        if rc < MAX_DOWNLOAD_RETRIES - 1: time.sleep(random.uniform(0.5, 2.0) * (2 ** rc))
         
-        srs = None
-        if url.endswith('.srs') and cfg.validate_core_path():
-            srs, json_f = tmp, tmp.with_suffix('.json')
-            try:
-                subprocess.run([str(Path(cfg.core_bin_path).expanduser().absolute()), "rule-set", "decompile", "--output", str(json_f), str(srs)], check=True, capture_output=True, timeout=cfg.compile_timeout_seconds)
-                tmp = json_f
-            except Exception: pass
-            finally: srs.unlink(missing_ok=True)
-            
+    if not ok or not tmp: return None, None
+        
+    srs = None
+    if url.endswith('.srs') and cfg.validate_core_path():
+        srs, json_f = tmp, tmp.with_suffix('.json')
         try:
-            ps = parser.parse(tmp, url)
-            ts = None
-            if cache and (ps.domain_rules or ps.ip_rules or ps.generic_rules):
-                d_rules = [{'match_type': r.match_type.value, 'normalized': r.normalized, 'is_exclusion': r.is_exclusion, 'specificity_score': r.specificity_score, 'attrs': r.attrs} for r in ps.domain_rules]
-                i_rules = [{'s': r.start_int, 'e': r.end_int, 'p': r.prefixlen, 'v': r.version, 'i': r.is_exclusion, 'attrs': r.attrs} for r in ps.ip_rules]
-                g_rules = [{'t': r.type, 'v': r.val, 'i': r.is_exclusion, 'attrs': r.attrs} for r in ps.generic_rules]
-                ts = {ckey: {'url': ps.url, 'ts': ps.ts, 'hash': ps.hash, 'd': d_rules, 'i': i_rules, 'g': g_rules}}
-            return ps, ts
+            subprocess.run([str(Path(cfg.core_bin_path).expanduser().absolute()), "rule-set", "decompile", "--output", str(json_f), str(srs)], check=True, capture_output=True, timeout=cfg.compile_timeout_seconds)
+            tmp = json_f
         except Exception: pass
-        finally: tmp.unlink(missing_ok=True)
+        finally: srs.unlink(missing_ok=True)
+            
+    try:
+        ps = parser.parse(tmp, url)
+        ts = None
+        if cache and (ps.domain_rules or ps.ip_rules or ps.generic_rules):
+            d_rules = [{'match_type': r.match_type.value, 'normalized': r.normalized, 'is_exclusion': r.is_exclusion, 'specificity_score': r.specificity_score, 'attrs': r.attrs} for r in ps.domain_rules]
+            i_rules = [{'s': r.start_int, 'e': r.end_int, 'p': r.prefixlen, 'v': r.version, 'i': r.is_exclusion, 'attrs': r.attrs} for r in ps.ip_rules]
+            g_rules = [{'t': r.type, 'v': r.val, 'i': r.is_exclusion, 'attrs': r.attrs} for r in ps.generic_rules]
+            ts = {ckey: {'url': ps.url, 'ts': ps.ts, 'hash': ps.hash, 'd': d_rules, 'i': i_rules, 'g': g_rules}}
+        return ps, ts
+    except Exception: pass
+    finally: tmp.unlink(missing_ok=True)
     return None, None
 
 def _verify_rule_group(name: str, bdd: Optional[BDDRuleVerifier], smt_executor: Optional[concurrent.futures.ProcessPoolExecutor], smt_cfg: Optional[MergeConfig], cov: CoverageChecker, 
@@ -1161,9 +1139,10 @@ def _format_policy(attrs: str, default_pol: str) -> str:
     if first_attr.upper() in ('NO-RESOLVE', 'EXTENDED-MATCHING'): return f"{default_pol},{attrs}"
     return attrs
 
-def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[SemanticLineageAnalyzer] = None, smt_executor: Optional[concurrent.futures.ProcessPoolExecutor] = None) -> Tuple[str, str, str, str]:
+def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[SemanticLineageAnalyzer] = None, smt_executor: Optional[concurrent.futures.ProcessPoolExecutor] = None) -> Tuple[str, str, str, str, float]:
+    start_time = time.time()
     name = task.get('name', '')
-    if not name or not RE_TASK_NAME.match(name): return (name, "❌", "Invalid name", "0KB")
+    if not name or not RE_TASK_NAME.match(name): return (name, "❌", "Invalid name", "0KB", 0.0)
     td, cache = None, None
     try:
         td = Path(tempfile.mkdtemp(prefix=f"sb_merge_{name}_"))
@@ -1180,7 +1159,7 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             except OSError: pass
 
         explicit_weights = [float(s['weight']) for s in task.get('sources', []) if isinstance(s, dict) and 'weight' in s]
-        default_weight = sum(explicit_weights) / len(explicit_weights) if explicit_weights else 1.0
+        default_weight = 1.0 
 
         parser, sources, upd = RuleParser(cfg), [], {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=cfg.max_concurrent_downloads) as ex:
@@ -1201,7 +1180,7 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
                     sources.append(ps)
                     upd.update(u or {})
         if cache and upd: cache.put_batch(upd)
-        if not sources: return (name, "⚠️", "No valid sources", "0KB")
+        if not sources: return (name, "⚠️", "No valid sources", "0KB", time.time() - start_time)
 
         if cfg.enable_reputation: AdvancedTrustEvaluator(sources, cache, cfg).evaluate()
         if lin:
@@ -1212,7 +1191,8 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
                 if s.hash in sig_map: s.weight *= sig_map[s.hash].originality
                 
         if min_score_threshold <= 0:
-            min_score_threshold = max(0.01, (sum(s.weight for s in sources) / len(sources)) * 0.35)
+            if explicit_weights: min_score_threshold = max(0.01, min(explicit_weights) * 0.7)
+            else: min_score_threshold = max(0.01, (sum(s.weight for s in sources) / len(sources)) * 0.35)
 
         rule_scores, dom_objs, ip_objs, gen_objs = defaultdict(float), {}, {}, {}
         for src in sources:
@@ -1242,8 +1222,7 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
                     if r.match_type in (MatchType.KEYWORD, MatchType.REGEX): others.add(r)
                     else: (deny_trie if r.is_exclusion else allow_trie).insert(r)
                 elif h in ip_objs: ip_weights.append((score, ip_objs[h]))
-                elif h in gen_objs: 
-                    others.add(gen_objs[h][1])
+                elif h in gen_objs: others.add(gen_objs[h][1])
                 
         if cfg.enable_trie_compression:
             p_dom_a = allow_trie.optimize(False)
@@ -1260,7 +1239,7 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             f_d_ip_strs = IntervalMerger.to_cidrs(v4_d_ivs, 4, cfg) + IntervalMerger.to_cidrs(v6_d_ivs, 6, cfg)
         except CIDRFragmentationError as e: 
             logger.error(f"[{name}] Task Failed: {e}")
-            return (name, "❌", "CIDR Limit Exceeded & Fallback Failed", "0KB")
+            return (name, "❌", "CIDR Limit Exceeded & Fallback Failed", "0KB", time.time() - start_time)
         
         issues = []
         if cfg.enable_bdd_verification or (HAS_Z3 and cfg.enable_smt_verification):
@@ -1321,12 +1300,12 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
 
         sz = f"{(out_srs if out_srs and out_srs.exists() else out_p).stat().st_size / 1024:.1f}KB"
         rcnt = len(all_d) + len(f_a_ip_strs) + len(f_d_ip_strs)
-        if issues: return (name, "⚠️", f"Issues: {len(issues)} | Processed: {rcnt}", sz)
-        return (name, "✅", f"Tiered Merged: {rcnt} rules", sz)
+        if issues: return (name, "⚠️", f"Issues: {len(issues)} | Processed: {rcnt}", sz, time.time() - start_time)
+        return (name, "✅", f"Tiered Merged: {rcnt} rules", sz, time.time() - start_time)
 
     except Exception as e:
         logger.exception(f"[{name}] Task Error")
-        return (name, "❌", str(e)[:100], "0KB")
+        return (name, "❌", str(e)[:100], "0KB", time.time() - start_time)
     finally:
         if td and td.exists(): shutil.rmtree(td, ignore_errors=True)
 
@@ -1354,8 +1333,8 @@ def main() -> int:
         if smf := os.getenv('GITHUB_STEP_SUMMARY'):
             try:
                 with open(smf, 'a', encoding='utf-8') as f:
-                    f.write("## Custom Merge Report\n| Task | Status | Details | Size |\n|---|---|---|---|\n")
-                    for r in sorted(res, key=lambda x: x[0]): f.write(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} |\n")
+                    f.write("## Custom Merge Report\n| Task | Status | Details | Size | Time |\n|---|---|---|---|---|\n")
+                    for r in sorted(res, key=lambda x: x[0]): f.write(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[4]:.1f}s |\n")
             except OSError: pass
     except KeyboardInterrupt:
         intr = True
