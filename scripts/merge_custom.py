@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+import zlib
 from collections import defaultdict, OrderedDict, Counter, deque
 from enum import IntEnum
 from pathlib import Path
@@ -62,7 +63,7 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 63
+CACHE_VERSION = 64
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 4
 MAX_DNS_CACHE = 1024
@@ -671,7 +672,8 @@ class WALBackend:
             try:
                 raw = self.db_path.read_bytes()
                 if len(raw) > 24 and hashlib.blake2b(raw[24:], digest_size=16).digest() == raw[:16]:
-                    db = raw[24:]
+                    try: db = zlib.decompress(raw[24:])
+                    except zlib.error: db = raw[24:]
                     if USE_MSGPACK: self.data = msgpack.unpackb(db, raw=False)
                     elif USE_ORJSON: self.data = orjson.loads(db)
                     else: self.data = json.loads(db.decode('utf-8'))
@@ -690,11 +692,12 @@ class WALBackend:
                 if USE_MSGPACK: b = msgpack.packb(self.data, use_bin_type=True)
                 elif USE_ORJSON: b = orjson.dumps(self.data)
                 else: b = json.dumps(self.data, separators=(',', ':')).encode('utf-8')
+                cb = zlib.compress(b, level=6)
                 tp = Path(f"{self.db_path}.tmp")
                 with open(tp, 'wb') as f:
-                    f.write(hashlib.blake2b(b, digest_size=16).digest())
+                    f.write(hashlib.blake2b(cb, digest_size=16).digest())
                     f.write(struct.pack('>d', time.time()))
-                    f.write(b)
+                    f.write(cb)
                     f.flush()
                     os.fsync(f.fileno())
                 tp.replace(self.db_path)
@@ -1152,9 +1155,13 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
         min_score_threshold = float(task.get('min_score', 0.0))
         
         if cfg.enable_cache:
-            cdir = Path.cwd() / ".cache" / "rule_merger" / name
+            cache_root = Path.cwd() / ".cache"
+            cdir = cache_root / "rule_merger" / name
             try:
                 cdir.mkdir(parents=True, exist_ok=True)
+                ignore_file = cache_root / ".gitignore"
+                if not ignore_file.exists():
+                    ignore_file.write_text("*\n")
                 cache = WALBackend(cdir / "source_cache", cfg)
             except OSError: pass
 
