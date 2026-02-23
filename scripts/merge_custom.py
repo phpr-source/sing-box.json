@@ -65,7 +65,7 @@ try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
 CACHE_VERSION = 61
-TARGET_FORMAT_VERSION = 4  # 修復: 恢復舊版中依賴的目標格式版本號
+TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 3
 MAX_DNS_CACHE = 1024
 MAX_BDD_DEPTH = 600
@@ -193,13 +193,12 @@ class EntropyAssessor:
     def assess(domain: str) -> EntropyLevel:
         if RE_HASH_LIKE.search(domain): return EntropyLevel.DGA_CONFIRMED
         parts = domain.split('.')
-        # 修復: 防禦對短後綴或關鍵字域名的誤殺
         if len(parts) == 1 and len(parts[0]) < 2: return EntropyLevel.DGA_CONFIRMED
         
         max_ent, max_dig, min_vow = 0.0, 0.0, 1.0
         vowels = set('aeiou')
         for p in parts:
-            if len(p) < 5: continue # 修復: 放寬對短字符段的限制，不計算短段的熵值
+            if len(p) < 5: continue 
             length = len(p)
             freq = Counter(p)
             ent = -sum((c / length) * math.log2(c / length) for c in freq.values())
@@ -760,7 +759,7 @@ class ParsedRuleSet:
         self.compiled_regexes = []
         for r in d:
             if r.match_type == MatchType.REGEX:
-                try: self.compiled_regexes.append(re.compile(r.normalized, re.IGNORECASE)) # 修復: 已統一為 normalized
+                try: self.compiled_regexes.append(re.compile(r.normalized, re.IGNORECASE))
                 except re.error: pass
 
 class SourceSignature:
@@ -814,8 +813,8 @@ class SemanticLineageAnalyzer:
         p_gen = {(r.type, r.val, r.is_exclusion) for r in parent.generic_rules}
         if not c_gen.issubset(p_gen): return False
             
-        p_kws = [r.normalized for r in parent.domain_rules if r.match_type == MatchType.KEYWORD] # 修復: 已統一為 normalized
-        p_rex = {r.normalized for r in parent.domain_rules if r.match_type == MatchType.REGEX} # 修復: 已統一為 normalized
+        p_kws = [r.normalized for r in parent.domain_rules if r.match_type == MatchType.KEYWORD]
+        p_rex = {r.normalized for r in parent.domain_rules if r.match_type == MatchType.REGEX}
         
         for r in child.domain_rules:
             if r.match_type not in (MatchType.KEYWORD, MatchType.REGEX):
@@ -877,8 +876,11 @@ class SemanticLineageAnalyzer:
             return red
 
 class DynamicReputationEngine:
+    # 修復: __init__ 正確接收三個傳入參數
     def __init__(self, sources: List['ParsedRuleSet'], cache: Optional[WALBackend], cfg: MergeConfig):
-        self.sources, self.cache, self.cfg = sources
+        self.sources = sources
+        self.cache = cache
+        self.cfg = cfg
 
     def evaluate(self) -> None:
         N = len(self.sources)
@@ -896,11 +898,10 @@ class DynamicReputationEngine:
                 continue
             garbage = 0
             for r in src.domain_rules:
-                # 修復：關鍵字和正則表達式由於不帶 '.' 被誤判為垃圾。放寬條件。
                 if r.match_type in (MatchType.KEYWORD, MatchType.REGEX):
                     continue
                 if r.normalized.count('.') == 0: 
-                    pass # 不對只有一個單詞的 domain (如 intranet / localhost) 做嚴重扣分
+                    pass 
                 if EntropyAssessor.assess(r.normalized) == EntropyLevel.DGA_CONFIRMED: 
                     garbage += 1
                     
@@ -1019,7 +1020,6 @@ class RuleParser:
                 else: 
                     _add('domain', v, is_excl, "")
                 
-        # 修復：上次被截斷的文件 IO 與 Stream 解析邏輯已完整恢復
         try:
             if isinstance(src, Path):
                 with open(src, 'r', encoding='utf-8-sig', errors='ignore') as f: 
@@ -1348,7 +1348,6 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             
             jr = [{'invert': True, **{t: v}} if excl else {t: v} for (t, excl), v in rbt.items()]
                 
-            # 修復: TARGET_FORMAT_VERSION 將使用正確的 sing-box 格式版本
             fd = {"version": TARGET_FORMAT_VERSION, "rules": jr}
             if USE_ORJSON: out_p.write_bytes(orjson.dumps(fd, option=orjson.OPT_INDENT_2))
             else: out_p.write_text(json.dumps(fd, indent=2, ensure_ascii=False), encoding='utf-8')
