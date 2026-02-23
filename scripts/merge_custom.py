@@ -64,7 +64,7 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 61
+CACHE_VERSION = 62
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 3
 MAX_DNS_CACHE = 1024
@@ -194,7 +194,6 @@ class EntropyAssessor:
         if RE_HASH_LIKE.search(domain): return EntropyLevel.DGA_CONFIRMED
         parts = domain.split('.')
         if len(parts) == 1 and len(parts[0]) < 2: return EntropyLevel.DGA_CONFIRMED
-        
         max_ent, max_dig, min_vow = 0.0, 0.0, 1.0
         vowels = set('aeiou')
         for p in parts:
@@ -206,7 +205,6 @@ class EntropyAssessor:
             max_ent = max(max_ent, n_ent)
             max_dig = max(max_dig, sum(c.isdigit() for c in p) / length)
             min_vow = min(min_vow, sum(1 for c in p if c in vowels) / length)
-            
         if max_ent > 0.95 and max_dig > 0.3 and min_vow < 0.1: return EntropyLevel.DGA_CONFIRMED
         if max_ent > 0.90 and max_dig > 0.2 and min_vow < 0.15: return EntropyLevel.SUSPICIOUS
         return EntropyLevel.SAFE
@@ -214,10 +212,7 @@ class EntropyAssessor:
 class DomainRule:
     __slots__ = ('match_type', 'normalized', 'is_exclusion', '_hash', 'specificity_score', 'attrs')
     def __init__(self, match_type: MatchType, normalized: str, is_exclusion: bool = False, specificity_score: int = 0, attrs: str = ""):
-        self.match_type = match_type
-        self.normalized = normalized
-        self.is_exclusion = is_exclusion
-        self.attrs = attrs
+        self.match_type, self.normalized, self.is_exclusion, self.attrs = match_type, normalized, is_exclusion, attrs
         self._hash = hash((self.normalized, self.match_type.value, self.is_exclusion))
         if specificity_score == 0:
             score = self.normalized.count('.') * 10
@@ -234,8 +229,7 @@ class IPCIDRRule:
     __slots__ = ('is_exclusion', 'version', 'start_int', 'end_int', 'prefixlen', '_hash', 'attrs')
     def __init__(self, start_int: int, end_int: int, prefixlen: int, version: int, is_exclusion: bool = False, attrs: str = ""):
         self.is_exclusion, self.version = is_exclusion, version
-        self.start_int, self.end_int, self.prefixlen = start_int, end_int, prefixlen
-        self.attrs = attrs
+        self.start_int, self.end_int, self.prefixlen, self.attrs = start_int, end_int, prefixlen, attrs
         self._hash = hash((self.version, self.start_int, self.prefixlen, self.is_exclusion))
     def __hash__(self) -> int: return self._hash
     def __eq__(self, o: Any) -> bool: 
@@ -269,10 +263,8 @@ class IntervalMerger:
         if not base_ivs: return []
         if not excl_ivs: return base_ivs
         events = []
-        for s, e in base_ivs:
-            events.extend([(s, 1), (e + 1, -1)])
-        for s, e in excl_ivs:
-            events.extend([(s, 2), (e + 1, -2)])
+        for s, e in base_ivs: events.extend([(s, 1), (e + 1, -1)])
+        for s, e in excl_ivs: events.extend([(s, 2), (e + 1, -2)])
         events.sort(key=lambda x: (x[0], -abs(x[1])))
         result, a_cnt, d_cnt, prev_x = [], 0, 0, -1
         for x, op in events:
@@ -292,7 +284,7 @@ class IntervalMerger:
             rw = int(round(w, 5) * 100000)
             events.extend([(r.start_int, 1, rw, r.is_exclusion, r.attrs, i), (r.end_int + 1, -1, rw, r.is_exclusion, r.attrs, i)])
 
-        events.sort(key=lambda x: x[0])
+        events.sort(key=lambda x: (x[0], -x[1]))
         active_a, active_d = {}, {}
         acc_a, acc_d = [], []
         i_idx, n, prev_x = 0, len(events), -1
@@ -302,7 +294,6 @@ class IntervalMerger:
             if x > prev_x and prev_x != -1:
                 max_a = max((v[0] for v in active_a.values()), default=-1)
                 max_d = max((v[0] for v in active_d.values()), default=-1)
-
                 if max_d >= 0 and max_d >= max_a:
                     attr = next((v[1] for k, v in sorted(active_d.items()) if v[0] == max_d), "")
                     acc_d.append((prev_x, x - 1, attr))
@@ -337,8 +328,7 @@ class IntervalMerger:
         cidrs.sort(key=lambda x: x.num_addresses, reverse=True)
         kept = list(ipaddress.collapse_addresses(cidrs[:target_count]))
         new_hosts = sum(c.num_addresses for c in kept)
-        loss = max(0.0, 1.0 - (new_hosts / orig_hosts))
-        return kept, loss
+        return kept, max(0.0, 1.0 - (new_hosts / orig_hosts))
 
     @classmethod
     def to_cidrs(cls, intervals: List[Tuple[int, int, str]], version: int, config: MergeConfig) -> List[Tuple[str, str]]:
@@ -352,8 +342,7 @@ class IntervalMerger:
             while cur <= end:
                 max_sz = (cur & -cur) if cur != 0 else (1 << width)
                 rem = end - cur + 1
-                if max_sz > rem:
-                    max_sz = 1 << (rem.bit_length() - 1)
+                if max_sz > rem: max_sz = 1 << (rem.bit_length() - 1)
                 prefixlen = width - max_sz.bit_length() + 1
                 yield ipaddress.ip_network(f"{fn(cur)}/{prefixlen}", strict=False)
                 cur += max_sz
@@ -370,7 +359,6 @@ class IntervalMerger:
             
         if not config.enable_cidr_approximation:
             if config.fallback_on_fragmentation:
-                logger.info(f"CIDR fragmented ({len(exact_networks)} > limit). Truncating.")
                 exact_networks.sort(key=lambda x: x[0].num_addresses, reverse=True)
                 grp = defaultdict(list)
                 for n, a in exact_networks[:config.max_cidr_fragmentation]: grp[a].append(n)
@@ -392,7 +380,6 @@ class IntervalMerger:
         
         if len(res) > config.max_cidr_fragmentation:
             if config.fallback_on_fragmentation:
-                logger.info(f"CIDR still fragmented after approx. Strict truncating to {config.max_cidr_fragmentation}.")
                 res.sort(key=lambda x: ipaddress.ip_network(x[0], strict=False).num_addresses, reverse=True)
                 res = res[:config.max_cidr_fragmentation]
             else: raise CIDRFragmentationError(len(res), config.max_cidr_fragmentation, tot_loss)
@@ -400,7 +387,6 @@ class IntervalMerger:
         if tot_loss > config.cidr_approximation_max_loss_rate or (tot_loss > 0 and config.strict_zero_loss):
             if config.fallback_on_fragmentation: return res
             raise CIDRFragmentationError(len(exact_networks), config.max_cidr_fragmentation, tot_loss)
-            
         return res
 
 class TrieNode:
@@ -463,8 +449,7 @@ class BDDEngine:
         self._op_max, self._node_max = op_max, node_max
         self.false_node = VersionedBDDNode(self._next_id(), -2, None, None)
         self.true_node = VersionedBDDNode(self._next_id(), -1, None, None)
-        self._cache(self.false_node)
-        self._cache(self.true_node)
+        self._cache(self.false_node); self._cache(self.true_node)
 
     def _next_id(self) -> int:
         nid = self._id_ctr; self._id_ctr += 1
@@ -479,15 +464,13 @@ class BDDEngine:
 
     def get_var(self, name: Any) -> int:
         if name not in self.var_map:
-            self.var_map[name] = self.var_counter
-            self.var_counter += 1
+            self.var_map[name] = self.var_counter; self.var_counter += 1
         return self.var_map[name]
 
     def ith_var(self, i: int) -> VersionedBDDNode:
         if i not in self._var_nodes:
             n = VersionedBDDNode(self._next_id(), i, self.false_node, self.true_node)
-            self._var_nodes[i] = n
-            self._cache(n)
+            self._var_nodes[i] = n; self._cache(n)
         return self._var_nodes[i]
 
     def neg(self, n: VersionedBDDNode, d: int = 0) -> VersionedBDDNode:
@@ -496,8 +479,7 @@ class BDDEngine:
         if n is self.false_node: return self.true_node
         k = (OP_NEG, n._node_id, -1)
         if k in self._op_cache:
-            self._op_cache.move_to_end(k)
-            return self._op_cache[k]
+            self._op_cache.move_to_end(k); return self._op_cache[k]
         res = self._create(n.var, self.neg(n.low, d + 1) if n.low else None, self.neg(n.high, d + 1) if n.high else None)
         self._op_cache[k] = res
         if len(self._op_cache) > self._op_max: self._op_cache.popitem(last=False)
@@ -514,8 +496,7 @@ class BDDEngine:
         if f is g: return f
         k = (op, min(f._node_id, g._node_id), max(f._node_id, g._node_id))
         if k in self._op_cache:
-            self._op_cache.move_to_end(k)
-            return self._op_cache[k]
+            self._op_cache.move_to_end(k); return self._op_cache[k]
         if f.var == g.var: res = self._create(f.var, self._apply(f.low, g.low, op, d + 1), self._apply(f.high, g.high, op, d + 1))
         elif f.var < g.var: res = self._create(f.var, self._apply(f.low, g, op, d + 1), self._apply(f.high, g, op, d + 1))
         else: res = self._create(g.var, self._apply(f, g.low, op, d + 1), self._apply(f, g.high, op, d + 1))
@@ -527,8 +508,7 @@ class BDDEngine:
         if l is h and l is not None: return l
         c = self._node_cache.get((var, l._node_id if l else -1, h._node_id if h else -1))
         if c: return c
-        n = VersionedBDDNode(self._next_id(), var, l, h)
-        self._cache(n)
+        n = VersionedBDDNode(self._next_id(), var, l, h); self._cache(n)
         return n
 
     def sat_ratio(self, n: VersionedBDDNode) -> float:
@@ -545,15 +525,11 @@ class BDDEngine:
         return _ratio(n, 0)
     
     def clear(self) -> None:
-        self._op_cache.clear()
-        self._node_cache.clear()
-        self._var_nodes.clear()
-        self.var_map.clear()
+        self._op_cache.clear(); self._node_cache.clear(); self._var_nodes.clear(); self.var_map.clear()
         self.var_counter = self._id_ctr = 0
         self.false_node = VersionedBDDNode(self._next_id(), -2, None, None)
         self.true_node = VersionedBDDNode(self._next_id(), -1, None, None)
-        self._cache(self.false_node)
-        self._cache(self.true_node)
+        self._cache(self.false_node); self._cache(self.true_node)
 
 class BDDRuleVerifier:
     __slots__ = ('eng', '_ip_vars', '_max_c')
@@ -563,8 +539,7 @@ class BDDRuleVerifier:
     def _get_v(self, ver: int, bp: int) -> VersionedBDDNode:
         k = (ver, bp)
         if k in self._ip_vars:
-            self._ip_vars.move_to_end(k)
-            return self._ip_vars[k]
+            self._ip_vars.move_to_end(k); return self._ip_vars[k]
         n = self.eng.ith_var(self.eng.get_var(('ip', ver, bp)))
         self._ip_vars[k] = n
         if len(self._ip_vars) > self._max_c: self._ip_vars.popitem(last=False)
@@ -632,12 +607,8 @@ def _z3_worker(p_allow, p_deny, c_rules, is_deny, ver, timeouts):
         if is_deny: target_expr = _b(p_deny)
         else: target_expr = z3.And(_b(p_allow), z3.Not(_b(p_deny), ctx=ctx), ctx=ctx)
         for t in timeouts:
-            s.push()
-            s.set("timeout", t)
-            s.add(c_expr)
-            s.add(z3.Not(target_expr, ctx=ctx))
-            res = s.check()
-            s.pop()
+            s.push(); s.set("timeout", t); s.add(c_expr); s.add(z3.Not(target_expr, ctx=ctx))
+            res = s.check(); s.pop()
             if res == z3.unsat: return True, 1.0, "unsat"
             elif res == z3.sat: return False, 0.0, "sat"
         return False, 0.0, "unknown"
@@ -661,13 +632,11 @@ class ProcessIsolatedSMTVerifier:
         try:
             if v4_ca: v4_ok, v4_c, v4_m = executor.submit(_z3_worker, v4_pa, v4_pd, v4_ca, is_deny, 4, self.tms).result(timeout=timeout_seconds)
             else: v4_ok, v4_c, v4_m = True, 1.0, "triv"
-        except concurrent.futures.TimeoutError:
-            v4_ok, v4_c, v4_m = False, 0.0, "timeout"
+        except concurrent.futures.TimeoutError: v4_ok, v4_c, v4_m = False, 0.0, "timeout"
         try:
             if v6_ca: v6_ok, v6_c, v6_m = executor.submit(_z3_worker, v6_pa, v6_pd, v6_ca, is_deny, 6, self.tms).result(timeout=timeout_seconds)
             else: v6_ok, v6_c, v6_m = True, 1.0, "triv"
-        except concurrent.futures.TimeoutError:
-            v6_ok, v6_c, v6_m = False, 0.0, "timeout"
+        except concurrent.futures.TimeoutError: v6_ok, v6_c, v6_m = False, 0.0, "timeout"
         return (v4_ok and v6_ok), min(v4_c, v6_c), f"{v4_m},{v6_m}"
 
 class CoverageChecker:
@@ -753,12 +722,12 @@ class WALBackend:
             except Exception: pass
 
 class ParsedRuleSet:
-    __slots__ = ('url', 'domain_rules', 'ip_rules', 'generic_rules', 'ts', 'hash', 'weight', 'initial_weight', 'compiled_regexes')
-    def __init__(self, u: str, d: Tuple[DomainRule,...], i: Tuple[IPCIDRRule,...], g: Tuple[GenericRule,...], t: float, h: str = "", w: float = 1.0):
+    __slots__ = ('url', 'domain_rules', 'ip_rules', 'generic_rules', 'ts', 'hash', 'weight', 'initial_weight', 'compiled_regexes', 'is_explicit_weight')
+    def __init__(self, u: str, d: Tuple[DomainRule,...], i: Tuple[IPCIDRRule,...], g: Tuple[GenericRule,...], t: float, h: str = "", w: float = 1.0, explicit: bool = False):
         self.url, self.domain_rules, self.ip_rules, self.generic_rules, self.ts = u, d, i, g, t
         self.weight = self.initial_weight = w
+        self.is_explicit_weight = explicit
         self.hash = h or fast_hash(b"".join(b"%d%d%s" % (r.match_type.value, r.is_exclusion, r.normalized.encode('utf-8')) for r in d) + b"".join(b"%d%d%d" % (r.version, r.start_int, r.prefixlen) for r in i) + b"".join(b"%s%s%d" % (r.type.encode('utf-8'), r.val.encode('utf-8'), r.is_exclusion) for r in g))
-        
         self.compiled_regexes = []
         for r in d:
             if r.match_type == MatchType.REGEX:
@@ -878,13 +847,25 @@ class SemanticLineageAnalyzer:
             self.save()
             return red
 
-class DynamicReputationEngine:
+class AdvancedTrustEvaluator:
+    """Implement fully dynamic weight consensus assessment."""
     def __init__(self, sources: List['ParsedRuleSet'], cache: Optional[WALBackend], cfg: MergeConfig):
         self.sources = sources
         self.cache = cache
         self.cfg = cfg
 
     def evaluate(self) -> None:
+        explicit_sources = [s for s in self.sources if s.is_explicit_weight]
+        implicit_sources = [s for s in self.sources if not s.is_explicit_weight]
+        
+        trusted_rule_hashes = set()
+        if explicit_sources:
+            avg_explicit = sum(s.initial_weight for s in explicit_sources) / len(explicit_sources)
+            for src in explicit_sources:
+                if src.initial_weight >= avg_explicit * 0.8:
+                    trusted_rule_hashes.update(r._hash for r in src.domain_rules)
+                    trusted_rule_hashes.update(r._hash for r in src.ip_rules)
+
         for src in self.sources:
             tot = len(src.domain_rules) + len(src.ip_rules) + len(src.generic_rules)
             if tot == 0:
@@ -893,21 +874,24 @@ class DynamicReputationEngine:
                 
             garbage = 0
             for r in src.domain_rules:
-                if r.match_type in (MatchType.KEYWORD, MatchType.REGEX):
-                    continue
+                if r.match_type in (MatchType.KEYWORD, MatchType.REGEX): continue
                 if EntropyAssessor.assess(r.normalized) == EntropyLevel.DGA_CONFIRMED: 
                     garbage += 1
-                    
             for r in src.ip_rules:
                 if r.version == 4 and r.prefixlen <= self.cfg.ipv4_garbage_threshold: garbage += 1
                 elif r.version == 6 and r.prefixlen <= self.cfg.ipv6_garbage_threshold: garbage += 1
             
             garbage_ratio = garbage / max(1, tot)
+            intrinsic_penalty = math.exp(-5 * garbage_ratio) if garbage_ratio > 0.3 else 1.0
             
-            if garbage_ratio > 0.3:
-                src.weight = src.initial_weight * math.exp(-5 * garbage_ratio)
-            else:
-                src.weight = src.initial_weight
+            consensus_multiplier = 1.0
+            if not src.is_explicit_weight and trusted_rule_hashes:
+                overlap = sum(1 for r in src.domain_rules if r._hash in trusted_rule_hashes) + \
+                          sum(1 for r in src.ip_rules if r._hash in trusted_rule_hashes)
+                overlap_ratio = overlap / max(1, len(src.domain_rules) + len(src.ip_rules))
+                consensus_multiplier = 0.5 + (overlap_ratio * 1.5)
+
+            src.weight = src.initial_weight * intrinsic_penalty * consensus_multiplier
 
 class RuleParser:
     __slots__ = ('_cfg', '_dga')
@@ -929,7 +913,6 @@ class RuleParser:
 
     def parse(self, src: Union[bytes, Path], url: str) -> ParsedRuleSet:
         dom, ip, gen = [], [] , []
-        
         try:
             if isinstance(src, Path):
                 with src.open('rb') as f: header = f.read(1024)
@@ -980,10 +963,8 @@ class RuleParser:
                         if k == 'invert': continue
                         mt = self.RMAP.get(k.upper(), k)
                         vals = v if isinstance(v, list) else [v]
-                        
                         extra_attrs = [f"{ek}={ev}" for ek, ev in r.items() if ek not in ('invert', k, 'version', 'rules') and not isinstance(ev, (list, dict))]
                         attr_str = ",".join(extra_attrs)
-                        
                         for val in vals:
                             if str(val).strip(): _add(mt, str(val).strip(), is_excl, attr_str)
                 return ParsedRuleSet(url, tuple(dom), tuple(ip), tuple(gen), time.time())
@@ -1004,8 +985,7 @@ class RuleParser:
         try:
             if isinstance(src, Path):
                 with open(src, 'r', encoding='utf-8-sig', errors='ignore') as f: 
-                    f.seek(0)
-                    _stream(f)
+                    f.seek(0); _stream(f)
             else:
                 with io.TextIOWrapper(io.BytesIO(src), encoding='utf-8-sig', errors='ignore') as f: 
                     _stream(f)
@@ -1017,8 +997,7 @@ def resolve_hostname(hostname: str) -> List[str]:
         if hostname in _DNS_CACHE:
             ts, ips = _DNS_CACHE[hostname]
             if time.time() - ts < 300:
-                _DNS_CACHE.move_to_end(hostname)
-                return ips
+                _DNS_CACHE.move_to_end(hostname); return ips
             del _DNS_CACHE[hostname]
         if hostname in _DNS_PENDING:
             ev, wait = _DNS_PENDING[hostname], True
@@ -1075,7 +1054,7 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
                             s.headers.update({'Connection': 'close'})
                             s.mount('https://', HTTPAdapter(max_retries=Retry(total=1)))
                             s.mount('http://', HTTPAdapter(max_retries=Retry(total=1)))
-                            with s.get(curl, stream=True, timeout=(cfg.download_timeout_connect, cfg.download_timeout_read), allow_redirects=False, headers={"User-Agent": "StrictRuleMerger/13.6 Ultimate"}) as resp:
+                            with s.get(curl, stream=True, timeout=(cfg.download_timeout_connect, cfg.download_timeout_read), allow_redirects=False, headers={"User-Agent": "StrictRuleMerger/13.7 Ultimate"}) as resp:
                                 if resp.status_code in (301, 302, 303, 307, 308):
                                     curl = urljoin(curl, resp.headers.get('Location', ''))
                                     rc, redir = rc + 1, True
@@ -1089,19 +1068,14 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
                                         if not chunk: continue
                                         if html_check_count < 3:
                                             if RE_HTML_STRICT.search(chunk) and not curl.endswith('.html'):
-                                                is_html_error = True
-                                                break
+                                                is_html_error = True; break
                                             html_check_count += 1
                                         f.write(chunk)
                                 if is_html_error: raise TransientError("HTML content detected")
-                                ok = True
-                                break
+                                ok = True; break
                     except (requests.RequestException, TransientError):
-                        if tmp and tmp.exists():
-                            tmp.unlink(missing_ok=True)
-                            tmp = None
-                    finally:
-                        _dns_context.forced_host, _dns_context.forced_ip = None, None
+                        if tmp and tmp.exists(): tmp.unlink(missing_ok=True); tmp = None
+                    finally: _dns_context.forced_host, _dns_context.forced_ip = None, None
                 if redir: continue
                 break
         finally: pass
@@ -1175,8 +1149,7 @@ def run_verifications(parsed_sets: List[ParsedRuleSet], p_dom_allow: List[Domain
                 ok, conf = _verify_rule_group(name, bdd_verifier, smt_executor, config, coverage_checker, p_dom_allow, p_dom_deny, c_d, p_ip_allow, p_ip_deny, c_i, src.url, is_deny, results)
                 src_passed = src_passed and ok
                 cov_components.append(conf)
-        check('domain_allow', False, ca, cia)
-        check('domain_deny', True, cd, cid)
+        check('domain_allow', False, ca, cia); check('domain_deny', True, cd, cid)
         if src_passed: passed += 1
         coverages.append(min(cov_components) if cov_components else 1.0)
     if total_sources > 0: results['stats'] = {'total_sources': total_sources, 'passed': passed, 'pass_rate': passed / total_sources, 'avg_coverage': sum(coverages) / len(coverages)}
@@ -1185,8 +1158,7 @@ def run_verifications(parsed_sets: List[ParsedRuleSet], p_dom_allow: List[Domain
 def _format_policy(attrs: str, default_pol: str) -> str:
     if not attrs: return default_pol
     first_attr = attrs.split(',')[0].strip()
-    if first_attr.upper() in ('NO-RESOLVE', 'EXTENDED-MATCHING'):
-        return f"{default_pol},{attrs}"
+    if first_attr.upper() in ('NO-RESOLVE', 'EXTENDED-MATCHING'): return f"{default_pol},{attrs}"
     return attrs
 
 def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[SemanticLineageAnalyzer] = None, smt_executor: Optional[concurrent.futures.ProcessPoolExecutor] = None) -> Tuple[str, str, str, str]:
@@ -1207,24 +1179,31 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
                 cache = WALBackend(cdir / "source_cache", cfg)
             except OSError: pass
 
+        explicit_weights = [float(s['weight']) for s in task.get('sources', []) if isinstance(s, dict) and 'weight' in s]
+        default_weight = sum(explicit_weights) / len(explicit_weights) if explicit_weights else 1.0
+
         parser, sources, upd = RuleParser(cfg), [], {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=cfg.max_concurrent_downloads) as ex:
             futs = {}
             for s in task.get('sources', []):
                 s_url = s if isinstance(s, str) else s.get('url')
-                s_weight = 1.0 if isinstance(s, str) else float(s.get('weight', 1.0))
-                if s_url: futs[ex.submit(_dl_single, cfg, s_url, td, cache, parser)] = (s_url, s_weight)
+                if not s_url: continue
+                is_explicit = isinstance(s, dict) and 'weight' in s
+                s_weight = float(s['weight']) if is_explicit else default_weight
+                futs[ex.submit(_dl_single, cfg, s_url, td, cache, parser)] = (s_url, s_weight, is_explicit)
+                
             for fu in concurrent.futures.as_completed(futs):
                 ps, u = fu.result()
                 if ps:
-                    _, manual_weight = futs[fu]
-                    ps.weight = ps.initial_weight = manual_weight
+                    _, w, exp = futs[fu]
+                    ps.weight = ps.initial_weight = w
+                    ps.is_explicit_weight = exp
                     sources.append(ps)
                     upd.update(u or {})
         if cache and upd: cache.put_batch(upd)
         if not sources: return (name, "⚠️", "No valid sources", "0KB")
 
-        if cfg.enable_reputation: DynamicReputationEngine(sources, cache, cfg).evaluate()
+        if cfg.enable_reputation: AdvancedTrustEvaluator(sources, cache, cfg).evaluate()
         if lin:
             sigs = [SourceSignature.from_parsed(s) for s in sources]
             red = lin.compute(sources, sigs)
