@@ -54,9 +54,7 @@
       ]
     },
     {
-      "domain": [
-        "httpdns.calorietech.com"
-      ]
+      "domain": "httpdns.calorietech.com"
     },
     {
       "ip_cidr": [
