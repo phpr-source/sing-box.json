@@ -4,6 +4,7 @@
 import bisect
 import concurrent.futures
 import hashlib
+import heapq
 import io
 import ipaddress
 import itertools
@@ -16,6 +17,7 @@ import random
 import re
 import shutil
 import socket
+import statistics
 import struct
 import subprocess
 import sys
@@ -38,7 +40,7 @@ from urllib3.util.retry import Retry
 if sys.version_info < (3, 9):
     sys.exit("Error: Python 3.9+ is required")
 
-sys.setrecursionlimit(3000)
+sys.setrecursionlimit(5000)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -47,8 +49,11 @@ _dns_context = threading.local()
 
 def _patched_create_connection(address: tuple[str, int], *args: Any, **kwargs: Any) -> socket.socket:
     host, port = address
-    if getattr(_dns_context, 'forced_ip', None) and getattr(_dns_context, 'forced_host', None) == host:
-        address = (_dns_context.forced_ip, port)
+    forced_ip = getattr(_dns_context, 'forced_ip', None)
+    forced_host = getattr(_dns_context, 'forced_host', None)
+    # 精準比對，防止多線程下的全局 socket 污染
+    if forced_ip and forced_host == host:
+        address = (forced_ip, port)
     return _orig_create_connection(address, *args, **kwargs)
 
 urllib3.util.connection.create_connection = _patched_create_connection
@@ -63,7 +68,7 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 65
+CACHE_VERSION = 66
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 4
 MAX_DNS_CACHE = 1024
@@ -171,7 +176,12 @@ class MergeConfig:
         if not p.is_file(): return False
         try: os.chmod(p, p.stat().st_mode | 0o111)
         except OSError: pass
-        return os.access(str(p), os.X_OK)
+        if not os.access(str(p), os.X_OK): return False
+        # GLM 改進：真實校驗二進制文件是否可用
+        try:
+            res = subprocess.run([str(p), "version"], capture_output=True, timeout=5)
+            return res.returncode == 0
+        except Exception: return False
 
 DEFAULT_CONFIG = MergeConfig()
 
@@ -273,26 +283,60 @@ class IntervalMerger:
             if r.version != version: continue
             rw = int(round(w, 5) * 100000)
             events.extend([(r.start_int, 1, rw, r.is_exclusion, r.attrs, i), (r.end_int + 1, -1, rw, r.is_exclusion, r.attrs, i)])
+        
+        if not events: return [], []
         events.sort(key=lambda x: (x[0], -x[1]))
-        active_a, active_d, acc_a, acc_d = {}, {}, [], []
-        i_idx, n, prev_x = 0, len(events), -1
-
+        
+        acc_a, acc_d = [], []
+        active_a_map, active_d_map = {}, {}
+        
+        # GLM 算法優化：引入最大堆處理複雜度 O(log K) 並保留我的 attrs 邏輯
+        max_heap_a, max_heap_d = [], []
+        
+        prev_x = -1
+        i_idx = 0
+        n = len(events)
+        
         while i_idx < n:
             x = events[i_idx][0]
             if x > prev_x and prev_x != -1:
-                max_a = max((v[0] for v in active_a.values()), default=-1)
-                max_d = max((v[0] for v in active_d.values()), default=-1)
-                if max_d >= 0 and max_d >= max_a:
-                    attr = min((k, v[1]) for k, v in active_d.items() if v[0] == max_d)[1] if active_d else ""
-                    acc_d.append((prev_x, x - 1, attr))
-                elif max_a >= 0 and max_a > max_d:
-                    attr = min((k, v[1]) for k, v in active_a.items() if v[0] == max_a)[1] if active_a else ""
-                    acc_a.append((prev_x, x - 1, attr))
+                cur_max_a, cur_attr_a = -1, ""
+                while max_heap_a:
+                    neg_rw, idx = max_heap_a[0]
+                    if idx in active_a_map and active_a_map[idx][0] == -neg_rw:
+                        cur_max_a = -neg_rw
+                        cur_attr_a = active_a_map[idx][1]
+                        break
+                    heapq.heappop(max_heap_a) # 延遲刪除
+                
+                cur_max_d, cur_attr_d = -1, ""
+                while max_heap_d:
+                    neg_rw, idx = max_heap_d[0]
+                    if idx in active_d_map and active_d_map[idx][0] == -neg_rw:
+                        cur_max_d = -neg_rw
+                        cur_attr_d = active_d_map[idx][1]
+                        break
+                    heapq.heappop(max_heap_d)
+
+                if cur_max_d >= 0 and cur_max_d >= cur_max_a:
+                    acc_d.append((prev_x, x - 1, cur_attr_d))
+                elif cur_max_a >= 0 and cur_max_a > cur_max_d:
+                    acc_a.append((prev_x, x - 1, cur_attr_a))
+            
             while i_idx < n and events[i_idx][0] == x:
                 _, op, rw, is_excl, attrs, r_id = events[i_idx]
-                tgt = active_d if is_excl else active_a
-                if op == 1: tgt[r_id] = (rw, attrs)
-                else: tgt.pop(r_id, None)
+                if is_excl:
+                    if op == 1:
+                        active_d_map[r_id] = (rw, attrs)
+                        heapq.heappush(max_heap_d, (-rw, r_id))
+                    else:
+                        active_d_map.pop(r_id, None)
+                else:
+                    if op == 1:
+                        active_a_map[r_id] = (rw, attrs)
+                        heapq.heappush(max_heap_a, (-rw, r_id))
+                    else:
+                        active_a_map.pop(r_id, None)
                 i_idx += 1
             prev_x = x
 
@@ -674,9 +718,12 @@ class WALBackend:
                 if len(raw) > 24 and hashlib.blake2b(raw[24:], digest_size=16).digest() == raw[:16]:
                     try: db = zlib.decompress(raw[24:])
                     except zlib.error: db = raw[24:]
-                    if USE_MSGPACK: self.data = msgpack.unpackb(db, raw=False)
-                    elif USE_ORJSON: self.data = orjson.loads(db)
-                    else: self.data = json.loads(db.decode('utf-8'))
+                    # GLM 建議：增加異常防禦
+                    try:
+                        if USE_MSGPACK: self.data = msgpack.unpackb(db, raw=False)
+                        elif USE_ORJSON: self.data = orjson.loads(db)
+                        else: self.data = json.loads(db.decode('utf-8'))
+                    except Exception: pass
             except Exception: pass
 
     def get(self, k: str) -> Any:
@@ -693,6 +740,7 @@ class WALBackend:
                 elif USE_ORJSON: b = orjson.dumps(self.data)
                 else: b = json.dumps(self.data, separators=(',', ':')).encode('utf-8')
                 cb = zlib.compress(b, level=6)
+                # Gemini 的核心修復：防止多線程互相覆寫臨時文件引發臟數據
                 tp = Path(f"{self.db_path}.{threading.get_ident()}.tmp")
                 with open(tp, 'wb') as f:
                     f.write(hashlib.blake2b(cb, digest_size=16).digest())
@@ -710,6 +758,7 @@ class ParsedRuleSet:
         self.weight = self.initial_weight = w
         self.is_explicit_weight = explicit
         
+        # Gemini 核心防護：加入屬性與分隔符，防止嚴重哈希碰撞
         self.hash = h or fast_hash(b"|".join(b"%d,%d,%s,%s" % (r.match_type.value, r.is_exclusion, r.normalized.encode('utf-8'), r.attrs.encode('utf-8')) for r in d) + b"|".join(b"%d,%d,%d,%s" % (r.version, r.start_int, r.prefixlen, r.attrs.encode('utf-8')) for r in i) + b"|".join(b"%s,%s,%d,%s" % (r.type.encode('utf-8'), r.val.encode('utf-8'), r.is_exclusion, r.attrs.encode('utf-8')) for r in g))
         
         self.compiled_regexes = []
@@ -841,7 +890,9 @@ class AdvancedTrustEvaluator:
         explicit_sources = [s for s in self.sources if s.is_explicit_weight]
         trusted_rule_hashes = set()
         if explicit_sources:
-            avg_explicit = sum(s.initial_weight for s in explicit_sources) / len(explicit_sources)
+            # GLM 算法優化：使用中位數代替平均數
+            weights = [s.initial_weight for s in explicit_sources]
+            avg_explicit = statistics.median(weights) if weights else 1.0
             for src in explicit_sources:
                 if src.initial_weight >= avg_explicit * 0.8:
                     trusted_rule_hashes.update(r._hash for r in src.domain_rules)
@@ -945,6 +996,7 @@ class RuleParser:
                         mt = self.RMAP.get(k.upper(), k)
                         vals = v if isinstance(v, list) else [v]
                         
+                        # Gemini 核心修復：使用 JSON 序列化 attrs 防止格式污染
                         extra_attrs = {ek: ev for ek, ev in r.items() if ek not in ('invert', k, 'version', 'rules', 'match_type', 'normalized', 'is_exclusion', 'specificity_score', 'attrs') and not isinstance(ev, (list, dict))}
                         attr_str = json.dumps(extra_attrs, sort_keys=True) if extra_attrs else ""
                         
@@ -1012,10 +1064,12 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
     if cache:
         l = cache.get(ckey)
         if l and time.time() - l.get('ts', 0) < cfg.max_source_age_days * 86400:
-            doms = tuple(DomainRule(MatchType(r['match_type']), r['normalized'], r.get('is_exclusion', False), r.get('specificity_score', 0), r.get('attrs', '')) for r in l.get('d', []))
-            ips = tuple(IPCIDRRule(r['s'], r['e'], r['p'], r['v'], r.get('i', False), r.get('attrs', '')) for r in l.get('i', []))
-            gens = tuple(GenericRule(r['t'], r['v'], r.get('i', False), r.get('attrs', '')) for r in l.get('g', []))
-            return ParsedRuleSet(l['url'], doms, ips, gens, l['ts'], l['hash']), None
+            try:
+                doms = tuple(DomainRule(MatchType(r['match_type']), r['normalized'], r.get('is_exclusion', False), r.get('specificity_score', 0), r.get('attrs', '')) for r in l.get('d', []))
+                ips = tuple(IPCIDRRule(r['s'], r['e'], r['p'], r['v'], r.get('i', False), r.get('attrs', '')) for r in l.get('i', []))
+                gens = tuple(GenericRule(r['t'], r['v'], r.get('i', False), r.get('attrs', '')) for r in l.get('g', []))
+                return ParsedRuleSet(l['url'], doms, ips, gens, l['ts'], l['hash']), None
+            except Exception: pass
 
     for rc in range(MAX_DOWNLOAD_RETRIES):
         curl, vis, tmp, ok = url, set(), None, False
@@ -1229,6 +1283,7 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
                     existing_w, _ = gen_objs[r._hash]
                     if src.weight > existing_w: gen_objs[r._hash] = (src.weight, r)
 
+        # Gemini 核心：保留 Tries 按屬性分組，避免丟失 attrs
         allow_tries, deny_tries, others, ip_weights = defaultdict(DomainTrieOptimizer), defaultdict(DomainTrieOptimizer), set(), []
         for h, score in rule_scores.items():
             if score >= min_score_threshold - 0.001:
