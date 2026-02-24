@@ -35,8 +35,8 @@ from urllib.parse import urljoin, urlparse
 import requests
 import urllib3
 import urllib3.util.connection
-from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 
 if sys.version_info < (3, 9): sys.exit("Error: Python 3.9+ is required")
 
@@ -66,13 +66,11 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 74
+CACHE_VERSION = 75
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 4
 MAX_DNS_CACHE = 1024
 MAX_BDD_DEPTH = 800
-MAX_IP_RANGE_AGGREGATION_V4 = 2**24
-MAX_IP_RANGE_AGGREGATION_V6 = 2**96
 OP_NEG, OP_AND, OP_OR = 0, 1, 2
 
 RE_DOMAIN_LABEL = re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$', re.IGNORECASE)
@@ -81,7 +79,6 @@ RE_HASH_LIKE = re.compile(r'\b[a-f0-9]{32,64}\b', re.IGNORECASE)
 RE_HTML_STRICT = re.compile(rb'(?:^[\s]*<(?:!DOCTYPE\s+html|html|head|body))', re.IGNORECASE | re.MULTILINE)
 RE_IPV4_MAPPED_IPV6 = re.compile(r'^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?:/(\d+))?$', re.IGNORECASE)
 
-IPNetworkType = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
 _DNS_CACHE: OrderedDict[str, Tuple[float, List[str]]] = OrderedDict()
 _DNS_PENDING: Dict[str, threading.Event] = {}
 _DNS_LOCK = threading.Lock()
@@ -109,7 +106,11 @@ class MergeConfig:
     )
 
     def __init__(self, **kwargs: Any):
-        self.config_file = kwargs.get('config_file', 'scripts/custom_merge.json')
+        default_cfg = 'scripts/custom_merge.json'
+        if not Path(default_cfg).exists() and Path('custom_merge.json').exists():
+            default_cfg = 'custom_merge.json'
+            
+        self.config_file = kwargs.get('config_file', default_cfg)
         self.output_dir = Path(kwargs.get('output_dir', 'rules'))
         self.core_bin_path = kwargs.get('core_bin_path', shutil.which("sing-box") or os.getenv("SB_CORE_PATH", "./sb-core"))
         self.max_workers = int(kwargs.get('max_workers', 0)) or min(max(1, (os.cpu_count() or 4) * 2), 16)
@@ -422,28 +423,37 @@ class DomainTrieOptimizer:
         res = []
         def _dfs(node: TrieNode, path: List[str], active_suffix_attr: Optional[str]):
             cur_dom = '.'.join(reversed(path)) if path else ""
+            
             has_suffix = bool(node.types & (1 << MatchType.SUFFIX.value))
             my_suffix_attr = node.attrs.get(MatchType.SUFFIX.value) if has_suffix else None
-            new_active_attr = active_suffix_attr
             
             if has_suffix:
                 if my_suffix_attr != active_suffix_attr:
                     res.append(DomainRule(MatchType.SUFFIX, cur_dom, is_exclusion, attrs=my_suffix_attr or ""))
-                    new_active_attr = my_suffix_attr
+                effective_attr = my_suffix_attr
+            else:
+                effective_attr = active_suffix_attr
+
+            has_wildcard = bool(node.types & (1 << MatchType.WILDCARD.value))
+            my_wild_attr = node.attrs.get(MatchType.WILDCARD.value) if has_wildcard else None
             
-            if node.types & (1 << MatchType.WILDCARD.value):
-                attr = node.attrs.get(MatchType.WILDCARD.value)
-                if attr != new_active_attr:
-                    res.append(DomainRule(MatchType.WILDCARD, cur_dom, is_exclusion, attrs=attr or ""))
-                    
-            if node.types & (1 << MatchType.EXACT.value):
-                attr = node.attrs.get(MatchType.EXACT.value)
-                if attr != new_active_attr:
-                    res.append(DomainRule(MatchType.EXACT, cur_dom, is_exclusion, attrs=attr or ""))
+            if has_wildcard:
+                if my_wild_attr != effective_attr:
+                    res.append(DomainRule(MatchType.WILDCARD, cur_dom, is_exclusion, attrs=my_wild_attr or ""))
+                exact_cover_attr = my_wild_attr
+            else:
+                exact_cover_attr = effective_attr
+
+            has_exact = bool(node.types & (1 << MatchType.EXACT.value))
+            my_exact_attr = node.attrs.get(MatchType.EXACT.value) if has_exact else None
+            
+            if has_exact:
+                if my_exact_attr != exact_cover_attr:
+                    res.append(DomainRule(MatchType.EXACT, cur_dom, is_exclusion, attrs=my_exact_attr or ""))
             
             for lbl, ch in node.children.items():
                 path.append(lbl)
-                _dfs(ch, path, new_active_attr)
+                _dfs(ch, path, effective_attr)
                 path.pop()
 
         for lbl, ch in self.root.children.items():
@@ -604,7 +614,7 @@ class BDDRuleVerifier:
         ok_v6, c_v6 = _chk(v6_pa, v6_pd, v6_ca, 6)
         return (ok_v4 and ok_v6), min(c_v4 if v4_ca and not ok_v4 else 1.0, c_v6 if v6_ca and not ok_v6 else 1.0)
 
-def _z3_worker(p_allow, p_deny, c_rules, is_deny, ver, timeouts):
+def _z3_worker_process(q: mp.Queue, p_allow: List[Tuple[int, int]], p_deny: List[Tuple[int, int]], c_rules: List[Tuple[int, int]], is_deny: bool, ver: int, timeouts: Tuple[int, ...]):
     try:
         import z3
         ctx = z3.Context()
@@ -621,36 +631,48 @@ def _z3_worker(p_allow, p_deny, c_rules, is_deny, ver, timeouts):
         c_expr = _b(c_rules)
         if is_deny: target_expr = _b(p_deny)
         else: target_expr = z3.And(_b(p_allow), z3.Not(_b(p_deny), ctx=ctx), ctx=ctx)
+        
+        result = (False, 0.0, "unknown")
         for t in timeouts:
             s.push(); s.set("timeout", t); s.add(c_expr); s.add(z3.Not(target_expr, ctx=ctx))
             res = s.check(); s.pop()
-            if res == z3.unsat: return True, 1.0, "unsat"
-            elif res == z3.sat: return False, 0.0, "sat"
-        return False, 0.0, "unknown"
-    except Exception as e: return False, 0.0, f"err:{e}"
+            if res == z3.unsat: result = (True, 1.0, "unsat"); break
+            elif res == z3.sat: result = (False, 0.0, "sat"); break
+        q.put(result)
+    except Exception as e:
+        q.put((False, 0.0, f"err:{e}"))
 
 class ProcessIsolatedSMTVerifier:
     def __init__(self, cfg: MergeConfig):
         self.enabled = HAS_Z3 and cfg.enable_smt_verification
         self.tms = cfg.smt_progressive_timeout
 
-    def verify(self, executor: concurrent.futures.ProcessPoolExecutor, p_allow: List[IPCIDRRule], p_deny: List[IPCIDRRule], c_rules: List[IPCIDRRule], is_deny: bool) -> Tuple[bool, float, str]:
-        if not self.enabled or not c_rules or executor is None: return True, 1.0, "bypassed"
+    def verify(self, p_allow: List[IPCIDRRule], p_deny: List[IPCIDRRule], c_rules: List[IPCIDRRule], is_deny: bool) -> Tuple[bool, float, str]:
+        if not self.enabled or not c_rules: return True, 1.0, "bypassed"
+        
+        def _run_process(pa, pd, ca, ver):
+            if not ca: return True, 1.0, "triv"
+            q = mp.Queue()
+            p = mp.Process(target=_z3_worker_process, args=(q, pa, pd, ca, is_deny, ver, self.tms))
+            p.start()
+            timeout_seconds = max(self.tms) / 1000.0 + 1.0
+            p.join(timeout_seconds)
+            if p.is_alive():
+                p.terminate()
+                p.join()
+                return False, 0.0, "timeout"
+            if not q.empty(): return q.get()
+            return False, 0.0, "crash"
+
         v4_pa = [(r.start_int, r.prefixlen) for r in p_allow if r.version==4]
         v6_pa = [(r.start_int, r.prefixlen) for r in p_allow if r.version==6]
         v4_pd = [(r.start_int, r.prefixlen) for r in p_deny if r.version==4]
         v6_pd = [(r.start_int, r.prefixlen) for r in p_deny if r.version==6]
         v4_ca = [(r.start_int, r.prefixlen) for r in c_rules if r.version==4]
         v6_ca = [(r.start_int, r.prefixlen) for r in c_rules if r.version==6]
-        timeout_seconds = max(self.tms) / 1000.0 + 1.0
-        try:
-            if v4_ca: v4_ok, v4_c, v4_m = executor.submit(_z3_worker, v4_pa, v4_pd, v4_ca, is_deny, 4, self.tms).result(timeout=timeout_seconds)
-            else: v4_ok, v4_c, v4_m = True, 1.0, "triv"
-        except concurrent.futures.TimeoutError: v4_ok, v4_c, v4_m = False, 0.0, "timeout"
-        try:
-            if v6_ca: v6_ok, v6_c, v6_m = executor.submit(_z3_worker, v6_pa, v6_pd, v6_ca, is_deny, 6, self.tms).result(timeout=timeout_seconds)
-            else: v6_ok, v6_c, v6_m = True, 1.0, "triv"
-        except concurrent.futures.TimeoutError: v6_ok, v6_c, v6_m = False, 0.0, "timeout"
+
+        v4_ok, v4_c, v4_m = _run_process(v4_pa, v4_pd, v4_ca, 4)
+        v6_ok, v6_c, v6_m = _run_process(v6_pa, v6_pd, v6_ca, 6)
         return (v4_ok and v6_ok), min(v4_c, v6_c), f"{v4_m},{v6_m}"
 
 class CoverageChecker:
@@ -912,7 +934,7 @@ class AdvancedTrustEvaluator:
             if not src.is_explicit_weight and trusted_rule_hashes:
                 overlap = sum(1 for r in src.domain_rules if r._hash in trusted_rule_hashes) + sum(1 for r in src.ip_rules if r._hash in trusted_rule_hashes)
                 overlap_ratio = overlap / max(1, len(src.domain_rules) + len(src.ip_rules))
-                consensus_multiplier = 0.5 + (overlap_ratio * 1.5)
+                consensus_multiplier = 0.7 + (overlap_ratio * 1.3)
 
             src.weight = src.initial_weight * intrinsic_penalty * consensus_multiplier
 
@@ -1083,6 +1105,7 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
                 ips = resolve_hostname(p.hostname)
                 if not ips: break
                 redir = False
+                
                 for ip in ips:
                     _dns_context.forced_host = p.hostname
                     _dns_context.forced_ip = ip
@@ -1112,7 +1135,9 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
                                 ok = True; break
                     except (requests.RequestException, TransientError):
                         if tmp and tmp.exists(): tmp.unlink(missing_ok=True); tmp = None
-                    finally: _dns_context.forced_host, _dns_context.forced_ip = None, None
+                    finally:
+                        if hasattr(_dns_context, 'forced_host'): delattr(_dns_context, 'forced_host')
+                        if hasattr(_dns_context, 'forced_ip'): delattr(_dns_context, 'forced_ip')
                 if redir: continue
                 break
         finally: pass
@@ -1147,7 +1172,7 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
     finally: tmp.unlink(missing_ok=True)
     return None, None
 
-def _verify_rule_group(name: str, bdd: Optional[BDDRuleVerifier], smt_executor: Optional[concurrent.futures.ProcessPoolExecutor], smt_cfg: Optional[MergeConfig], cov: CoverageChecker, 
+def _verify_rule_group(name: str, bdd: Optional[BDDRuleVerifier], smt_cfg: Optional[MergeConfig], cov: CoverageChecker, 
                        pa_dom: List[DomainRule], pd_dom: List[DomainRule], c_dom: List[DomainRule], 
                        pa_ip: List[IPCIDRRule], pd_ip: List[IPCIDRRule], c_ip: List[IPCIDRRule], 
                        src_url: str, is_deny: bool, res: Dict[str, Any]) -> Tuple[bool, float]:
@@ -1158,11 +1183,11 @@ def _verify_rule_group(name: str, bdd: Optional[BDDRuleVerifier], smt_executor: 
                 ip_ok, ip_conf = bdd.verify(pd_ip, [], c_ip, True) if is_deny else bdd.verify(pa_ip, pd_ip, c_ip, False)
                 if not ip_ok: res['issues'].append({'source': src_url, 'verifier': 'BDD_IP', 'type': f"{name}_ip_not_subset", 'confidence': ip_conf})
             except Exception: pass
-        elif smt_executor and smt_cfg and smt_cfg.enable_smt_verification:
+        elif smt_cfg and smt_cfg.enable_smt_verification:
             try:
                 verifier = ProcessIsolatedSMTVerifier(smt_cfg)
-                if is_deny: ip_ok, ip_conf, msg = verifier.verify(smt_executor, [], pd_ip, c_ip, True) 
-                else: ip_ok, ip_conf, msg = verifier.verify(smt_executor, pa_ip, pd_ip, c_ip, False)
+                if is_deny: ip_ok, ip_conf, msg = verifier.verify([], pd_ip, c_ip, True) 
+                else: ip_ok, ip_conf, msg = verifier.verify(pa_ip, pd_ip, c_ip, False)
                 if not ip_ok: res['issues'].append({'source': src_url, 'verifier': 'SMT_IP', 'type': f"{name}_ip_not_subset", 'confidence': ip_conf, 'message': msg})
             except Exception: pass
         else:
@@ -1176,7 +1201,7 @@ def _verify_rule_group(name: str, bdd: Optional[BDDRuleVerifier], smt_executor: 
         if not dom_ok: res['issues'].append({'source': src_url, 'verifier': 'Coverage_DOM', 'type': f"{name}_dom_not_covered", 'confidence': dom_conf})
     return (ip_ok and dom_ok), min(ip_conf, dom_conf)
 
-def run_verifications(parsed_sets: List[ParsedRuleSet], p_dom_allow: List[DomainRule], p_dom_deny: List[DomainRule], p_ip_allow: List[IPCIDRRule], p_ip_deny: List[IPCIDRRule], bdd_verifier: Optional[BDDRuleVerifier], smt_executor: Optional[concurrent.futures.ProcessPoolExecutor], config: MergeConfig) -> Dict[str, Any]:
+def run_verifications(parsed_sets: List[ParsedRuleSet], p_dom_allow: List[DomainRule], p_dom_deny: List[DomainRule], p_ip_allow: List[IPCIDRRule], p_ip_deny: List[IPCIDRRule], bdd_verifier: Optional[BDDRuleVerifier], config: MergeConfig) -> Dict[str, Any]:
     results, total_sources, passed, coverages = {'issues': [], 'stats': {}}, 0, 0, []
     coverage_checker = CoverageChecker(itertools.chain(p_dom_allow, p_ip_allow, p_dom_deny, p_ip_deny))
     for src in sorted(parsed_sets, key=lambda x: -x.weight)[:config.max_verification_sources]:
@@ -1190,7 +1215,7 @@ def run_verifications(parsed_sets: List[ParsedRuleSet], p_dom_allow: List[Domain
         def check(name: str, is_deny: bool, c_d: List[DomainRule], c_i: List[IPCIDRRule]) -> None:
             nonlocal src_passed
             if c_d or c_i:
-                ok, conf = _verify_rule_group(name, bdd_verifier, smt_executor, config, coverage_checker, p_dom_allow, p_dom_deny, c_d, p_ip_allow, p_ip_deny, c_i, src.url, is_deny, results)
+                ok, conf = _verify_rule_group(name, bdd_verifier, config, coverage_checker, p_dom_allow, p_dom_deny, c_d, p_ip_allow, p_ip_deny, c_i, src.url, is_deny, results)
                 src_passed = src_passed and ok
                 cov_components.append(conf)
         check('domain_allow', False, ca, cia); check('domain_deny', True, cd, cid)
@@ -1208,7 +1233,7 @@ def _format_policy(attrs: str, default_pol: str) -> str:
         return res
     except Exception: return default_pol
 
-def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[SemanticLineageAnalyzer] = None, smt_executor: Optional[concurrent.futures.ProcessPoolExecutor] = None) -> Tuple[str, str, str, str, float]:
+def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[SemanticLineageAnalyzer] = None) -> Tuple[str, str, str, str, float]:
     start_time = time.time()
     name = task.get('name', '')
     if not name or not RE_TASK_NAME.match(name): return (name, "❌", "Invalid name", "0KB", 0.0)
@@ -1294,9 +1319,9 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
         p_dom_a, p_dom_d = [], []
         if cfg.enable_trie_compression:
             for attrs_str, trie in allow_tries.items():
-                for r in trie.optimize(False): r.attrs = attrs_str; p_dom_a.append(r)
+                p_dom_a.extend(trie.optimize(False))
             for attrs_str, trie in deny_tries.items():
-                for r in trie.optimize(True): r.attrs = attrs_str; p_dom_d.append(r)
+                p_dom_d.extend(trie.optimize(True))
         else:
             p_dom_a = [r for w, r, u in dom_objs.values() if w >= min_score_threshold - 0.001 and not r.is_exclusion]
             p_dom_d = [r for w, r, u in dom_objs.values() if w >= min_score_threshold - 0.001 and r.is_exclusion]
@@ -1317,7 +1342,7 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             bdd = BDDRuleVerifier(eng, cfg.max_bdd_var_cache_size) if cfg.enable_bdd_verification else None
             va_ips = [IPCIDRRule(int(ipaddress.ip_network(s, strict=False).network_address), int(ipaddress.ip_network(s, strict=False).broadcast_address), ipaddress.ip_network(s, strict=False).prefixlen, 6 if ':' in s else 4, False) for s, _ in f_a_ip_strs]
             vd_ips = [IPCIDRRule(int(ipaddress.ip_network(s, strict=False).network_address), int(ipaddress.ip_network(s, strict=False).broadcast_address), ipaddress.ip_network(s, strict=False).prefixlen, 6 if ':' in s else 4, True) for s, _ in f_d_ip_strs]
-            verify_results = run_verifications(sources, p_dom_a, p_dom_d, va_ips, vd_ips, bdd, smt_executor, cfg)
+            verify_results = run_verifications(sources, p_dom_a, p_dom_d, va_ips, vd_ips, bdd, cfg)
             for iss in verify_results.get('issues', []): issues.append(f"{iss['type']} ({iss['verifier']})")
             if bdd: eng.clear()
 
@@ -1393,13 +1418,10 @@ def main() -> int:
 
     if not tasks: return 0
     lin = SemanticLineageAnalyzer(Path(cfg.lineage_state_file), cfg.enable_lineage)
-    res, exe, intr, smt_executor = [], None, False, None
-    if HAS_Z3 and cfg.enable_smt_verification:
-        smt_ctx = mp.get_context('spawn') if hasattr(mp, 'get_context') else mp
-        smt_executor = concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=smt_ctx)
+    res, exe, intr = [], None, False
     try:
         exe = concurrent.futures.ThreadPoolExecutor(max_workers=min(cfg.max_workers, len(tasks)))
-        futs = [exe.submit(worker, t, cfg, lin, smt_executor) for t in tasks]
+        futs = [exe.submit(worker, t, cfg, lin) for t in tasks]
         for f in concurrent.futures.as_completed(futs):
             try: res.append(f.result())
             except Exception as e: logger.error(f"Execution Error: {e}")
@@ -1416,8 +1438,9 @@ def main() -> int:
         return 130
     finally:
         if exe and not intr: exe.shutdown(wait=True)
-        if smt_executor: smt_executor.shutdown(wait=True)
     return 1 if any(r[1] == "❌" for r in res) else 0
 
 if __name__ == '__main__':
+    if HAS_Z3:
+        mp.set_start_method('spawn', force=True)
     sys.exit(main())
