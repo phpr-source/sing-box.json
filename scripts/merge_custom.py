@@ -66,7 +66,7 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 76
+CACHE_VERSION = 80
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 4
 MAX_DNS_CACHE = 1024
@@ -270,12 +270,15 @@ class IntervalMerger:
 
     @classmethod
     def resolve_weighted_ips(cls, rules_with_weights: List[Tuple[float, IPCIDRRule, str]], version: int) -> Tuple[List[Tuple[int, int, str]], List[Tuple[int, int, str]]]:
-        rules_with_weights.sort(key=lambda x: (-x[0], x[2], x[1].start_int))
+        rules_with_weights.sort(key=lambda x: (-x[0], x[1].prefixlen, x[1].start_int))
         events = []
         for i, (w, r, url) in enumerate(rules_with_weights):
             if r.version != version: continue
             rw = int(round(w, 5) * 100000)
-            events.extend([(r.start_int, 1, rw, r.is_exclusion, r.attrs, i), (r.end_int + 1, -1, rw, r.is_exclusion, r.attrs, i)])
+            events.extend([
+                (r.start_int, 1, r.prefixlen, rw, r.is_exclusion, r.attrs, i),
+                (r.end_int + 1, -1, r.prefixlen, rw, r.is_exclusion, r.attrs, i)
+            ])
         
         if not events: return [], []
         events.sort(key=lambda x: (x[0], -x[1]))
@@ -283,49 +286,63 @@ class IntervalMerger:
         acc_a, acc_d = [], []
         active_a_map, active_d_map = {}, {}
         max_heap_a, max_heap_d = [], []
-        prev_x, i_idx, n = -1, 0, len(events)
+        
+        prev_x = -1
+        prev_winner_type = None
+        prev_winner_attr = ""
+        
+        i_idx, n = 0, len(events)
         
         while i_idx < n:
             x = events[i_idx][0]
-            if x > prev_x and prev_x != -1:
-                cur_max_a, cur_attr_a = -1, ""
-                while max_heap_a:
-                    neg_rw, idx = max_heap_a[0]
-                    if idx in active_a_map and active_a_map[idx][0] == -neg_rw:
-                        cur_max_a = -neg_rw
-                        cur_attr_a = active_a_map[idx][1]
-                        break
-                    heapq.heappop(max_heap_a)
-                
-                cur_max_d, cur_attr_d = -1, ""
-                while max_heap_d:
-                    neg_rw, idx = max_heap_d[0]
-                    if idx in active_d_map and active_d_map[idx][0] == -neg_rw:
-                        cur_max_d = -neg_rw
-                        cur_attr_d = active_d_map[idx][1]
-                        break
-                    heapq.heappop(max_heap_d)
-
-                if cur_max_d >= 0 and cur_max_d >= cur_max_a:
-                    acc_d.append((prev_x, x - 1, cur_attr_d))
-                elif cur_max_a >= 0 and cur_max_a > cur_max_d:
-                    acc_a.append((prev_x, x - 1, cur_attr_a))
+            
+            if prev_x != -1 and prev_x < x and prev_winner_type:
+                if prev_winner_type == 'a':
+                    acc_a.append((prev_x, x - 1, prev_winner_attr))
+                elif prev_winner_type == 'd':
+                    acc_d.append((prev_x, x - 1, prev_winner_attr))
             
             while i_idx < n and events[i_idx][0] == x:
-                _, op, rw, is_excl, attrs, r_id = events[i_idx]
+                _, op, plen, rw, is_excl, attrs, r_id = events[i_idx]
                 if is_excl:
                     if op == 1:
-                        active_d_map[r_id] = (rw, attrs)
-                        heapq.heappush(max_heap_d, (-rw, r_id))
+                        active_d_map[r_id] = (plen, rw, attrs)
+                        heapq.heappush(max_heap_d, (-plen, -rw, r_id))
                     else:
                         active_d_map.pop(r_id, None)
                 else:
                     if op == 1:
-                        active_a_map[r_id] = (rw, attrs)
-                        heapq.heappush(max_heap_a, (-rw, r_id))
+                        active_a_map[r_id] = (plen, rw, attrs)
+                        heapq.heappush(max_heap_a, (-plen, -rw, r_id))
                     else:
                         active_a_map.pop(r_id, None)
                 i_idx += 1
+                
+            cur_prio_a, cur_attr_a = (-1, -1), ""
+            while max_heap_a:
+                neg_plen, neg_rw, idx = max_heap_a[0]
+                if idx in active_a_map and active_a_map[idx][:2] == (-neg_plen, -neg_rw):
+                    cur_prio_a = (-neg_plen, -neg_rw)
+                    cur_attr_a = active_a_map[idx][2]
+                    break
+                heapq.heappop(max_heap_a)
+            
+            cur_prio_d, cur_attr_d = (-1, -1), ""
+            while max_heap_d:
+                neg_plen, neg_rw, idx = max_heap_d[0]
+                if idx in active_d_map and active_d_map[idx][:2] == (-neg_plen, -neg_rw):
+                    cur_prio_d = (-neg_plen, -neg_rw)
+                    cur_attr_d = active_d_map[idx][2]
+                    break
+                heapq.heappop(max_heap_d)
+
+            if cur_prio_d >= (0, 0) and cur_prio_d >= cur_prio_a:
+                prev_winner_type, prev_winner_attr = 'd', cur_attr_d
+            elif cur_prio_a >= (0, 0) and cur_prio_a > cur_prio_d:
+                prev_winner_type, prev_winner_attr = 'a', cur_attr_a
+            else:
+                prev_winner_type, prev_winner_attr = None, ""
+                
             prev_x = x
 
         def _merge_adj(ivs: List[Tuple[int, int, str]]) -> List[Tuple[int, int, str]]:
@@ -336,6 +353,7 @@ class IntervalMerger:
                 if s <= le + 1 and attr == lattr: res[-1] = (ls, max(le, e), attr)
                 else: res.append((s, e, attr))
             return res
+            
         return _merge_adj(acc_a), _merge_adj(acc_d)
 
     @classmethod
@@ -439,35 +457,45 @@ class UnifiedDomainTrie:
 
     def optimize(self) -> List[DomainRule]:
         res = []
-        def _dfs(node: TrieNode, path: List[str], active_suffix: Optional[Tuple]):
+        def _dfs(node: TrieNode, path: List[str], active_action: Optional[Tuple[bool, str]], active_weight: Optional[float]):
             cur_dom = '.'.join(reversed(path)) if path else ""
             
-            next_suffix = active_suffix
+            current_action_for_children = active_action
+            current_weight_for_children = active_weight
+            
             if node.suffix:
-                if not active_suffix or node.suffix[0] >= active_suffix[0]:
-                    if not active_suffix or node.suffix[1:] != active_suffix[1:]:
-                        res.append(DomainRule(MatchType.SUFFIX, cur_dom, node.suffix[1], 0, node.suffix[2]))
-                    next_suffix = node.suffix
+                action = node.suffix[1:]
+                w = node.suffix[0]
+                if action != active_action or (active_weight is not None and w > active_weight):
+                    res.append(DomainRule(MatchType.SUFFIX, cur_dom, action[0], 0, action[1]))
+                current_action_for_children = action
+                current_weight_for_children = w
 
-            active_wildcard = next_suffix
+            active_wildcard_action = current_action_for_children
             if node.wildcard:
-                if not active_wildcard or node.wildcard[0] >= active_wildcard[0]:
-                    if not active_wildcard or node.wildcard[1:] != active_wildcard[1:]:
-                        res.append(DomainRule(MatchType.WILDCARD, cur_dom, node.wildcard[1], 0, node.wildcard[2]))
-                    active_wildcard = node.wildcard
-
+                action = node.wildcard[1:]
+                w = node.wildcard[0]
+                if action != current_action_for_children or (current_weight_for_children is not None and w > current_weight_for_children):
+                    res.append(DomainRule(MatchType.WILDCARD, cur_dom, action[0], 0, action[1]))
+                active_wildcard_action = action
+            
             if node.exact:
-                if not active_wildcard or node.exact[0] >= active_wildcard[0]:
-                    if not active_wildcard or node.exact[1:] != active_wildcard[1:]:
-                        res.append(DomainRule(MatchType.EXACT, cur_dom, node.exact[1], 0, node.exact[2]))
+                action = node.exact[1:]
+                w = node.exact[0]
+                effective_this_node = node.suffix[1:] if node.suffix else active_action
+                effective_weight = node.suffix[0] if node.suffix else active_weight
+                if action != effective_this_node or (effective_weight is not None and w > effective_weight):
+                    res.append(DomainRule(MatchType.EXACT, cur_dom, action[0], 0, action[1]))
             
             for lbl, ch in node.children.items():
                 path.append(lbl)
-                _dfs(ch, path, next_suffix)
+                pass_action = active_wildcard_action if node.wildcard else current_action_for_children
+                pass_weight = node.wildcard[0] if node.wildcard else current_weight_for_children
+                _dfs(ch, path, pass_action, pass_weight)
                 path.pop()
 
         for lbl, ch in self.root.children.items():
-            _dfs(ch, [lbl], None)
+            _dfs(ch, [lbl], None, None)
         return res
 
 class VersionedBDDNode:
@@ -624,7 +652,7 @@ class BDDRuleVerifier:
         ok_v6, c_v6 = _chk(v6_pa, v6_pd, v6_ca, 6)
         return (ok_v4 and ok_v6), min(c_v4 if v4_ca and not ok_v4 else 1.0, c_v6 if v6_ca and not ok_v6 else 1.0)
 
-def _z3_worker_process(q: mp.Queue, p_allow: List[Tuple[int, int]], p_deny: List[Tuple[int, int]], c_rules: List[Tuple[int, int]], is_deny: bool, ver: int, timeouts: Tuple[int, ...]):
+def _z3_worker(p_allow, p_deny, c_rules, is_deny, ver, timeouts):
     try:
         import z3
         ctx = z3.Context()
@@ -641,48 +669,36 @@ def _z3_worker_process(q: mp.Queue, p_allow: List[Tuple[int, int]], p_deny: List
         c_expr = _b(c_rules)
         if is_deny: target_expr = _b(p_deny)
         else: target_expr = z3.And(_b(p_allow), z3.Not(_b(p_deny), ctx=ctx), ctx=ctx)
-        
-        result = (False, 0.0, "unknown")
         for t in timeouts:
             s.push(); s.set("timeout", t); s.add(c_expr); s.add(z3.Not(target_expr, ctx=ctx))
             res = s.check(); s.pop()
-            if res == z3.unsat: result = (True, 1.0, "unsat"); break
-            elif res == z3.sat: result = (False, 0.0, "sat"); break
-        q.put(result)
-    except Exception as e:
-        q.put((False, 0.0, f"err:{e}"))
+            if res == z3.unsat: return True, 1.0, "unsat"
+            elif res == z3.sat: return False, 0.0, "sat"
+        return False, 0.0, "unknown"
+    except Exception as e: return False, 0.0, f"err:{e}"
 
 class ProcessIsolatedSMTVerifier:
     def __init__(self, cfg: MergeConfig):
         self.enabled = HAS_Z3 and cfg.enable_smt_verification
         self.tms = cfg.smt_progressive_timeout
 
-    def verify(self, p_allow: List[IPCIDRRule], p_deny: List[IPCIDRRule], c_rules: List[IPCIDRRule], is_deny: bool) -> Tuple[bool, float, str]:
-        if not self.enabled or not c_rules: return True, 1.0, "bypassed"
-        
-        def _run_process(pa, pd, ca, ver):
-            if not ca: return True, 1.0, "triv"
-            q = mp.Queue()
-            p = mp.Process(target=_z3_worker_process, args=(q, pa, pd, ca, is_deny, ver, self.tms))
-            p.start()
-            timeout_seconds = max(self.tms) / 1000.0 + 1.0
-            p.join(timeout_seconds)
-            if p.is_alive():
-                p.terminate()
-                p.join()
-                return False, 0.0, "timeout"
-            if not q.empty(): return q.get()
-            return False, 0.0, "crash"
-
+    def verify(self, executor: concurrent.futures.ProcessPoolExecutor, p_allow: List[IPCIDRRule], p_deny: List[IPCIDRRule], c_rules: List[IPCIDRRule], is_deny: bool) -> Tuple[bool, float, str]:
+        if not self.enabled or not c_rules or executor is None: return True, 1.0, "bypassed"
         v4_pa = [(r.start_int, r.prefixlen) for r in p_allow if r.version==4]
         v6_pa = [(r.start_int, r.prefixlen) for r in p_allow if r.version==6]
         v4_pd = [(r.start_int, r.prefixlen) for r in p_deny if r.version==4]
         v6_pd = [(r.start_int, r.prefixlen) for r in p_deny if r.version==6]
         v4_ca = [(r.start_int, r.prefixlen) for r in c_rules if r.version==4]
         v6_ca = [(r.start_int, r.prefixlen) for r in c_rules if r.version==6]
-
-        v4_ok, v4_c, v4_m = _run_process(v4_pa, v4_pd, v4_ca, 4)
-        v6_ok, v6_c, v6_m = _run_process(v6_pa, v6_pd, v6_ca, 6)
+        timeout_seconds = max(self.tms) / 1000.0 + 1.0
+        try:
+            if v4_ca: v4_ok, v4_c, v4_m = executor.submit(_z3_worker, v4_pa, v4_pd, v4_ca, is_deny, 4, self.tms).result(timeout=timeout_seconds)
+            else: v4_ok, v4_c, v4_m = True, 1.0, "triv"
+        except concurrent.futures.TimeoutError: v4_ok, v4_c, v4_m = False, 0.0, "timeout"
+        try:
+            if v6_ca: v6_ok, v6_c, v6_m = executor.submit(_z3_worker, v6_pa, v6_pd, v6_ca, is_deny, 6, self.tms).result(timeout=timeout_seconds)
+            else: v6_ok, v6_c, v6_m = True, 1.0, "triv"
+        except concurrent.futures.TimeoutError: v6_ok, v6_c, v6_m = False, 0.0, "timeout"
         return (v4_ok and v6_ok), min(v4_c, v6_c), f"{v4_m},{v6_m}"
 
 class CoverageChecker:
@@ -1125,7 +1141,7 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
                             s.headers.update({'Connection': 'close'})
                             s.mount('https://', HTTPAdapter(max_retries=Retry(total=1)))
                             s.mount('http://', HTTPAdapter(max_retries=Retry(total=1)))
-                            with s.get(curl, stream=True, timeout=(cfg.download_timeout_connect, cfg.download_timeout_read), allow_redirects=False, headers={"User-Agent": "StrictRuleMerger/13.8 Ultimate"}) as resp:
+                            with s.get(curl, stream=True, timeout=(cfg.download_timeout_connect, cfg.download_timeout_read), allow_redirects=False, headers={"User-Agent": "StrictRuleMerger/18.0 Ultimate"}) as resp:
                                 if resp.status_code in (301, 302, 303, 307, 308):
                                     curl = urljoin(curl, resp.headers.get('Location', ''))
                                     redir = True
@@ -1183,7 +1199,7 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
     finally: tmp.unlink(missing_ok=True)
     return None, None
 
-def _verify_rule_group(name: str, bdd: Optional[BDDRuleVerifier], smt_cfg: Optional[MergeConfig], cov: CoverageChecker, 
+def _verify_rule_group(name: str, bdd: Optional[BDDRuleVerifier], smt_executor: Optional[concurrent.futures.ProcessPoolExecutor], smt_cfg: Optional[MergeConfig], cov: CoverageChecker, 
                        pa_dom: List[DomainRule], pd_dom: List[DomainRule], c_dom: List[DomainRule], 
                        pa_ip: List[IPCIDRRule], pd_ip: List[IPCIDRRule], c_ip: List[IPCIDRRule], 
                        src_url: str, is_deny: bool, res: Dict[str, Any]) -> Tuple[bool, float]:
@@ -1194,11 +1210,11 @@ def _verify_rule_group(name: str, bdd: Optional[BDDRuleVerifier], smt_cfg: Optio
                 ip_ok, ip_conf = bdd.verify(pd_ip, [], c_ip, True) if is_deny else bdd.verify(pa_ip, pd_ip, c_ip, False)
                 if not ip_ok: res['issues'].append({'source': src_url, 'verifier': 'BDD_IP', 'type': f"{name}_ip_not_subset", 'confidence': ip_conf})
             except Exception: pass
-        elif smt_cfg and smt_cfg.enable_smt_verification:
+        elif smt_executor and smt_cfg and smt_cfg.enable_smt_verification:
             try:
                 verifier = ProcessIsolatedSMTVerifier(smt_cfg)
-                if is_deny: ip_ok, ip_conf, msg = verifier.verify([], pd_ip, c_ip, True) 
-                else: ip_ok, ip_conf, msg = verifier.verify(pa_ip, pd_ip, c_ip, False)
+                if is_deny: ip_ok, ip_conf, msg = verifier.verify(smt_executor, [], pd_ip, c_ip, True) 
+                else: ip_ok, ip_conf, msg = verifier.verify(smt_executor, pa_ip, pd_ip, c_ip, False)
                 if not ip_ok: res['issues'].append({'source': src_url, 'verifier': 'SMT_IP', 'type': f"{name}_ip_not_subset", 'confidence': ip_conf, 'message': msg})
             except Exception: pass
         else:
@@ -1212,7 +1228,7 @@ def _verify_rule_group(name: str, bdd: Optional[BDDRuleVerifier], smt_cfg: Optio
         if not dom_ok: res['issues'].append({'source': src_url, 'verifier': 'Coverage_DOM', 'type': f"{name}_dom_not_covered", 'confidence': dom_conf})
     return (ip_ok and dom_ok), min(ip_conf, dom_conf)
 
-def run_verifications(parsed_sets: List[ParsedRuleSet], p_dom_allow: List[DomainRule], p_dom_deny: List[DomainRule], p_ip_allow: List[IPCIDRRule], p_ip_deny: List[IPCIDRRule], bdd_verifier: Optional[BDDRuleVerifier], config: MergeConfig) -> Dict[str, Any]:
+def run_verifications(parsed_sets: List[ParsedRuleSet], p_dom_allow: List[DomainRule], p_dom_deny: List[DomainRule], p_ip_allow: List[IPCIDRRule], p_ip_deny: List[IPCIDRRule], bdd_verifier: Optional[BDDRuleVerifier], smt_executor: Optional[concurrent.futures.ProcessPoolExecutor], config: MergeConfig) -> Dict[str, Any]:
     results, total_sources, passed, coverages = {'issues': [], 'stats': {}}, 0, 0, []
     coverage_checker = CoverageChecker(itertools.chain(p_dom_allow, p_ip_allow, p_dom_deny, p_ip_deny))
     for src in sorted(parsed_sets, key=lambda x: -x.weight)[:config.max_verification_sources]:
@@ -1226,7 +1242,7 @@ def run_verifications(parsed_sets: List[ParsedRuleSet], p_dom_allow: List[Domain
         def check(name: str, is_deny: bool, c_d: List[DomainRule], c_i: List[IPCIDRRule]) -> None:
             nonlocal src_passed
             if c_d or c_i:
-                ok, conf = _verify_rule_group(name, bdd_verifier, config, coverage_checker, p_dom_allow, p_dom_deny, c_d, p_ip_allow, p_ip_deny, c_i, src.url, is_deny, results)
+                ok, conf = _verify_rule_group(name, bdd_verifier, smt_executor, config, coverage_checker, p_dom_allow, p_dom_deny, c_d, p_ip_allow, p_ip_deny, c_i, src.url, is_deny, results)
                 src_passed = src_passed and ok
                 cov_components.append(conf)
         check('domain_allow', False, ca, cia); check('domain_deny', True, cd, cid)
@@ -1244,7 +1260,7 @@ def _format_policy(attrs: str, default_pol: str) -> str:
         return res
     except Exception: return default_pol
 
-def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[SemanticLineageAnalyzer] = None) -> Tuple[str, str, str, str, float]:
+def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[SemanticLineageAnalyzer] = None, smt_executor: Optional[concurrent.futures.ProcessPoolExecutor] = None) -> Tuple[str, str, str, str, float]:
     start_time = time.time()
     name = task.get('name', '')
     if not name or not RE_TASK_NAME.match(name): return (name, "❌", "Invalid name", "0KB", 0.0)
@@ -1305,35 +1321,34 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
         ip_objs, dom_objs, gen_objs = {}, {}, {}
         for src in sources:
             for r in src.domain_rules:
-                if r._hash not in dom_objs or src.weight > dom_objs[r._hash][0] or (src.weight == dom_objs[r._hash][0] and src.url < dom_objs[r._hash][2]):
-                    dom_objs[r._hash] = (src.weight, r, src.url)
+                k = (r.normalized, r.match_type)
+                if k not in dom_objs or src.weight > dom_objs[k][0]:
+                    dom_objs[k] = (src.weight, r, src.url)
             for r in src.ip_rules:
-                if r._hash not in ip_objs or src.weight > ip_objs[r._hash][0] or (src.weight == ip_objs[r._hash][0] and src.url < ip_objs[r._hash][2]):
-                    ip_objs[r._hash] = (src.weight, r, src.url)
+                k = (r.version, r.start_int, r.prefixlen)
+                if k not in ip_objs or src.weight > ip_objs[k][0]:
+                    ip_objs[k] = (src.weight, r, src.url)
             for r in src.generic_rules:
-                if r._hash not in gen_objs or src.weight > gen_objs[r._hash][0] or (src.weight == gen_objs[r._hash][0] and src.url < gen_objs[r._hash][2]):
-                    gen_objs[r._hash] = (src.weight, r, src.url)
+                k = (r.type, r.val)
+                if k not in gen_objs or src.weight > gen_objs[k][0]:
+                    gen_objs[k] = (src.weight, r, src.url)
 
         unified_trie = UnifiedDomainTrie()
         other_doms, ip_weights = {}, []
         
-        for h, (score, r, url) in dom_objs.items():
+        for k, (score, r, url) in dom_objs.items():
             if score >= min_score_threshold - 0.001:
                 if r.match_type in (MatchType.KEYWORD, MatchType.REGEX):
-                    k = (r.normalized, r.match_type)
-                    if k not in other_doms or score > other_doms[k][0]:
-                        other_doms[k] = (score, r)
+                    other_doms[k] = (score, r)
                 else:
                     unified_trie.insert(r, score)
                 
-        for h, (score, r, url) in ip_objs.items():
+        for k, (score, r, url) in ip_objs.items():
             if score >= min_score_threshold - 0.001: ip_weights.append((score, r, url))
                 
-        for h, (score, r, url) in gen_objs.items():
+        for k, (score, r, url) in gen_objs.items():
             if score >= min_score_threshold - 0.001: 
-                k = (r.val, r.type)
-                if k not in other_doms or score > other_doms[k][0]:
-                    other_doms[k] = (score, r)
+                other_doms[k] = (score, r)
                 
         if cfg.enable_trie_compression:
             all_d = unified_trie.optimize()
@@ -1361,7 +1376,7 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             
             p_dom_a = [r for r in all_d if not getattr(r, 'is_exclusion', False)]
             p_dom_d = [r for r in all_d if getattr(r, 'is_exclusion', False)]
-            verify_results = run_verifications(sources, p_dom_a, p_dom_d, va_ips, vd_ips, bdd, cfg)
+            verify_results = run_verifications(sources, p_dom_a, p_dom_d, va_ips, vd_ips, bdd, smt_executor, cfg)
             for iss in verify_results.get('issues', []): issues.append(f"{iss['type']} ({iss['verifier']})")
             if bdd: eng.clear()
 
@@ -1436,10 +1451,15 @@ def main() -> int:
 
     if not tasks: return 0
     lin = SemanticLineageAnalyzer(Path(cfg.lineage_state_file), cfg.enable_lineage)
-    res, exe, intr = [], None, False
+    res, exe, intr, smt_executor = [], None, False, None
+    if HAS_Z3 and cfg.enable_smt_verification:
+        smt_ctx = mp.get_context('spawn') if hasattr(mp, 'get_context') else mp
+        # 解決 SMT Pool Starvation 問題：動態調整 Worker 數量，防止全域單線程阻塞
+        smt_workers = max(1, min(cfg.max_workers, os.cpu_count() or 2))
+        smt_executor = concurrent.futures.ProcessPoolExecutor(max_workers=smt_workers, mp_context=smt_ctx)
     try:
         exe = concurrent.futures.ThreadPoolExecutor(max_workers=min(cfg.max_workers, len(tasks)))
-        futs = [exe.submit(worker, t, cfg, lin) for t in tasks]
+        futs = [exe.submit(worker, t, cfg, lin, smt_executor) for t in tasks]
         for f in concurrent.futures.as_completed(futs):
             try: res.append(f.result())
             except Exception as e: logger.error(f"Execution Error: {e}")
@@ -1456,6 +1476,7 @@ def main() -> int:
         return 130
     finally:
         if exe and not intr: exe.shutdown(wait=True)
+        if smt_executor: smt_executor.shutdown(wait=True)
     return 1 if any(r[1] == "❌" for r in res) else 0
 
 if __name__ == '__main__':
