@@ -25,7 +25,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install requests tldextract
+          pip install requests tldextract urllib3 orjson msgpack blake3 z3-solver
           wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
           chmod +x sb-core
 
@@ -36,6 +36,8 @@ jobs:
           rm -f rules/merged-srs/*
 
       - name: Run Custom Merge
+        env:
+          SB_CORE_PATH: ./sb-core
         run: python scripts/merge_custom.py
 
       - name: Commit and Push
