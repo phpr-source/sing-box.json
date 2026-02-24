@@ -67,7 +67,7 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 70
+CACHE_VERSION = 72
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 4
 MAX_DNS_CACHE = 1024
@@ -273,9 +273,7 @@ class IntervalMerger:
 
     @classmethod
     def resolve_weighted_ips(cls, rules_with_weights: List[Tuple[float, IPCIDRRule, str]], version: int) -> Tuple[List[Tuple[int, int, str]], List[Tuple[int, int, str]]]:
-        # Deterministic sort before assigning unique IDs
         rules_with_weights.sort(key=lambda x: (-x[0], x[2], x[1].start_int))
-        
         events = []
         for i, (w, r, url) in enumerate(rules_with_weights):
             if r.version != version: continue
@@ -288,10 +286,7 @@ class IntervalMerger:
         acc_a, acc_d = [], []
         active_a_map, active_d_map = {}, {}
         max_heap_a, max_heap_d = [], []
-        
-        prev_x = -1
-        i_idx = 0
-        n = len(events)
+        prev_x, i_idx, n = -1, 0, len(events)
         
         while i_idx < n:
             x = events[i_idx][0]
@@ -355,7 +350,6 @@ class IntervalMerger:
         collapsed = list(ipaddress.collapse_addresses(cidrs))
         if len(collapsed) <= target_count: return collapsed, 0.0
 
-        # Keep largest networks first (smaller prefixlen = larger block)
         collapsed.sort(key=lambda x: x.prefixlen, reverse=False)
         kept = collapsed[:target_count]
         new_hosts = sum(c.num_addresses for c in kept)
@@ -754,20 +748,21 @@ class WALBackend:
             except Exception: pass
 
 class ParsedRuleSet:
-    __slots__ = ('url', 'domain_rules', 'ip_rules', 'generic_rules', 'ts', 'hash', 'weight', 'initial_weight', 'compiled_regexes', 'is_explicit_weight')
-    def __init__(self, u: str, d: Tuple[DomainRule,...], i: Tuple[IPCIDRRule,...], g: Tuple[GenericRule,...], t: float, h: str = "", w: float = 1.0, explicit: bool = False):
+    __slots__ = ('url', 'domain_rules', 'ip_rules', 'generic_rules', 'ts', 'hash', 'weight', 'initial_weight', 'compiled_regexes', 'is_explicit_weight', 'dga_count')
+    def __init__(self, u: str, d: Tuple[DomainRule,...], i: Tuple[IPCIDRRule,...], g: Tuple[GenericRule,...], t: float, h: str = "", w: float = 1.0, explicit: bool = False, dga_count: int = 0):
         self.url, self.domain_rules, self.ip_rules, self.generic_rules, self.ts = u, d, i, g, t
         self.weight = self.initial_weight = w
         self.is_explicit_weight = explicit
+        self.dga_count = dga_count  # Pre-computed to avoid main-thread blocking
         
-        # O(1) Streaming Hash Optimization (Avoid memory spike of b"|".join)
         if not h:
             hasher = blake3() if USE_BLAKE3 else hashlib.sha256()
-            sorted_d = sorted(d, key=lambda x: (x.match_type.value, x.is_exclusion, x.normalized))
+            # FIX: Included x.attrs in the sorting tuple to guarantee absolute determinism!
+            sorted_d = sorted(d, key=lambda x: (x.match_type.value, x.is_exclusion, x.normalized, x.attrs))
             for r in sorted_d: hasher.update(f"{r.match_type.value},{int(r.is_exclusion)},{r.normalized},{r.attrs}|".encode('utf-8'))
-            sorted_i = sorted(i, key=lambda x: (x.version, x.start_int, x.prefixlen, x.is_exclusion))
+            sorted_i = sorted(i, key=lambda x: (x.version, x.start_int, x.prefixlen, x.is_exclusion, x.attrs))
             for r in sorted_i: hasher.update(f"{r.version},{r.start_int},{r.prefixlen},{int(r.is_exclusion)},{r.attrs}|".encode('utf-8'))
-            sorted_g = sorted(g, key=lambda x: (x.type, x.val, x.is_exclusion))
+            sorted_g = sorted(g, key=lambda x: (x.type, x.val, x.is_exclusion, x.attrs))
             for r in sorted_g: hasher.update(f"{r.type},{r.val},{int(r.is_exclusion)},{r.attrs}|".encode('utf-8'))
             self.hash = hasher.hexdigest()
         else:
@@ -824,7 +819,6 @@ class SemanticLineageAnalyzer:
             
         for r in c_doms:
             if r.match_type not in (MatchType.KEYWORD, MatchType.REGEX):
-                # O(1) Fast path for exact matches
                 if r.match_type == MatchType.EXACT and r.normalized in p_exact_set: continue
                 covered = parent_trie.is_covered(r.normalized)
                 if not covered and p_kws: covered = any(pk in r.normalized for pk in p_kws)
@@ -916,11 +910,9 @@ class AdvancedTrustEvaluator:
                 src.weight = 0.0
                 continue
                 
-            garbage = 0
-            for r in src.domain_rules:
-                if r.match_type in (MatchType.KEYWORD, MatchType.REGEX): continue
-                if EntropyAssessor.assess(r.normalized) == EntropyLevel.DGA_CONFIRMED: 
-                    garbage += 1
+            # Changed to O(1) attribute reading since parsing pre-calculates this via parallel threads!
+            garbage = src.dga_count
+            
             for r in src.ip_rules:
                 if r.version == 4 and r.prefixlen <= self.cfg.ipv4_garbage_threshold: garbage += 1
                 elif r.version == 6 and r.prefixlen <= self.cfg.ipv6_garbage_threshold: garbage += 1
@@ -957,6 +949,8 @@ class RuleParser:
 
     def parse(self, src: Union[bytes, Path], url: str) -> ParsedRuleSet:
         dom, ip, gen = [], [] , []
+        dga_count = [0] # Use list to pass by reference to nested function
+        
         try:
             if isinstance(src, Path):
                 with src.open('rb') as f: header = f.read(1024)
@@ -973,7 +967,11 @@ class RuleParser:
                     except UnicodeError: return
                 if not n or len(n) > self._cfg.max_domain_length or ' ' in n: return
                 if not all(RE_DOMAIN_LABEL.match(p) for p in n.split('.')): return
-                if self._dga and EntropyAssessor.assess(n) == EntropyLevel.DGA_CONFIRMED: return
+                
+                # Compute DGA purely here in the parallel parsing stage
+                if self._dga and EntropyAssessor.assess(n) == EntropyLevel.DGA_CONFIRMED: 
+                    dga_count[0] += 1
+                
                 mt = MatchType.WILDCARD if typ == 'domain_wildcard' or val.startswith('*.') else (MatchType.SUFFIX if typ == 'domain_suffix' else MatchType.EXACT)
                 dom.append(DomainRule(mt, n, is_excl, 0, attrs))
             elif typ in ('domain_keyword', 'domain_regex'):
@@ -1013,7 +1011,7 @@ class RuleParser:
                         
                         for val in vals:
                             if str(val).strip(): _add(mt, str(val).strip(), is_excl, attr_str)
-                return ParsedRuleSet(url, tuple(dom), tuple(ip), tuple(gen), time.time())
+                return ParsedRuleSet(url, tuple(dom), tuple(ip), tuple(gen), time.time(), dga_count=dga_count[0])
             except Exception as e: logger.debug(f"JSON parsing fallback for {url}: {e}")
             
         def _stream(iterator):
@@ -1045,7 +1043,7 @@ class RuleParser:
                 with io.TextIOWrapper(io.BytesIO(src), encoding='utf-8-sig', errors='ignore') as f: 
                     _stream(f)
         except OSError: pass
-        return ParsedRuleSet(url, tuple(dom), tuple(ip), tuple(gen), time.time())
+        return ParsedRuleSet(url, tuple(dom), tuple(ip), tuple(gen), time.time(), dga_count=dga_count[0])
 
 def resolve_hostname(hostname: str) -> List[str]:
     with _DNS_LOCK:
@@ -1088,7 +1086,8 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
                 doms = tuple(DomainRule(MatchType(r['match_type']), r['normalized'], r.get('is_exclusion', False), r.get('specificity_score', 0), r.get('attrs', '')) for r in l.get('d', []))
                 ips = tuple(IPCIDRRule(r['s'], r['e'], r['p'], r['v'], r.get('i', False), r.get('attrs', '')) for r in l.get('i', []))
                 gens = tuple(GenericRule(r['t'], r['v'], r.get('i', False), r.get('attrs', '')) for r in l.get('g', []))
-                return ParsedRuleSet(l['url'], doms, ips, gens, l['ts'], l['hash']), None
+                # Using cached DGA count if available, otherwise default to 0
+                return ParsedRuleSet(l['url'], doms, ips, gens, l['ts'], l['hash'], dga_count=l.get('dga', 0)), None
             except Exception: pass
 
     for rc in range(MAX_DOWNLOAD_RETRIES):
@@ -1156,7 +1155,7 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
             d_rules = [{'match_type': r.match_type.value, 'normalized': r.normalized, 'is_exclusion': r.is_exclusion, 'specificity_score': r.specificity_score, 'attrs': r.attrs} for r in ps.domain_rules]
             i_rules = [{'s': r.start_int, 'e': r.end_int, 'p': r.prefixlen, 'v': r.version, 'i': r.is_exclusion, 'attrs': r.attrs} for r in ps.ip_rules]
             g_rules = [{'t': r.type, 'v': r.val, 'i': r.is_exclusion, 'attrs': r.attrs} for r in ps.generic_rules]
-            ts = {ckey: {'url': ps.url, 'ts': ps.ts, 'hash': ps.hash, 'd': d_rules, 'i': i_rules, 'g': g_rules}}
+            ts = {ckey: {'url': ps.url, 'ts': ps.ts, 'hash': ps.hash, 'd': d_rules, 'i': i_rules, 'g': g_rules, 'dga': ps.dga_count}}
         return ps, ts
     except Exception: pass
     finally: tmp.unlink(missing_ok=True)
@@ -1283,8 +1282,7 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             if explicit_weights: min_score_threshold = max(0.01, min(explicit_weights) * 0.7)
             else: min_score_threshold = max(0.01, (sum(s.weight for s in sources) / len(sources)) * 0.35)
 
-        # Use dictionaries that also store the winner's source URL for perfect determinism tie-breaking
-        ip_objs = {} # rule._hash -> (rule, weight, source_url)
+        ip_objs = {} 
         dom_objs = {} 
         gen_objs = {}
         
@@ -1292,13 +1290,11 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             for r in src.domain_rules:
                 if r._hash not in dom_objs: dom_objs[r._hash] = (src.weight, r, src.url)
                 else:
-                    existing_w, existing_r, existing_url = dom_objs[r._hash]
-                    if src.weight > existing_w: dom_objs[r._hash] = (src.weight, r, src.url)
-                    elif src.weight == existing_w:
-                        if cfg.conflict_resolution == 'specificity' and r.specificity_score > existing_r.specificity_score:
-                            dom_objs[r._hash] = (src.weight, r, src.url)
-                        elif src.url < existing_url: # Deterministic tie-breaker
-                            dom_objs[r._hash] = (src.weight, r, src.url)
+                    existing_w, _, existing_url = dom_objs[r._hash]
+                    # Logically, if the hash is the same, specificity_score is identical. 
+                    # Thus, we only compare weight and use URL as a deterministic tie-breaker.
+                    if src.weight > existing_w or (src.weight == existing_w and src.url < existing_url):
+                        dom_objs[r._hash] = (src.weight, r, src.url)
                             
             for r in src.ip_rules:
                 if r._hash not in ip_objs: ip_objs[r._hash] = (src.weight, r, src.url)
@@ -1323,7 +1319,7 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
                 
         for h, (score, r, url) in ip_objs.items():
             if score >= min_score_threshold - 0.001:
-                ip_weights.append((score, r, url)) # Now perfectly tied to URL for IntervalMerger
+                ip_weights.append((score, r, url))
                 
         for h, (score, r, url) in gen_objs.items():
             if score >= min_score_threshold - 0.001:
