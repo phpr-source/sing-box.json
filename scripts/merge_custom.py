@@ -353,7 +353,9 @@ class IntervalMerger:
         collapsed.sort(key=lambda x: x.prefixlen, reverse=False)
         kept = collapsed[:target_count]
         new_hosts = sum(c.num_addresses for c in kept)
-        loss = max(0.0, 1.0 - (new_hosts / orig_hosts))
+        
+        # 修正的算法：計算加入的冗餘主機比例
+        loss = (new_hosts - orig_hosts) / new_hosts if new_hosts > 0 else 0.0
         return kept, loss
 
     @classmethod
@@ -753,11 +755,10 @@ class ParsedRuleSet:
         self.url, self.domain_rules, self.ip_rules, self.generic_rules, self.ts = u, d, i, g, t
         self.weight = self.initial_weight = w
         self.is_explicit_weight = explicit
-        self.dga_count = dga_count  # Pre-computed to avoid main-thread blocking
+        self.dga_count = dga_count 
         
         if not h:
             hasher = blake3() if USE_BLAKE3 else hashlib.sha256()
-            # FIX: Included x.attrs in the sorting tuple to guarantee absolute determinism!
             sorted_d = sorted(d, key=lambda x: (x.match_type.value, x.is_exclusion, x.normalized, x.attrs))
             for r in sorted_d: hasher.update(f"{r.match_type.value},{int(r.is_exclusion)},{r.normalized},{r.attrs}|".encode('utf-8'))
             sorted_i = sorted(i, key=lambda x: (x.version, x.start_int, x.prefixlen, x.is_exclusion, x.attrs))
@@ -832,40 +833,40 @@ class SemanticLineageAnalyzer:
 
     def compute(self, parsed_srcs: List['ParsedRuleSet'], sigs: List[SourceSignature]) -> Set[int]:
         if not self.enable: return set()
-        with self._lock:
-            new_hashes = {s.hash for s in parsed_srcs if s.hash not in self.exist_hashes}
-            if new_hashes:
-                cache_feats = {}
-                def get_feats(idx):
-                    if idx not in cache_feats:
-                        ps = parsed_srcs[idx]
-                        v4 = IntervalMerger._union_intervals([(r.start_int, r.end_int) for r in ps.ip_rules if r.version == 4])
-                        v6 = IntervalMerger._union_intervals([(r.start_int, r.end_int) for r in ps.ip_rules if r.version == 6])
-                        gen = {(r.type, r.val, r.is_exclusion) for r in ps.generic_rules}
-                        kws = [r.normalized for r in ps.domain_rules if r.match_type == MatchType.KEYWORD]
-                        rex = {r.normalized for r in ps.domain_rules if r.match_type == MatchType.REGEX}
-                        trie = DomainTrieOptimizer()
-                        for r in ps.domain_rules: trie.insert(r)
-                        exact_set = {r.normalized for r in ps.domain_rules if r.match_type == MatchType.EXACT}
-                        cache_feats[idx] = (v4, v6, gen, kws, rex, trie, ps.domain_rules, ps.compiled_regexes, exact_set)
-                    return cache_feats[idx]
-                    
-                for i in range(len(parsed_srcs)):
-                    for j in range(i+1, len(parsed_srcs)):
-                        p_i, p_j = parsed_srcs[i], parsed_srcs[j]
-                        if p_i.hash in new_hashes or p_j.hash in new_hashes:
-                            v4_i, v6_i, gen_i, kws_i, rex_i, trie_i, doms_i, crex_i, exact_i = get_feats(i)
-                            v4_j, v6_j, gen_j, kws_j, rex_j, trie_j, doms_j, crex_j, exact_j = get_feats(j)
+        
+        # 移出鎖範圍的特徵提取，避免單線程瓶頸
+        new_hashes = {s.hash for s in parsed_srcs if s.hash not in self.exist_hashes}
+        if not new_hashes: return set()
+        
+        cache_feats = {}
+        for i, ps in enumerate(parsed_srcs):
+            v4 = IntervalMerger._union_intervals([(r.start_int, r.end_int) for r in ps.ip_rules if r.version == 4])
+            v6 = IntervalMerger._union_intervals([(r.start_int, r.end_int) for r in ps.ip_rules if r.version == 6])
+            gen = {(r.type, r.val, r.is_exclusion) for r in ps.generic_rules}
+            kws = [r.normalized for r in ps.domain_rules if r.match_type == MatchType.KEYWORD]
+            rex = {r.normalized for r in ps.domain_rules if r.match_type == MatchType.REGEX}
+            trie = DomainTrieOptimizer()
+            for r in ps.domain_rules: trie.insert(r)
+            exact_set = {r.normalized for r in ps.domain_rules if r.match_type == MatchType.EXACT}
+            cache_feats[i] = (v4, v6, gen, kws, rex, trie, ps.domain_rules, ps.compiled_regexes, exact_set)
 
-                            if self._is_subset_semantic(v4_i, v4_j, v6_i, v6_j, gen_i, gen_j, doms_i, kws_j, rex_j, trie_j, crex_j, exact_j):
-                                if p_i.hash not in self.graph[p_j.hash]:
-                                    self.graph[p_j.hash].add(p_i.hash)
-                                    self.in_deg[p_i.hash] += 1
-                            if self._is_subset_semantic(v4_j, v4_i, v6_j, v6_i, gen_j, gen_i, doms_j, kws_i, rex_i, trie_i, crex_i, exact_i):
-                                if p_j.hash not in self.graph[p_i.hash]:
-                                    self.graph[p_i.hash].add(p_j.hash)
-                                    self.in_deg[p_j.hash] += 1
-                        
+        with self._lock:
+            for i in range(len(parsed_srcs)):
+                for j in range(i+1, len(parsed_srcs)):
+                    p_i, p_j = parsed_srcs[i], parsed_srcs[j]
+                    if p_i.hash in new_hashes or p_j.hash in new_hashes:
+                        v4_i, v6_i, gen_i, kws_i, rex_i, trie_i, doms_i, crex_i, exact_i = cache_feats[i]
+                        v4_j, v6_j, gen_j, kws_j, rex_j, trie_j, doms_j, crex_j, exact_j = cache_feats[j]
+
+                        if self._is_subset_semantic(v4_i, v4_j, v6_i, v6_j, gen_i, gen_j, doms_i, kws_j, rex_j, trie_j, crex_j, exact_j):
+                            if p_i.hash not in self.graph[p_j.hash]:
+                                self.graph[p_j.hash].add(p_i.hash)
+                                self.in_deg[p_i.hash] += 1
+                        if self._is_subset_semantic(v4_j, v4_i, v6_j, v6_i, gen_j, gen_i, doms_j, kws_i, rex_i, trie_i, crex_i, exact_i):
+                            if p_j.hash not in self.graph[p_i.hash]:
+                                self.graph[p_i.hash].add(p_j.hash)
+                                self.in_deg[p_j.hash] += 1
+                    
             q = deque([s.hash for s in sigs if self.in_deg.get(s.hash, 0) == 0])
             depths = {s.hash: 0 for s in sigs}
             local_in_deg = Counter({s.hash: self.in_deg.get(s.hash, 0) for s in sigs})
@@ -910,9 +911,7 @@ class AdvancedTrustEvaluator:
                 src.weight = 0.0
                 continue
                 
-            # Changed to O(1) attribute reading since parsing pre-calculates this via parallel threads!
             garbage = src.dga_count
-            
             for r in src.ip_rules:
                 if r.version == 4 and r.prefixlen <= self.cfg.ipv4_garbage_threshold: garbage += 1
                 elif r.version == 6 and r.prefixlen <= self.cfg.ipv6_garbage_threshold: garbage += 1
@@ -949,7 +948,7 @@ class RuleParser:
 
     def parse(self, src: Union[bytes, Path], url: str) -> ParsedRuleSet:
         dom, ip, gen = [], [] , []
-        dga_count = [0] # Use list to pass by reference to nested function
+        dga_count = [0] 
         
         try:
             if isinstance(src, Path):
@@ -968,7 +967,6 @@ class RuleParser:
                 if not n or len(n) > self._cfg.max_domain_length or ' ' in n: return
                 if not all(RE_DOMAIN_LABEL.match(p) for p in n.split('.')): return
                 
-                # Compute DGA purely here in the parallel parsing stage
                 if self._dga and EntropyAssessor.assess(n) == EntropyLevel.DGA_CONFIRMED: 
                     dga_count[0] += 1
                 
@@ -1086,7 +1084,6 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
                 doms = tuple(DomainRule(MatchType(r['match_type']), r['normalized'], r.get('is_exclusion', False), r.get('specificity_score', 0), r.get('attrs', '')) for r in l.get('d', []))
                 ips = tuple(IPCIDRRule(r['s'], r['e'], r['p'], r['v'], r.get('i', False), r.get('attrs', '')) for r in l.get('i', []))
                 gens = tuple(GenericRule(r['t'], r['v'], r.get('i', False), r.get('attrs', '')) for r in l.get('g', []))
-                # Using cached DGA count if available, otherwise default to 0
                 return ParsedRuleSet(l['url'], doms, ips, gens, l['ts'], l['hash'], dga_count=l.get('dga', 0)), None
             except Exception: pass
 
@@ -1291,8 +1288,6 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
                 if r._hash not in dom_objs: dom_objs[r._hash] = (src.weight, r, src.url)
                 else:
                     existing_w, _, existing_url = dom_objs[r._hash]
-                    # Logically, if the hash is the same, specificity_score is identical. 
-                    # Thus, we only compare weight and use URL as a deterministic tie-breaker.
                     if src.weight > existing_w or (src.weight == existing_w and src.url < existing_url):
                         dom_objs[r._hash] = (src.weight, r, src.url)
                             
