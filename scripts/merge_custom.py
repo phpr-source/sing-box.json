@@ -40,7 +40,7 @@ from urllib3.util.retry import Retry
 if sys.version_info < (3, 9):
     sys.exit("Error: Python 3.9+ is required")
 
-sys.setrecursionlimit(5000)
+sys.setrecursionlimit(10000)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -67,11 +67,11 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 69
+CACHE_VERSION = 70
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 4
 MAX_DNS_CACHE = 1024
-MAX_BDD_DEPTH = 600
+MAX_BDD_DEPTH = 800
 MAX_IP_RANGE_AGGREGATION_V4 = 2**24
 MAX_IP_RANGE_AGGREGATION_V6 = 2**96
 OP_NEG, OP_AND, OP_OR = 0, 1, 2
@@ -93,9 +93,6 @@ class TransientError(Exception): pass
 class CIDRFragmentationError(Exception):
     def __init__(self, processed_count: int, limit: int, loss_rate: float = 0.0):
         super().__init__(f"CIDR fragmentation > {limit} ({processed_count}), loss {loss_rate:.2%}")
-
-def fast_hash(data: bytes) -> str:
-    return blake3(data).hexdigest() if USE_BLAKE3 else hashlib.sha256(data).hexdigest()
 
 class MergeConfig:
     __slots__ = (
@@ -275,9 +272,12 @@ class IntervalMerger:
         return IntervalMerger._union_intervals(result)
 
     @classmethod
-    def resolve_weighted_ips(cls, rules_with_weights: List[Tuple[float, IPCIDRRule]], version: int) -> Tuple[List[Tuple[int, int, str]], List[Tuple[int, int, str]]]:
+    def resolve_weighted_ips(cls, rules_with_weights: List[Tuple[float, IPCIDRRule, str]], version: int) -> Tuple[List[Tuple[int, int, str]], List[Tuple[int, int, str]]]:
+        # Deterministic sort before assigning unique IDs
+        rules_with_weights.sort(key=lambda x: (-x[0], x[2], x[1].start_int))
+        
         events = []
-        for i, (w, r) in enumerate(rules_with_weights):
+        for i, (w, r, url) in enumerate(rules_with_weights):
             if r.version != version: continue
             rw = int(round(w, 5) * 100000)
             events.extend([(r.start_int, 1, rw, r.is_exclusion, r.attrs, i), (r.end_int + 1, -1, rw, r.is_exclusion, r.attrs, i)])
@@ -353,10 +353,10 @@ class IntervalMerger:
         if orig_hosts == 0: return [], 0.0
         
         collapsed = list(ipaddress.collapse_addresses(cidrs))
-        if len(collapsed) <= target_count:
-            return collapsed, 0.0
+        if len(collapsed) <= target_count: return collapsed, 0.0
 
-        collapsed.sort(key=lambda x: x.num_addresses, reverse=True)
+        # Keep largest networks first (smaller prefixlen = larger block)
+        collapsed.sort(key=lambda x: x.prefixlen, reverse=False)
         kept = collapsed[:target_count]
         new_hosts = sum(c.num_addresses for c in kept)
         loss = max(0.0, 1.0 - (new_hosts / orig_hosts))
@@ -390,7 +390,7 @@ class IntervalMerger:
             
         if not config.enable_cidr_approximation:
             if config.fallback_on_fragmentation:
-                exact_networks.sort(key=lambda x: x[0].num_addresses, reverse=True)
+                exact_networks.sort(key=lambda x: x[0].prefixlen, reverse=False)
                 grp = defaultdict(list)
                 for n, a in exact_networks[:config.max_cidr_fragmentation]: grp[a].append(n)
                 res = []
@@ -411,7 +411,7 @@ class IntervalMerger:
         
         if len(res) > config.max_cidr_fragmentation:
             if config.fallback_on_fragmentation:
-                res.sort(key=lambda x: ipaddress.ip_network(x[0], strict=False).num_addresses, reverse=True)
+                res.sort(key=lambda x: ipaddress.ip_network(x[0], strict=False).prefixlen, reverse=False)
                 res = res[:config.max_cidr_fragmentation]
             else: raise CIDRFragmentationError(len(res), config.max_cidr_fragmentation, tot_loss)
             
@@ -428,7 +428,6 @@ class TrieNode:
 
 class DomainTrieOptimizer:
     def __init__(self): self.root = TrieNode()
-    
     def insert(self, rule: DomainRule) -> None:
         node = self.root
         for part in reversed(rule.normalized.split('.')):
@@ -454,18 +453,14 @@ class DomainTrieOptimizer:
             if parent_covers: return
             
             cur = '.'.join(reversed(path))
-            if is_suf:
-                res.append(DomainRule(MatchType.SUFFIX, cur, is_exclusion)); return
-            if is_wild:
-                res.append(DomainRule(MatchType.WILDCARD, cur, is_exclusion))
-            if node.types & (1 << MatchType.EXACT.value):
-                res.append(DomainRule(MatchType.EXACT, cur, is_exclusion))
-                
+            if is_suf: res.append(DomainRule(MatchType.SUFFIX, cur, is_exclusion)); return
+            if is_wild: res.append(DomainRule(MatchType.WILDCARD, cur, is_exclusion))
+            if node.types & (1 << MatchType.EXACT.value): res.append(DomainRule(MatchType.EXACT, cur, is_exclusion))
+            
             for lbl, ch in node.children.items():
                 path.append(lbl)
                 _dfs(ch, path, parent_covers or is_suf or is_wild)
                 path.pop()
-                
         for lbl, ch in self.root.children.items(): _dfs(ch, [lbl], False)
         return res
 
@@ -765,15 +760,19 @@ class ParsedRuleSet:
         self.weight = self.initial_weight = w
         self.is_explicit_weight = explicit
         
-        sorted_d = sorted(d, key=lambda x: (x.match_type.value, x.is_exclusion, x.normalized))
-        sorted_i = sorted(i, key=lambda x: (x.version, x.start_int, x.prefixlen, x.is_exclusion))
-        sorted_g = sorted(g, key=lambda x: (x.type, x.val, x.is_exclusion))
-        
-        self.hash = h or fast_hash(
-            b"|".join(b"%d,%d,%s,%s" % (r.match_type.value, r.is_exclusion, r.normalized.encode('utf-8'), r.attrs.encode('utf-8')) for r in sorted_d) +
-            b"|" + b"|".join(b"%d,%d,%d,%s" % (r.version, r.start_int, r.prefixlen, r.attrs.encode('utf-8')) for r in sorted_i) +
-            b"|" + b"|".join(b"%s,%s,%d,%s" % (r.type.encode('utf-8'), r.val.encode('utf-8'), r.is_exclusion, r.attrs.encode('utf-8')) for r in sorted_g)
-        )
+        # O(1) Streaming Hash Optimization (Avoid memory spike of b"|".join)
+        if not h:
+            hasher = blake3() if USE_BLAKE3 else hashlib.sha256()
+            sorted_d = sorted(d, key=lambda x: (x.match_type.value, x.is_exclusion, x.normalized))
+            for r in sorted_d: hasher.update(f"{r.match_type.value},{int(r.is_exclusion)},{r.normalized},{r.attrs}|".encode('utf-8'))
+            sorted_i = sorted(i, key=lambda x: (x.version, x.start_int, x.prefixlen, x.is_exclusion))
+            for r in sorted_i: hasher.update(f"{r.version},{r.start_int},{r.prefixlen},{int(r.is_exclusion)},{r.attrs}|".encode('utf-8'))
+            sorted_g = sorted(g, key=lambda x: (x.type, x.val, x.is_exclusion))
+            for r in sorted_g: hasher.update(f"{r.type},{r.val},{int(r.is_exclusion)},{r.attrs}|".encode('utf-8'))
+            self.hash = hasher.hexdigest()
+        else:
+            self.hash = h
+            
         self.compiled_regexes = []
         for r in d:
             if r.match_type == MatchType.REGEX:
@@ -825,6 +824,7 @@ class SemanticLineageAnalyzer:
             
         for r in c_doms:
             if r.match_type not in (MatchType.KEYWORD, MatchType.REGEX):
+                # O(1) Fast path for exact matches
                 if r.match_type == MatchType.EXACT and r.normalized in p_exact_set: continue
                 covered = parent_trie.is_covered(r.normalized)
                 if not covered and p_kws: covered = any(pk in r.normalized for pk in p_kws)
@@ -1283,35 +1283,51 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             if explicit_weights: min_score_threshold = max(0.01, min(explicit_weights) * 0.7)
             else: min_score_threshold = max(0.01, (sum(s.weight for s in sources) / len(sources)) * 0.35)
 
-        rule_scores, dom_objs, ip_objs, gen_objs = defaultdict(float), {}, {}, {}
+        # Use dictionaries that also store the winner's source URL for perfect determinism tie-breaking
+        ip_objs = {} # rule._hash -> (rule, weight, source_url)
+        dom_objs = {} 
+        gen_objs = {}
+        
         for src in sources:
             for r in src.domain_rules:
-                rule_scores[r._hash] += src.weight
-                if r._hash not in dom_objs: dom_objs[r._hash] = (src.weight, r)
+                if r._hash not in dom_objs: dom_objs[r._hash] = (src.weight, r, src.url)
                 else:
-                    existing_w, existing_r = dom_objs[r._hash]
-                    if src.weight > existing_w: dom_objs[r._hash] = (src.weight, r)
-                    elif src.weight == existing_w and cfg.conflict_resolution == 'specificity':
-                        if r.specificity_score > existing_r.specificity_score: dom_objs[r._hash] = (src.weight, r)
+                    existing_w, existing_r, existing_url = dom_objs[r._hash]
+                    if src.weight > existing_w: dom_objs[r._hash] = (src.weight, r, src.url)
+                    elif src.weight == existing_w:
+                        if cfg.conflict_resolution == 'specificity' and r.specificity_score > existing_r.specificity_score:
+                            dom_objs[r._hash] = (src.weight, r, src.url)
+                        elif src.url < existing_url: # Deterministic tie-breaker
+                            dom_objs[r._hash] = (src.weight, r, src.url)
+                            
             for r in src.ip_rules:
-                rule_scores[r._hash] += src.weight
-                ip_objs[r._hash] = r
-            for r in src.generic_rules:
-                rule_scores[r._hash] += src.weight
-                if r._hash not in gen_objs: gen_objs[r._hash] = (src.weight, r)
+                if r._hash not in ip_objs: ip_objs[r._hash] = (src.weight, r, src.url)
                 else:
-                    existing_w, _ = gen_objs[r._hash]
-                    if src.weight > existing_w: gen_objs[r._hash] = (src.weight, r)
+                    existing_w, _, existing_url = ip_objs[r._hash]
+                    if src.weight > existing_w or (src.weight == existing_w and src.url < existing_url):
+                        ip_objs[r._hash] = (src.weight, r, src.url)
+                        
+            for r in src.generic_rules:
+                if r._hash not in gen_objs: gen_objs[r._hash] = (src.weight, r, src.url)
+                else:
+                    existing_w, _, existing_url = gen_objs[r._hash]
+                    if src.weight > existing_w or (src.weight == existing_w and src.url < existing_url):
+                        gen_objs[r._hash] = (src.weight, r, src.url)
 
         allow_tries, deny_tries, others, ip_weights = defaultdict(DomainTrieOptimizer), defaultdict(DomainTrieOptimizer), set(), []
-        for h, score in rule_scores.items():
+        
+        for h, (score, r, url) in dom_objs.items():
             if score >= min_score_threshold - 0.001:
-                if h in dom_objs:
-                    _, r = dom_objs[h]
-                    if r.match_type in (MatchType.KEYWORD, MatchType.REGEX): others.add(r)
-                    else: (deny_tries[r.attrs] if r.is_exclusion else allow_tries[r.attrs]).insert(r)
-                elif h in ip_objs: ip_weights.append((score, ip_objs[h]))
-                elif h in gen_objs: others.add(gen_objs[h][1])
+                if r.match_type in (MatchType.KEYWORD, MatchType.REGEX): others.add(r)
+                else: (deny_tries[r.attrs] if r.is_exclusion else allow_tries[r.attrs]).insert(r)
+                
+        for h, (score, r, url) in ip_objs.items():
+            if score >= min_score_threshold - 0.001:
+                ip_weights.append((score, r, url)) # Now perfectly tied to URL for IntervalMerger
+                
+        for h, (score, r, url) in gen_objs.items():
+            if score >= min_score_threshold - 0.001:
+                others.add(r)
                 
         p_dom_a, p_dom_d = [], []
         if cfg.enable_trie_compression:
@@ -1320,8 +1336,8 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             for attrs_str, trie in deny_tries.items():
                 for r in trie.optimize(True): r.attrs = attrs_str; p_dom_d.append(r)
         else:
-            p_dom_a = [r for h, (w, r) in dom_objs.items() if rule_scores[h] >= min_score_threshold - 0.001 and not r.is_exclusion]
-            p_dom_d = [r for h, (w, r) in dom_objs.items() if rule_scores[h] >= min_score_threshold - 0.001 and r.is_exclusion]
+            p_dom_a = [r for w, r, u in dom_objs.values() if w >= min_score_threshold - 0.001 and not r.is_exclusion]
+            p_dom_d = [r for w, r, u in dom_objs.values() if w >= min_score_threshold - 0.001 and r.is_exclusion]
             
         v4_a_ivs, v4_d_ivs = IntervalMerger.resolve_weighted_ips(ip_weights, 4)
         v6_a_ivs, v6_d_ivs = IntervalMerger.resolve_weighted_ips(ip_weights, 6)
