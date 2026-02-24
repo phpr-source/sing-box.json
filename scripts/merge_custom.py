@@ -66,7 +66,7 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 75
+CACHE_VERSION = 76
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 4
 MAX_DNS_CACHE = 1024
@@ -402,58 +402,68 @@ class IntervalMerger:
         return res
 
 class TrieNode:
-    __slots__ = ('children', 'types', 'attrs')
+    __slots__ = ('children', 'exact', 'suffix', 'wildcard')
     def __init__(self):
         self.children = {}
-        self.types = 0
-        self.attrs = {} 
+        self.exact = None
+        self.suffix = None
+        self.wildcard = None
 
-class DomainTrieOptimizer:
-    def __init__(self): self.root = TrieNode()
+class UnifiedDomainTrie:
+    def __init__(self): 
+        self.root = TrieNode()
     
-    def insert(self, rule: DomainRule) -> None:
+    def insert(self, rule: DomainRule, weight: float) -> None:
         node = self.root
         for part in reversed(rule.normalized.split('.')):
             if part not in node.children: node.children[part] = TrieNode()
             node = node.children[part]
-        node.types |= (1 << rule.match_type.value)
-        node.attrs[rule.match_type.value] = rule.attrs
+        
+        val = (weight, rule.is_exclusion, rule.attrs)
+        if rule.match_type == MatchType.EXACT:
+            if not node.exact or weight > node.exact[0]: node.exact = val
+        elif rule.match_type == MatchType.SUFFIX:
+            if not node.suffix or weight > node.suffix[0]: node.suffix = val
+        elif rule.match_type == MatchType.WILDCARD:
+            if not node.wildcard or weight > node.wildcard[0]: node.wildcard = val
 
-    def optimize(self, is_exclusion: bool) -> List[DomainRule]:
+    def search(self, domain: str) -> bool:
+        node = self.root
+        parts = domain.split('.')
+        for i, part in enumerate(reversed(parts)):
+            if part not in node.children: return False
+            node = node.children[part]
+            if node.suffix: return True
+            if i == len(parts) - 1 and (node.exact or node.wildcard): return True
+        return False
+
+    def optimize(self) -> List[DomainRule]:
         res = []
-        def _dfs(node: TrieNode, path: List[str], active_suffix_attr: Optional[str]):
+        def _dfs(node: TrieNode, path: List[str], active_suffix: Optional[Tuple]):
             cur_dom = '.'.join(reversed(path)) if path else ""
             
-            has_suffix = bool(node.types & (1 << MatchType.SUFFIX.value))
-            my_suffix_attr = node.attrs.get(MatchType.SUFFIX.value) if has_suffix else None
-            
-            if has_suffix:
-                if my_suffix_attr != active_suffix_attr:
-                    res.append(DomainRule(MatchType.SUFFIX, cur_dom, is_exclusion, attrs=my_suffix_attr or ""))
-                effective_attr = my_suffix_attr
-            else:
-                effective_attr = active_suffix_attr
+            next_suffix = active_suffix
+            if node.suffix:
+                if not active_suffix or node.suffix[0] >= active_suffix[0]:
+                    if not active_suffix or node.suffix[1:] != active_suffix[1:]:
+                        res.append(DomainRule(MatchType.SUFFIX, cur_dom, node.suffix[1], 0, node.suffix[2]))
+                    next_suffix = node.suffix
 
-            has_wildcard = bool(node.types & (1 << MatchType.WILDCARD.value))
-            my_wild_attr = node.attrs.get(MatchType.WILDCARD.value) if has_wildcard else None
-            
-            if has_wildcard:
-                if my_wild_attr != effective_attr:
-                    res.append(DomainRule(MatchType.WILDCARD, cur_dom, is_exclusion, attrs=my_wild_attr or ""))
-                exact_cover_attr = my_wild_attr
-            else:
-                exact_cover_attr = effective_attr
+            active_wildcard = next_suffix
+            if node.wildcard:
+                if not active_wildcard or node.wildcard[0] >= active_wildcard[0]:
+                    if not active_wildcard or node.wildcard[1:] != active_wildcard[1:]:
+                        res.append(DomainRule(MatchType.WILDCARD, cur_dom, node.wildcard[1], 0, node.wildcard[2]))
+                    active_wildcard = node.wildcard
 
-            has_exact = bool(node.types & (1 << MatchType.EXACT.value))
-            my_exact_attr = node.attrs.get(MatchType.EXACT.value) if has_exact else None
-            
-            if has_exact:
-                if my_exact_attr != exact_cover_attr:
-                    res.append(DomainRule(MatchType.EXACT, cur_dom, is_exclusion, attrs=my_exact_attr or ""))
+            if node.exact:
+                if not active_wildcard or node.exact[0] >= active_wildcard[0]:
+                    if not active_wildcard or node.exact[1:] != active_wildcard[1:]:
+                        res.append(DomainRule(MatchType.EXACT, cur_dom, node.exact[1], 0, node.exact[2]))
             
             for lbl, ch in node.children.items():
                 path.append(lbl)
-                _dfs(ch, path, effective_attr)
+                _dfs(ch, path, next_suffix)
                 path.pop()
 
         for lbl, ch in self.root.children.items():
@@ -834,7 +844,7 @@ class SemanticLineageAnalyzer:
         for r in c_doms:
             if r.match_type not in (MatchType.KEYWORD, MatchType.REGEX):
                 if r.match_type == MatchType.EXACT and r.normalized in p_exact_set: continue
-                covered = len(parent_trie.optimize(False)) > 0 
+                covered = parent_trie.search(r.normalized)
                 if not covered and p_kws: covered = any(pk in r.normalized for pk in p_kws)
                 if not covered and parent_compiled_regexes: covered = any(pat.search(r.normalized) for pat in parent_compiled_regexes)
                 if not covered: return False
@@ -856,8 +866,9 @@ class SemanticLineageAnalyzer:
             gen = {(r.type, r.val, r.is_exclusion) for r in ps.generic_rules}
             kws = [r.normalized for r in ps.domain_rules if r.match_type == MatchType.KEYWORD]
             rex = {r.normalized for r in ps.domain_rules if r.match_type == MatchType.REGEX}
-            trie = DomainTrieOptimizer()
-            for r in ps.domain_rules: trie.insert(r)
+            trie = UnifiedDomainTrie()
+            for r in ps.domain_rules:
+                if r.match_type not in (MatchType.KEYWORD, MatchType.REGEX): trie.insert(r, ps.weight)
             exact_set = {r.normalized for r in ps.domain_rules if r.match_type == MatchType.EXACT}
             cache_feats[i] = (v4, v6, gen, kws, rex, trie, ps.domain_rules, ps.compiled_regexes, exact_set)
 
@@ -1303,28 +1314,33 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
                 if r._hash not in gen_objs or src.weight > gen_objs[r._hash][0] or (src.weight == gen_objs[r._hash][0] and src.url < gen_objs[r._hash][2]):
                     gen_objs[r._hash] = (src.weight, r, src.url)
 
-        allow_tries, deny_tries, others, ip_weights = defaultdict(DomainTrieOptimizer), defaultdict(DomainTrieOptimizer), set(), []
+        unified_trie = UnifiedDomainTrie()
+        other_doms, ip_weights = {}, []
         
         for h, (score, r, url) in dom_objs.items():
             if score >= min_score_threshold - 0.001:
-                if r.match_type in (MatchType.KEYWORD, MatchType.REGEX): others.add(r)
-                else: (deny_tries[r.attrs] if r.is_exclusion else allow_tries[r.attrs]).insert(r)
+                if r.match_type in (MatchType.KEYWORD, MatchType.REGEX):
+                    k = (r.normalized, r.match_type)
+                    if k not in other_doms or score > other_doms[k][0]:
+                        other_doms[k] = (score, r)
+                else:
+                    unified_trie.insert(r, score)
                 
         for h, (score, r, url) in ip_objs.items():
             if score >= min_score_threshold - 0.001: ip_weights.append((score, r, url))
                 
         for h, (score, r, url) in gen_objs.items():
-            if score >= min_score_threshold - 0.001: others.add(r)
+            if score >= min_score_threshold - 0.001: 
+                k = (r.val, r.type)
+                if k not in other_doms or score > other_doms[k][0]:
+                    other_doms[k] = (score, r)
                 
-        p_dom_a, p_dom_d = [], []
         if cfg.enable_trie_compression:
-            for attrs_str, trie in allow_tries.items():
-                p_dom_a.extend(trie.optimize(False))
-            for attrs_str, trie in deny_tries.items():
-                p_dom_d.extend(trie.optimize(True))
+            all_d = unified_trie.optimize()
         else:
-            p_dom_a = [r for w, r, u in dom_objs.values() if w >= min_score_threshold - 0.001 and not r.is_exclusion]
-            p_dom_d = [r for w, r, u in dom_objs.values() if w >= min_score_threshold - 0.001 and r.is_exclusion]
+            all_d = [r for w, r, u in dom_objs.values() if w >= min_score_threshold - 0.001 and r.match_type not in (MatchType.KEYWORD, MatchType.REGEX)]
+            
+        all_d.extend([r for _, r in other_doms.values()])
             
         v4_a_ivs, v4_d_ivs = IntervalMerger.resolve_weighted_ips(ip_weights, 4)
         v6_a_ivs, v6_d_ivs = IntervalMerger.resolve_weighted_ips(ip_weights, 6)
@@ -1342,11 +1358,13 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             bdd = BDDRuleVerifier(eng, cfg.max_bdd_var_cache_size) if cfg.enable_bdd_verification else None
             va_ips = [IPCIDRRule(int(ipaddress.ip_network(s, strict=False).network_address), int(ipaddress.ip_network(s, strict=False).broadcast_address), ipaddress.ip_network(s, strict=False).prefixlen, 6 if ':' in s else 4, False) for s, _ in f_a_ip_strs]
             vd_ips = [IPCIDRRule(int(ipaddress.ip_network(s, strict=False).network_address), int(ipaddress.ip_network(s, strict=False).broadcast_address), ipaddress.ip_network(s, strict=False).prefixlen, 6 if ':' in s else 4, True) for s, _ in f_d_ip_strs]
+            
+            p_dom_a = [r for r in all_d if not getattr(r, 'is_exclusion', False)]
+            p_dom_d = [r for r in all_d if getattr(r, 'is_exclusion', False)]
             verify_results = run_verifications(sources, p_dom_a, p_dom_d, va_ips, vd_ips, bdd, cfg)
             for iss in verify_results.get('issues', []): issues.append(f"{iss['type']} ({iss['verifier']})")
             if bdd: eng.clear()
 
-        all_d = p_dom_a + p_dom_d + list(others)
         all_d.sort(key=lambda r: (int(not getattr(r, 'is_exclusion', False)), -getattr(r, 'specificity_score', 0), getattr(r, 'normalized', getattr(r, 'val', ''))))
         
         is_sg, is_cl = cfg.output_format == 'surge', cfg.output_format == 'clash'
