@@ -63,7 +63,7 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 64
+CACHE_VERSION = 65
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 4
 MAX_DNS_CACHE = 1024
@@ -112,7 +112,7 @@ class MergeConfig:
     def __init__(self, **kwargs: Any):
         self.config_file = kwargs.get('config_file', 'scripts/custom_merge.json')
         self.output_dir = Path(kwargs.get('output_dir', 'rules'))
-        self.core_bin_path = kwargs.get('core_bin_path', os.getenv("SB_CORE_PATH", "./sb-core"))
+        self.core_bin_path = kwargs.get('core_bin_path', shutil.which("sing-box") or os.getenv("SB_CORE_PATH", "./sb-core"))
         self.max_workers = int(kwargs.get('max_workers', 0)) or min(max(1, (os.cpu_count() or 4) * 2), 16)
         self.max_concurrent_downloads = max(10, int(kwargs.get('max_concurrent_downloads', 0)) or self.max_workers)
         self.max_download_size = int(kwargs.get('max_download_size', 150 * 1024 * 1024))
@@ -190,11 +190,11 @@ class EntropyAssessor:
         max_ent, max_dig, min_vow = 0.0, 0.0, 1.0
         vowels = set('aeiou')
         for p in parts:
-            if len(p) < 5: continue 
             length = len(p)
+            if length < 5: continue 
             freq = Counter(p)
             ent = -sum((c / length) * math.log2(c / length) for c in freq.values())
-            n_ent = ent / math.log2(len(set(p))) if len(set(p)) > 1 else 0
+            n_ent = ent / math.log2(len(freq)) if len(freq) > 1 else 0
             max_ent = max(max_ent, n_ent)
             max_dig = max(max_dig, sum(c.isdigit() for c in p) / length)
             min_vow = min(min_vow, sum(1 for c in p if c in vowels) / length)
@@ -206,7 +206,7 @@ class DomainRule:
     __slots__ = ('match_type', 'normalized', 'is_exclusion', '_hash', 'specificity_score', 'attrs')
     def __init__(self, match_type: MatchType, normalized: str, is_exclusion: bool = False, specificity_score: int = 0, attrs: str = ""):
         self.match_type, self.normalized, self.is_exclusion, self.attrs = match_type, normalized, is_exclusion, attrs
-        self._hash = hash((self.normalized, self.match_type.value, self.is_exclusion))
+        self._hash = hash((self.normalized, self.match_type.value, self.is_exclusion, self.attrs))
         if specificity_score == 0:
             score = self.normalized.count('.') * 10
             if match_type == MatchType.EXACT: score += 8
@@ -215,24 +215,24 @@ class DomainRule:
             self.specificity_score = score
         else: self.specificity_score = specificity_score
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash and self.normalized == o.normalized and self.match_type == o.match_type and self.is_exclusion == o.is_exclusion
+    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash
 
 class IPCIDRRule:
     __slots__ = ('is_exclusion', 'version', 'start_int', 'end_int', 'prefixlen', '_hash', 'attrs')
     def __init__(self, start_int: int, end_int: int, prefixlen: int, version: int, is_exclusion: bool = False, attrs: str = ""):
         self.is_exclusion, self.version = is_exclusion, version
         self.start_int, self.end_int, self.prefixlen, self.attrs = start_int, end_int, prefixlen, attrs
-        self._hash = hash((self.version, self.start_int, self.prefixlen, self.is_exclusion))
+        self._hash = hash((self.version, self.start_int, self.prefixlen, self.is_exclusion, self.attrs))
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash and self.start_int == o.start_int and self.prefixlen == o.prefixlen and self.is_exclusion == o.is_exclusion
+    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash
 
 class GenericRule:
     __slots__ = ('type', 'val', 'is_exclusion', 'attrs', '_hash')
     def __init__(self, typ: str, val: str, is_exclusion: bool = False, attrs: str = ""):
         self.type, self.val, self.is_exclusion, self.attrs = typ, val, is_exclusion, attrs
-        self._hash = hash((self.type, self.val, self.is_exclusion))
+        self._hash = hash((self.type, self.val, self.is_exclusion, self.attrs))
     def __hash__(self) -> int: return self._hash
-    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash and self.type == o.type and self.val == o.val and self.is_exclusion == o.is_exclusion
+    def __eq__(self, o: Any) -> bool: return type(self) is type(o) and self._hash == o._hash
 
 RuleType = Union[DomainRule, IPCIDRRule, GenericRule]
 
@@ -283,10 +283,10 @@ class IntervalMerger:
                 max_a = max((v[0] for v in active_a.values()), default=-1)
                 max_d = max((v[0] for v in active_d.values()), default=-1)
                 if max_d >= 0 and max_d >= max_a:
-                    attr = next((v[1] for k, v in sorted(active_d.items()) if v[0] == max_d), "")
+                    attr = min((k, v[1]) for k, v in active_d.items() if v[0] == max_d)[1] if active_d else ""
                     acc_d.append((prev_x, x - 1, attr))
                 elif max_a >= 0 and max_a > max_d:
-                    attr = next((v[1] for k, v in sorted(active_a.items()) if v[0] == max_a), "")
+                    attr = min((k, v[1]) for k, v in active_a.items() if v[0] == max_a)[1] if active_a else ""
                     acc_a.append((prev_x, x - 1, attr))
             while i_idx < n and events[i_idx][0] == x:
                 _, op, rw, is_excl, attrs, r_id = events[i_idx]
@@ -693,7 +693,7 @@ class WALBackend:
                 elif USE_ORJSON: b = orjson.dumps(self.data)
                 else: b = json.dumps(self.data, separators=(',', ':')).encode('utf-8')
                 cb = zlib.compress(b, level=6)
-                tp = Path(f"{self.db_path}.tmp")
+                tp = Path(f"{self.db_path}.{threading.get_ident()}.tmp")
                 with open(tp, 'wb') as f:
                     f.write(hashlib.blake2b(cb, digest_size=16).digest())
                     f.write(struct.pack('>d', time.time()))
@@ -709,7 +709,9 @@ class ParsedRuleSet:
         self.url, self.domain_rules, self.ip_rules, self.generic_rules, self.ts = u, d, i, g, t
         self.weight = self.initial_weight = w
         self.is_explicit_weight = explicit
-        self.hash = h or fast_hash(b"".join(b"%d%d%s" % (r.match_type.value, r.is_exclusion, r.normalized.encode('utf-8')) for r in d) + b"".join(b"%d%d%d" % (r.version, r.start_int, r.prefixlen) for r in i) + b"".join(b"%s%s%d" % (r.type.encode('utf-8'), r.val.encode('utf-8'), r.is_exclusion) for r in g))
+        
+        self.hash = h or fast_hash(b"|".join(b"%d,%d,%s,%s" % (r.match_type.value, r.is_exclusion, r.normalized.encode('utf-8'), r.attrs.encode('utf-8')) for r in d) + b"|".join(b"%d,%d,%d,%s" % (r.version, r.start_int, r.prefixlen, r.attrs.encode('utf-8')) for r in i) + b"|".join(b"%s,%s,%d,%s" % (r.type.encode('utf-8'), r.val.encode('utf-8'), r.is_exclusion, r.attrs.encode('utf-8')) for r in g))
+        
         self.compiled_regexes = []
         for r in d:
             if r.match_type == MatchType.REGEX:
@@ -942,8 +944,10 @@ class RuleParser:
                         if k == 'invert': continue
                         mt = self.RMAP.get(k.upper(), k)
                         vals = v if isinstance(v, list) else [v]
-                        extra_attrs = [f"{ek}={ev}" for ek, ev in r.items() if ek not in ('invert', k, 'version', 'rules') and not isinstance(ev, (list, dict))]
-                        attr_str = ",".join(extra_attrs)
+                        
+                        extra_attrs = {ek: ev for ek, ev in r.items() if ek not in ('invert', k, 'version', 'rules', 'match_type', 'normalized', 'is_exclusion', 'specificity_score', 'attrs') and not isinstance(ev, (list, dict))}
+                        attr_str = json.dumps(extra_attrs, sort_keys=True) if extra_attrs else ""
+                        
                         for val in vals:
                             if str(val).strip(): _add(mt, str(val).strip(), is_excl, attr_str)
                 return ParsedRuleSet(url, tuple(dom), tuple(ip), tuple(gen), time.time())
@@ -1138,9 +1142,13 @@ def run_verifications(parsed_sets: List[ParsedRuleSet], p_dom_allow: List[Domain
 
 def _format_policy(attrs: str, default_pol: str) -> str:
     if not attrs: return default_pol
-    first_attr = attrs.split(',')[0].strip()
-    if first_attr.upper() in ('NO-RESOLVE', 'EXTENDED-MATCHING'): return f"{default_pol},{attrs}"
-    return attrs
+    try:
+        d = json.loads(attrs)
+        res = default_pol
+        if d.get('no_resolve'): res += ",no-resolve"
+        return res
+    except Exception:
+        return default_pol
 
 def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[SemanticLineageAnalyzer] = None, smt_executor: Optional[concurrent.futures.ProcessPoolExecutor] = None) -> Tuple[str, str, str, str, float]:
     start_time = time.time()
@@ -1221,19 +1229,22 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
                     existing_w, _ = gen_objs[r._hash]
                     if src.weight > existing_w: gen_objs[r._hash] = (src.weight, r)
 
-        allow_trie, deny_trie, others, ip_weights = DomainTrieOptimizer(), DomainTrieOptimizer(), set(), []
+        allow_tries, deny_tries, others, ip_weights = defaultdict(DomainTrieOptimizer), defaultdict(DomainTrieOptimizer), set(), []
         for h, score in rule_scores.items():
             if score >= min_score_threshold - 0.001:
                 if h in dom_objs:
                     _, r = dom_objs[h]
                     if r.match_type in (MatchType.KEYWORD, MatchType.REGEX): others.add(r)
-                    else: (deny_trie if r.is_exclusion else allow_trie).insert(r)
+                    else: (deny_tries[r.attrs] if r.is_exclusion else allow_tries[r.attrs]).insert(r)
                 elif h in ip_objs: ip_weights.append((score, ip_objs[h]))
                 elif h in gen_objs: others.add(gen_objs[h][1])
                 
+        p_dom_a, p_dom_d = [], []
         if cfg.enable_trie_compression:
-            p_dom_a = allow_trie.optimize(False)
-            p_dom_d = deny_trie.optimize(True)
+            for attrs_str, trie in allow_tries.items():
+                for r in trie.optimize(False): r.attrs = attrs_str; p_dom_a.append(r)
+            for attrs_str, trie in deny_tries.items():
+                for r in trie.optimize(True): r.attrs = attrs_str; p_dom_d.append(r)
         else:
             p_dom_a = [r for h, (w, r) in dom_objs.items() if rule_scores[h] >= min_score_threshold - 0.001 and not r.is_exclusion]
             p_dom_d = [r for h, (w, r) in dom_objs.items() if rule_scores[h] >= min_score_threshold - 0.001 and r.is_exclusion]
@@ -1285,14 +1296,21 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             rbt = defaultdict(list)
             for r in all_d:
                 if isinstance(r, GenericRule):
-                    rbt[(r.type, r.is_exclusion)].append(r.val)
+                    rbt[(r.type, r.is_exclusion, r.attrs)].append(r.val)
                     continue
                 typ = 'domain' if r.match_type == MatchType.EXACT else 'domain_suffix' if r.match_type == MatchType.SUFFIX else 'domain_keyword' if r.match_type == MatchType.KEYWORD else 'domain_regex' if r.match_type == MatchType.REGEX else 'domain_wildcard'
-                rbt[(typ, r.is_exclusion)].append(r.normalized)
-            for s, _ in f_a_ip_strs: rbt[('ip_cidr', False)].append(s)
-            for s, _ in f_d_ip_strs: rbt[('ip_cidr', True)].append(s)
+                rbt[(typ, r.is_exclusion, r.attrs)].append(r.normalized)
+            for s, attr in f_a_ip_strs: rbt[('ip_cidr', False, attr)].append(s)
+            for s, attr in f_d_ip_strs: rbt[('ip_cidr', True, attr)].append(s)
             
-            jr = [{'invert': True, **{t: v}} if excl else {t: v} for (t, excl), v in rbt.items()]
+            jr = []
+            for (t, excl, attrs_str), vals in rbt.items():
+                rule_dict = {'invert': True} if excl else {}
+                if attrs_str:
+                    try: rule_dict.update(json.loads(attrs_str))
+                    except Exception: pass
+                rule_dict[t] = vals[0] if len(vals) == 1 else vals
+                jr.append(rule_dict)
                 
             fd = {"version": TARGET_FORMAT_VERSION, "rules": jr}
             if USE_ORJSON: out_p.write_bytes(orjson.dumps(fd, option=orjson.OPT_INDENT_2))
