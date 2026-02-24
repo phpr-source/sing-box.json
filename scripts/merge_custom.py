@@ -51,7 +51,6 @@ def _patched_create_connection(address: tuple[str, int], *args: Any, **kwargs: A
     host, port = address
     forced_ip = getattr(_dns_context, 'forced_ip', None)
     forced_host = getattr(_dns_context, 'forced_host', None)
-    # 精準比對，防止多線程下的全局 socket 污染
     if forced_ip and forced_host == host:
         address = (forced_ip, port)
     return _orig_create_connection(address, *args, **kwargs)
@@ -68,7 +67,7 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 66
+CACHE_VERSION = 68
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 4
 MAX_DNS_CACHE = 1024
@@ -177,7 +176,6 @@ class MergeConfig:
         try: os.chmod(p, p.stat().st_mode | 0o111)
         except OSError: pass
         if not os.access(str(p), os.X_OK): return False
-        # GLM 改進：真實校驗二進制文件是否可用
         try:
             res = subprocess.run([str(p), "version"], capture_output=True, timeout=5)
             return res.returncode == 0
@@ -289,8 +287,6 @@ class IntervalMerger:
         
         acc_a, acc_d = [], []
         active_a_map, active_d_map = {}, {}
-        
-        # GLM 算法優化：引入最大堆處理複雜度 O(log K) 並保留我的 attrs 邏輯
         max_heap_a, max_heap_d = [], []
         
         prev_x = -1
@@ -307,7 +303,7 @@ class IntervalMerger:
                         cur_max_a = -neg_rw
                         cur_attr_a = active_a_map[idx][1]
                         break
-                    heapq.heappop(max_heap_a) # 延遲刪除
+                    heapq.heappop(max_heap_a)
                 
                 cur_max_d, cur_attr_d = -1, ""
                 while max_heap_d:
@@ -718,7 +714,6 @@ class WALBackend:
                 if len(raw) > 24 and hashlib.blake2b(raw[24:], digest_size=16).digest() == raw[:16]:
                     try: db = zlib.decompress(raw[24:])
                     except zlib.error: db = raw[24:]
-                    # GLM 建議：增加異常防禦
                     try:
                         if USE_MSGPACK: self.data = msgpack.unpackb(db, raw=False)
                         elif USE_ORJSON: self.data = orjson.loads(db)
@@ -740,7 +735,6 @@ class WALBackend:
                 elif USE_ORJSON: b = orjson.dumps(self.data)
                 else: b = json.dumps(self.data, separators=(',', ':')).encode('utf-8')
                 cb = zlib.compress(b, level=6)
-                # Gemini 的核心修復：防止多線程互相覆寫臨時文件引發臟數據
                 tp = Path(f"{self.db_path}.{threading.get_ident()}.tmp")
                 with open(tp, 'wb') as f:
                     f.write(hashlib.blake2b(cb, digest_size=16).digest())
@@ -757,10 +751,7 @@ class ParsedRuleSet:
         self.url, self.domain_rules, self.ip_rules, self.generic_rules, self.ts = u, d, i, g, t
         self.weight = self.initial_weight = w
         self.is_explicit_weight = explicit
-        
-        # Gemini 核心防護：加入屬性與分隔符，防止嚴重哈希碰撞
         self.hash = h or fast_hash(b"|".join(b"%d,%d,%s,%s" % (r.match_type.value, r.is_exclusion, r.normalized.encode('utf-8'), r.attrs.encode('utf-8')) for r in d) + b"|".join(b"%d,%d,%d,%s" % (r.version, r.start_int, r.prefixlen, r.attrs.encode('utf-8')) for r in i) + b"|".join(b"%s,%s,%d,%s" % (r.type.encode('utf-8'), r.val.encode('utf-8'), r.is_exclusion, r.attrs.encode('utf-8')) for r in g))
-        
         self.compiled_regexes = []
         for r in d:
             if r.match_type == MatchType.REGEX:
@@ -805,27 +796,16 @@ class SemanticLineageAnalyzer:
             tp.replace(self.path)
         except Exception: pass
             
-    def _is_subset_semantic(self, child: 'ParsedRuleSet', parent_trie: DomainTrieOptimizer, parent: 'ParsedRuleSet') -> bool:
-        child_v4 = IntervalMerger._union_intervals([(r.start_int, r.end_int) for r in child.ip_rules if r.version == 4])
-        parent_v4 = IntervalMerger._union_intervals([(r.start_int, r.end_int) for r in parent.ip_rules if r.version == 4])
-        if IntervalMerger._subtract_intervals(child_v4, parent_v4): return False
-            
-        child_v6 = IntervalMerger._union_intervals([(r.start_int, r.end_int) for r in child.ip_rules if r.version == 6])
-        parent_v6 = IntervalMerger._union_intervals([(r.start_int, r.end_int) for r in parent.ip_rules if r.version == 6])
-        if IntervalMerger._subtract_intervals(child_v6, parent_v6): return False
-            
-        c_gen = {(r.type, r.val, r.is_exclusion) for r in child.generic_rules}
-        p_gen = {(r.type, r.val, r.is_exclusion) for r in parent.generic_rules}
+    def _is_subset_semantic(self, c_v4, p_v4, c_v6, p_v6, c_gen, p_gen, c_doms, p_kws, p_rex, parent_trie, parent_compiled_regexes) -> bool:
+        if IntervalMerger._subtract_intervals(c_v4, p_v4): return False
+        if IntervalMerger._subtract_intervals(c_v6, p_v6): return False
         if not c_gen.issubset(p_gen): return False
             
-        p_kws = [r.normalized for r in parent.domain_rules if r.match_type == MatchType.KEYWORD]
-        p_rex = {r.normalized for r in parent.domain_rules if r.match_type == MatchType.REGEX}
-        
-        for r in child.domain_rules:
+        for r in c_doms:
             if r.match_type not in (MatchType.KEYWORD, MatchType.REGEX):
                 covered = parent_trie.is_covered(r.normalized)
                 if not covered and p_kws: covered = any(pk in r.normalized for pk in p_kws)
-                if not covered and parent.compiled_regexes: covered = any(pat.search(r.normalized) for pat in parent.compiled_regexes)
+                if not covered and parent_compiled_regexes: covered = any(pat.search(r.normalized) for pat in parent_compiled_regexes)
                 if not covered: return False
             elif r.match_type == MatchType.KEYWORD:
                 if not p_kws or not any(pk in r.normalized for pk in p_kws): return False
@@ -838,23 +818,32 @@ class SemanticLineageAnalyzer:
         with self._lock:
             new_hashes = {s.hash for s in parsed_srcs if s.hash not in self.exist_hashes}
             if new_hashes:
-                tries = {}
-                def get_trie(idx):
-                    if idx not in tries:
-                        t = DomainTrieOptimizer()
-                        for r in parsed_srcs[idx].domain_rules: t.insert(r)
-                        tries[idx] = t
-                    return tries[idx]
+                cache_feats = {}
+                def get_feats(idx):
+                    if idx not in cache_feats:
+                        ps = parsed_srcs[idx]
+                        v4 = IntervalMerger._union_intervals([(r.start_int, r.end_int) for r in ps.ip_rules if r.version == 4])
+                        v6 = IntervalMerger._union_intervals([(r.start_int, r.end_int) for r in ps.ip_rules if r.version == 6])
+                        gen = {(r.type, r.val, r.is_exclusion) for r in ps.generic_rules}
+                        kws = [r.normalized for r in ps.domain_rules if r.match_type == MatchType.KEYWORD]
+                        rex = {r.normalized for r in ps.domain_rules if r.match_type == MatchType.REGEX}
+                        trie = DomainTrieOptimizer()
+                        for r in ps.domain_rules: trie.insert(r)
+                        cache_feats[idx] = (v4, v6, gen, kws, rex, trie, ps.domain_rules, ps.compiled_regexes)
+                    return cache_feats[idx]
                     
                 for i in range(len(parsed_srcs)):
                     for j in range(i+1, len(parsed_srcs)):
                         p_i, p_j = parsed_srcs[i], parsed_srcs[j]
                         if p_i.hash in new_hashes or p_j.hash in new_hashes:
-                            if self._is_subset_semantic(p_i, get_trie(j), p_j):
+                            v4_i, v6_i, gen_i, kws_i, rex_i, trie_i, doms_i, crex_i = get_feats(i)
+                            v4_j, v6_j, gen_j, kws_j, rex_j, trie_j, doms_j, crex_j = get_feats(j)
+
+                            if self._is_subset_semantic(v4_i, v4_j, v6_i, v6_j, gen_i, gen_j, doms_i, kws_j, rex_j, trie_j, crex_j):
                                 if p_i.hash not in self.graph[p_j.hash]:
                                     self.graph[p_j.hash].add(p_i.hash)
                                     self.in_deg[p_i.hash] += 1
-                            if self._is_subset_semantic(p_j, get_trie(i), p_i):
+                            if self._is_subset_semantic(v4_j, v4_i, v6_j, v6_i, gen_j, gen_i, doms_j, kws_i, rex_i, trie_i, crex_i):
                                 if p_j.hash not in self.graph[p_i.hash]:
                                     self.graph[p_i.hash].add(p_j.hash)
                                     self.in_deg[p_j.hash] += 1
@@ -890,7 +879,6 @@ class AdvancedTrustEvaluator:
         explicit_sources = [s for s in self.sources if s.is_explicit_weight]
         trusted_rule_hashes = set()
         if explicit_sources:
-            # GLM 算法優化：使用中位數代替平均數
             weights = [s.initial_weight for s in explicit_sources]
             avg_explicit = statistics.median(weights) if weights else 1.0
             for src in explicit_sources:
@@ -996,7 +984,6 @@ class RuleParser:
                         mt = self.RMAP.get(k.upper(), k)
                         vals = v if isinstance(v, list) else [v]
                         
-                        # Gemini 核心修復：使用 JSON 序列化 attrs 防止格式污染
                         extra_attrs = {ek: ev for ek, ev in r.items() if ek not in ('invert', k, 'version', 'rules', 'match_type', 'normalized', 'is_exclusion', 'specificity_score', 'attrs') and not isinstance(ev, (list, dict))}
                         attr_str = json.dumps(extra_attrs, sort_keys=True) if extra_attrs else ""
                         
@@ -1013,7 +1000,16 @@ class RuleParser:
                 v = ln[1:].strip() if is_excl else ln
                 p = v.split(',')
                 if len(p) >= 2 and p[0].upper() in self.RMAP: 
-                    _add(self.RMAP[p[0].upper()], p[1].strip(), is_excl, ','.join(p[2:]).strip())
+                    raw_attrs = p[2:]
+                    attrs_dict = {}
+                    for attr in raw_attrs:
+                        attr = attr.strip()
+                        if attr.upper() in ('PROXY', 'REJECT', 'DIRECT'): continue
+                        if attr.lower() == 'no-resolve': attrs_dict['no-resolve'] = True
+                        else: attrs_dict[attr] = True 
+                    
+                    attr_str = json.dumps(attrs_dict, sort_keys=True) if attrs_dict else ""
+                    _add(self.RMAP[p[0].upper()], p[1].strip(), is_excl, attr_str)
                 else: 
                     _add('domain', v, is_excl, "")
                 
@@ -1199,7 +1195,7 @@ def _format_policy(attrs: str, default_pol: str) -> str:
     try:
         d = json.loads(attrs)
         res = default_pol
-        if d.get('no_resolve'): res += ",no-resolve"
+        if d.get('no_resolve') or d.get('no-resolve'): res += ",no-resolve"
         return res
     except Exception:
         return default_pol
@@ -1283,7 +1279,6 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
                     existing_w, _ = gen_objs[r._hash]
                     if src.weight > existing_w: gen_objs[r._hash] = (src.weight, r)
 
-        # Gemini 核心：保留 Tries 按屬性分組，避免丟失 attrs
         allow_tries, deny_tries, others, ip_weights = defaultdict(DomainTrieOptimizer), defaultdict(DomainTrieOptimizer), set(), []
         for h, score in rule_scores.items():
             if score >= min_score_threshold - 0.001:
