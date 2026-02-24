@@ -67,7 +67,7 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 68
+CACHE_VERSION = 69
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 4
 MAX_DNS_CACHE = 1024
@@ -266,7 +266,7 @@ class IntervalMerger:
         events.sort(key=lambda x: (x[0], -abs(x[1])))
         result, a_cnt, d_cnt, prev_x = [], 0, 0, -1
         for x, op in events:
-            if a_cnt > 0 and d_cnt == 0 and x > prev_x: result.append((prev_x, x - 1))
+            if a_cnt > 0 and d_cnt == 0 and x > prev_x and prev_x != -1: result.append((prev_x, x - 1))
             if op == 1: a_cnt += 1
             elif op == -1: a_cnt -= 1
             elif op == 2: d_cnt += 1
@@ -351,10 +351,16 @@ class IntervalMerger:
         if len(cidrs) <= target_count: return cidrs, 0.0
         orig_hosts = sum(c.num_addresses for c in cidrs)
         if orig_hosts == 0: return [], 0.0
-        cidrs.sort(key=lambda x: x.num_addresses, reverse=True)
-        kept = list(ipaddress.collapse_addresses(cidrs[:target_count]))
+        
+        collapsed = list(ipaddress.collapse_addresses(cidrs))
+        if len(collapsed) <= target_count:
+            return collapsed, 0.0
+
+        collapsed.sort(key=lambda x: x.num_addresses, reverse=True)
+        kept = collapsed[:target_count]
         new_hosts = sum(c.num_addresses for c in kept)
-        return kept, max(0.0, 1.0 - (new_hosts / orig_hosts))
+        loss = max(0.0, 1.0 - (new_hosts / orig_hosts))
+        return kept, loss
 
     @classmethod
     def to_cidrs(cls, intervals: List[Tuple[int, int, str]], version: int, config: MergeConfig) -> List[Tuple[str, str]]:
@@ -422,6 +428,7 @@ class TrieNode:
 
 class DomainTrieOptimizer:
     def __init__(self): self.root = TrieNode()
+    
     def insert(self, rule: DomainRule) -> None:
         node = self.root
         for part in reversed(rule.normalized.split('.')):
@@ -441,18 +448,24 @@ class DomainTrieOptimizer:
 
     def optimize(self, is_exclusion: bool) -> List[DomainRule]:
         res = []
-        def _dfs(node: TrieNode, path: List[str], parent_has_suffix: bool):
+        def _dfs(node: TrieNode, path: List[str], parent_covers: bool):
             is_suf = bool(node.types & (1 << MatchType.SUFFIX.value))
-            if parent_has_suffix: return
+            is_wild = bool(node.types & (1 << MatchType.WILDCARD.value))
+            if parent_covers: return
+            
             cur = '.'.join(reversed(path))
             if is_suf:
                 res.append(DomainRule(MatchType.SUFFIX, cur, is_exclusion)); return
-            if node.types & (1 << MatchType.WILDCARD.value): res.append(DomainRule(MatchType.WILDCARD, cur, is_exclusion))
-            if node.types & (1 << MatchType.EXACT.value): res.append(DomainRule(MatchType.EXACT, cur, is_exclusion))
+            if is_wild:
+                res.append(DomainRule(MatchType.WILDCARD, cur, is_exclusion))
+            if node.types & (1 << MatchType.EXACT.value):
+                res.append(DomainRule(MatchType.EXACT, cur, is_exclusion))
+                
             for lbl, ch in node.children.items():
                 path.append(lbl)
-                _dfs(ch, path, parent_has_suffix or is_suf)
+                _dfs(ch, path, parent_covers or is_suf or is_wild)
                 path.pop()
+                
         for lbl, ch in self.root.children.items(): _dfs(ch, [lbl], False)
         return res
 
@@ -751,7 +764,16 @@ class ParsedRuleSet:
         self.url, self.domain_rules, self.ip_rules, self.generic_rules, self.ts = u, d, i, g, t
         self.weight = self.initial_weight = w
         self.is_explicit_weight = explicit
-        self.hash = h or fast_hash(b"|".join(b"%d,%d,%s,%s" % (r.match_type.value, r.is_exclusion, r.normalized.encode('utf-8'), r.attrs.encode('utf-8')) for r in d) + b"|".join(b"%d,%d,%d,%s" % (r.version, r.start_int, r.prefixlen, r.attrs.encode('utf-8')) for r in i) + b"|".join(b"%s,%s,%d,%s" % (r.type.encode('utf-8'), r.val.encode('utf-8'), r.is_exclusion, r.attrs.encode('utf-8')) for r in g))
+        
+        sorted_d = sorted(d, key=lambda x: (x.match_type.value, x.is_exclusion, x.normalized))
+        sorted_i = sorted(i, key=lambda x: (x.version, x.start_int, x.prefixlen, x.is_exclusion))
+        sorted_g = sorted(g, key=lambda x: (x.type, x.val, x.is_exclusion))
+        
+        self.hash = h or fast_hash(
+            b"|".join(b"%d,%d,%s,%s" % (r.match_type.value, r.is_exclusion, r.normalized.encode('utf-8'), r.attrs.encode('utf-8')) for r in sorted_d) +
+            b"|" + b"|".join(b"%d,%d,%d,%s" % (r.version, r.start_int, r.prefixlen, r.attrs.encode('utf-8')) for r in sorted_i) +
+            b"|" + b"|".join(b"%s,%s,%d,%s" % (r.type.encode('utf-8'), r.val.encode('utf-8'), r.is_exclusion, r.attrs.encode('utf-8')) for r in sorted_g)
+        )
         self.compiled_regexes = []
         for r in d:
             if r.match_type == MatchType.REGEX:
@@ -796,13 +818,14 @@ class SemanticLineageAnalyzer:
             tp.replace(self.path)
         except Exception: pass
             
-    def _is_subset_semantic(self, c_v4, p_v4, c_v6, p_v6, c_gen, p_gen, c_doms, p_kws, p_rex, parent_trie, parent_compiled_regexes) -> bool:
+    def _is_subset_semantic(self, c_v4, p_v4, c_v6, p_v6, c_gen, p_gen, c_doms, p_kws, p_rex, parent_trie, parent_compiled_regexes, p_exact_set) -> bool:
         if IntervalMerger._subtract_intervals(c_v4, p_v4): return False
         if IntervalMerger._subtract_intervals(c_v6, p_v6): return False
         if not c_gen.issubset(p_gen): return False
             
         for r in c_doms:
             if r.match_type not in (MatchType.KEYWORD, MatchType.REGEX):
+                if r.match_type == MatchType.EXACT and r.normalized in p_exact_set: continue
                 covered = parent_trie.is_covered(r.normalized)
                 if not covered and p_kws: covered = any(pk in r.normalized for pk in p_kws)
                 if not covered and parent_compiled_regexes: covered = any(pat.search(r.normalized) for pat in parent_compiled_regexes)
@@ -829,21 +852,22 @@ class SemanticLineageAnalyzer:
                         rex = {r.normalized for r in ps.domain_rules if r.match_type == MatchType.REGEX}
                         trie = DomainTrieOptimizer()
                         for r in ps.domain_rules: trie.insert(r)
-                        cache_feats[idx] = (v4, v6, gen, kws, rex, trie, ps.domain_rules, ps.compiled_regexes)
+                        exact_set = {r.normalized for r in ps.domain_rules if r.match_type == MatchType.EXACT}
+                        cache_feats[idx] = (v4, v6, gen, kws, rex, trie, ps.domain_rules, ps.compiled_regexes, exact_set)
                     return cache_feats[idx]
                     
                 for i in range(len(parsed_srcs)):
                     for j in range(i+1, len(parsed_srcs)):
                         p_i, p_j = parsed_srcs[i], parsed_srcs[j]
                         if p_i.hash in new_hashes or p_j.hash in new_hashes:
-                            v4_i, v6_i, gen_i, kws_i, rex_i, trie_i, doms_i, crex_i = get_feats(i)
-                            v4_j, v6_j, gen_j, kws_j, rex_j, trie_j, doms_j, crex_j = get_feats(j)
+                            v4_i, v6_i, gen_i, kws_i, rex_i, trie_i, doms_i, crex_i, exact_i = get_feats(i)
+                            v4_j, v6_j, gen_j, kws_j, rex_j, trie_j, doms_j, crex_j, exact_j = get_feats(j)
 
-                            if self._is_subset_semantic(v4_i, v4_j, v6_i, v6_j, gen_i, gen_j, doms_i, kws_j, rex_j, trie_j, crex_j):
+                            if self._is_subset_semantic(v4_i, v4_j, v6_i, v6_j, gen_i, gen_j, doms_i, kws_j, rex_j, trie_j, crex_j, exact_j):
                                 if p_i.hash not in self.graph[p_j.hash]:
                                     self.graph[p_j.hash].add(p_i.hash)
                                     self.in_deg[p_i.hash] += 1
-                            if self._is_subset_semantic(v4_j, v4_i, v6_j, v6_i, gen_j, gen_i, doms_j, kws_i, rex_i, trie_i, crex_i):
+                            if self._is_subset_semantic(v4_j, v4_i, v6_j, v6_i, gen_j, gen_i, doms_j, kws_i, rex_i, trie_i, crex_i, exact_i):
                                 if p_j.hash not in self.graph[p_i.hash]:
                                     self.graph[p_i.hash].add(p_j.hash)
                                     self.in_deg[p_j.hash] += 1
