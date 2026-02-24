@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 import zlib
 from collections import defaultdict, OrderedDict, Counter, deque
 from enum import IntEnum
@@ -37,8 +38,7 @@ import urllib3.util.connection
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-if sys.version_info < (3, 9):
-    sys.exit("Error: Python 3.9+ is required")
+if sys.version_info < (3, 9): sys.exit("Error: Python 3.9+ is required")
 
 sys.setrecursionlimit(10000)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -51,8 +51,7 @@ def _patched_create_connection(address: tuple[str, int], *args: Any, **kwargs: A
     host, port = address
     forced_ip = getattr(_dns_context, 'forced_ip', None)
     forced_host = getattr(_dns_context, 'forced_host', None)
-    if forced_ip and forced_host == host:
-        address = (forced_ip, port)
+    if forced_ip and forced_host == host: address = (forced_ip, port)
     return _orig_create_connection(address, *args, **kwargs)
 
 urllib3.util.connection.create_connection = _patched_create_connection
@@ -67,7 +66,7 @@ except ImportError: USE_BLAKE3 = False
 try: import z3; HAS_Z3 = True
 except ImportError: HAS_Z3 = False
 
-CACHE_VERSION = 72
+CACHE_VERSION = 74
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 4
 MAX_DNS_CACHE = 1024
@@ -83,7 +82,6 @@ RE_HTML_STRICT = re.compile(rb'(?:^[\s]*<(?:!DOCTYPE\s+html|html|head|body))', r
 RE_IPV4_MAPPED_IPV6 = re.compile(r'^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?:/(\d+))?$', re.IGNORECASE)
 
 IPNetworkType = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
-
 _DNS_CACHE: OrderedDict[str, Tuple[float, List[str]]] = OrderedDict()
 _DNS_PENDING: Dict[str, threading.Event] = {}
 _DNS_LOCK = threading.Lock()
@@ -151,9 +149,7 @@ class MergeConfig:
         self.max_domain_length = int(kwargs.get('max_domain_length', 253))
         self.ipv4_garbage_threshold = int(kwargs.get('ipv4_garbage_threshold', 8))
         self.ipv6_garbage_threshold = int(kwargs.get('ipv6_garbage_threshold', 48))
-
-        if self.output_format not in ('json', 'surge', 'clash'):
-            self.output_format = 'json'
+        if self.output_format not in ('json', 'surge', 'clash'): self.output_format = 'json'
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any], base: 'MergeConfig') -> 'MergeConfig':
@@ -196,7 +192,7 @@ class EntropyAssessor:
         vowels = set('aeiou')
         for p in parts:
             length = len(p)
-            if length < 5: continue 
+            if length < 5: continue
             freq = Counter(p)
             ent = -sum((c / length) * math.log2(c / length) for c in freq.values())
             n_ent = ent / math.log2(len(freq)) if len(freq) > 1 else 0
@@ -341,29 +337,11 @@ class IntervalMerger:
             return res
         return _merge_adj(acc_a), _merge_adj(acc_d)
 
-    @staticmethod
-    def approximate_collapse(cidrs: List[IPNetworkType], target_count: int) -> Tuple[List[IPNetworkType], float]:
-        if len(cidrs) <= target_count: return cidrs, 0.0
-        orig_hosts = sum(c.num_addresses for c in cidrs)
-        if orig_hosts == 0: return [], 0.0
-        
-        collapsed = list(ipaddress.collapse_addresses(cidrs))
-        if len(collapsed) <= target_count: return collapsed, 0.0
-
-        collapsed.sort(key=lambda x: x.prefixlen, reverse=False)
-        kept = collapsed[:target_count]
-        new_hosts = sum(c.num_addresses for c in kept)
-        
-        # 修正的算法：計算加入的冗餘主機比例
-        loss = (new_hosts - orig_hosts) / new_hosts if new_hosts > 0 else 0.0
-        return kept, loss
-
     @classmethod
     def to_cidrs(cls, intervals: List[Tuple[int, int, str]], version: int, config: MergeConfig) -> List[Tuple[str, str]]:
         exact_networks = []
         width = 32 if version == 4 else 128
         fn = ipaddress.IPv4Address if version == 4 else ipaddress.IPv6Address
-        agg_limit = MAX_IP_RANGE_AGGREGATION_V4 if version == 4 else MAX_IP_RANGE_AGGREGATION_V6
 
         def _fast_cidr_split(start: int, end: int):
             cur = start
@@ -371,37 +349,43 @@ class IntervalMerger:
                 max_sz = (cur & -cur) if cur != 0 else (1 << width)
                 rem = end - cur + 1
                 if max_sz > rem: max_sz = 1 << (rem.bit_length() - 1)
-                prefixlen = width - max_sz.bit_length() + 1
-                yield ipaddress.ip_network(f"{fn(cur)}/{prefixlen}", strict=False)
+                yield (cur, width - (max_sz.bit_length() - 1))
                 cur += max_sz
 
         for s, e, attr in intervals:
-            r_sz = e - s + 1
-            if r_sz > agg_limit: exact_networks.extend((n, attr) for n in _fast_cidr_split(s, e))
-            else:
-                try: exact_networks.extend((n, attr) for n in ipaddress.summarize_address_range(fn(s), fn(e)))
-                except (ValueError, TypeError): exact_networks.extend((n, attr) for n in _fast_cidr_split(s, e))
-                    
-        if len(exact_networks) <= config.max_cidr_fragmentation: return [(str(n), a) for n, a in exact_networks]
+            exact_networks.extend(((c, p), attr) for c, p in _fast_cidr_split(s, e))
+            
+        if len(exact_networks) <= config.max_cidr_fragmentation: 
+            return [(f"{fn(c)}/{p}", a) for (c, p), a in exact_networks]
             
         if not config.enable_cidr_approximation:
             if config.fallback_on_fragmentation:
-                exact_networks.sort(key=lambda x: x[0].prefixlen, reverse=False)
-                grp = defaultdict(list)
-                for n, a in exact_networks[:config.max_cidr_fragmentation]: grp[a].append(n)
+                exact_networks.sort(key=lambda x: x[0][1], reverse=False)
                 res = []
+                grp = defaultdict(list)
+                for (c, p), a in exact_networks[:config.max_cidr_fragmentation]: grp[a].append(ipaddress.ip_network(f"{fn(c)}/{p}"))
                 for a, ns in grp.items(): res.extend((str(k), a) for k in ipaddress.collapse_addresses(ns))
                 return res[:config.max_cidr_fragmentation]
             raise CIDRFragmentationError(len(exact_networks), config.max_cidr_fragmentation, 0.0)
             
         grp = defaultdict(list)
-        for n, a in exact_networks: grp[a].append(n)
+        for (c, p), a in exact_networks: grp[a].append(ipaddress.ip_network(f"{fn(c)}/{p}"))
         res, tot_loss = [], 0.0
         total_exact = max(1, len(exact_networks))
         
         for a, ns in grp.items():
             budget = max(1, int(config.max_cidr_fragmentation * (len(ns) / total_exact)))
-            kept, loss = cls.approximate_collapse(ns, budget)
+            if len(ns) <= budget:
+                kept, loss = ns, 0.0
+            else:
+                orig_hosts = sum(c.num_addresses for c in ns)
+                collapsed = list(ipaddress.collapse_addresses(ns))
+                if len(collapsed) <= budget: kept, loss = collapsed, 0.0
+                else:
+                    collapsed.sort(key=lambda x: x.prefixlen, reverse=False)
+                    kept = collapsed[:budget]
+                    new_hosts = sum(c.num_addresses for c in kept)
+                    loss = (orig_hosts - new_hosts) / orig_hosts if orig_hosts > 0 else 0.0
             tot_loss = max(tot_loss, loss)
             res.extend((str(k), a) for k in kept)
         
@@ -417,47 +401,53 @@ class IntervalMerger:
         return res
 
 class TrieNode:
-    __slots__ = ('children', 'types')
+    __slots__ = ('children', 'types', 'attrs')
     def __init__(self):
         self.children = {}
         self.types = 0
+        self.attrs = {} 
 
 class DomainTrieOptimizer:
     def __init__(self): self.root = TrieNode()
+    
     def insert(self, rule: DomainRule) -> None:
         node = self.root
         for part in reversed(rule.normalized.split('.')):
             if part not in node.children: node.children[part] = TrieNode()
             node = node.children[part]
         node.types |= (1 << rule.match_type.value)
-
-    def is_covered(self, domain: str) -> bool:
-        node = self.root
-        parts = domain.split('.')
-        for i, part in enumerate(reversed(parts)):
-            if (node.types & (1 << MatchType.SUFFIX.value)): return True
-            if (node.types & (1 << MatchType.WILDCARD.value)) and i < len(parts) - 1: return True
-            if part not in node.children: return False
-            node = node.children[part]
-        return bool(node.types & ((1 << MatchType.EXACT.value) | (1 << MatchType.SUFFIX.value)))
+        node.attrs[rule.match_type.value] = rule.attrs
 
     def optimize(self, is_exclusion: bool) -> List[DomainRule]:
         res = []
-        def _dfs(node: TrieNode, path: List[str], parent_covers: bool):
-            is_suf = bool(node.types & (1 << MatchType.SUFFIX.value))
-            is_wild = bool(node.types & (1 << MatchType.WILDCARD.value))
-            if parent_covers: return
+        def _dfs(node: TrieNode, path: List[str], active_suffix_attr: Optional[str]):
+            cur_dom = '.'.join(reversed(path)) if path else ""
+            has_suffix = bool(node.types & (1 << MatchType.SUFFIX.value))
+            my_suffix_attr = node.attrs.get(MatchType.SUFFIX.value) if has_suffix else None
+            new_active_attr = active_suffix_attr
             
-            cur = '.'.join(reversed(path))
-            if is_suf: res.append(DomainRule(MatchType.SUFFIX, cur, is_exclusion)); return
-            if is_wild: res.append(DomainRule(MatchType.WILDCARD, cur, is_exclusion))
-            if node.types & (1 << MatchType.EXACT.value): res.append(DomainRule(MatchType.EXACT, cur, is_exclusion))
+            if has_suffix:
+                if my_suffix_attr != active_suffix_attr:
+                    res.append(DomainRule(MatchType.SUFFIX, cur_dom, is_exclusion, attrs=my_suffix_attr or ""))
+                    new_active_attr = my_suffix_attr
+            
+            if node.types & (1 << MatchType.WILDCARD.value):
+                attr = node.attrs.get(MatchType.WILDCARD.value)
+                if attr != new_active_attr:
+                    res.append(DomainRule(MatchType.WILDCARD, cur_dom, is_exclusion, attrs=attr or ""))
+                    
+            if node.types & (1 << MatchType.EXACT.value):
+                attr = node.attrs.get(MatchType.EXACT.value)
+                if attr != new_active_attr:
+                    res.append(DomainRule(MatchType.EXACT, cur_dom, is_exclusion, attrs=attr or ""))
             
             for lbl, ch in node.children.items():
                 path.append(lbl)
-                _dfs(ch, path, parent_covers or is_suf or is_wild)
+                _dfs(ch, path, new_active_attr)
                 path.pop()
-        for lbl, ch in self.root.children.items(): _dfs(ch, [lbl], False)
+
+        for lbl, ch in self.root.children.items():
+            _dfs(ch, [lbl], None)
         return res
 
 class VersionedBDDNode:
@@ -739,7 +729,7 @@ class WALBackend:
                 elif USE_ORJSON: b = orjson.dumps(self.data)
                 else: b = json.dumps(self.data, separators=(',', ':')).encode('utf-8')
                 cb = zlib.compress(b, level=6)
-                tp = Path(f"{self.db_path}.{threading.get_ident()}.tmp")
+                tp = Path(f"{self.db_path}.{uuid.uuid4().hex}.tmp")
                 with open(tp, 'wb') as f:
                     f.write(hashlib.blake2b(cb, digest_size=16).digest())
                     f.write(struct.pack('>d', time.time()))
@@ -750,12 +740,13 @@ class WALBackend:
             except Exception: pass
 
 class ParsedRuleSet:
-    __slots__ = ('url', 'domain_rules', 'ip_rules', 'generic_rules', 'ts', 'hash', 'weight', 'initial_weight', 'compiled_regexes', 'is_explicit_weight', 'dga_count')
+    __slots__ = ('url', 'domain_rules', 'ip_rules', 'generic_rules', 'ts', 'hash', 'weight', 'initial_weight', 'compiled_regexes', 'is_explicit_weight', 'dga_count', 'rule_count')
     def __init__(self, u: str, d: Tuple[DomainRule,...], i: Tuple[IPCIDRRule,...], g: Tuple[GenericRule,...], t: float, h: str = "", w: float = 1.0, explicit: bool = False, dga_count: int = 0):
         self.url, self.domain_rules, self.ip_rules, self.generic_rules, self.ts = u, d, i, g, t
         self.weight = self.initial_weight = w
         self.is_explicit_weight = explicit
-        self.dga_count = dga_count 
+        self.dga_count = dga_count
+        self.rule_count = len(d) + len(i) + len(g) 
         
         if not h:
             hasher = blake3() if USE_BLAKE3 else hashlib.sha256()
@@ -783,7 +774,7 @@ class SourceSignature:
 
     @classmethod
     def from_parsed(cls, ps: 'ParsedRuleSet') -> 'SourceSignature':
-        return cls(ps.url, ps.weight, ps.hash, {r._hash for r in ps.domain_rules}, {r._hash for r in ps.ip_rules}, len(ps.domain_rules)+len(ps.ip_rules))
+        return cls(ps.url, ps.weight, ps.hash, {r._hash for r in ps.domain_rules}, {r._hash for r in ps.ip_rules}, ps.rule_count)
 
 class SemanticLineageAnalyzer:
     def __init__(self, path: Path, enable: bool):
@@ -807,7 +798,7 @@ class SemanticLineageAnalyzer:
         data = {'hashes': list(self.exist_hashes), 'graph': clean_graph, 'in_deg': clean_in_deg}
         try:
             b = msgpack.packb(data, use_bin_type=True) if USE_MSGPACK else json.dumps(data, separators=(',', ':')).encode('utf-8')
-            tp = self.path.with_suffix('.tmp')
+            tp = self.path.with_suffix(f'.{uuid.uuid4().hex}.tmp')
             with open(tp, 'wb') as f:
                 f.write(b); f.flush(); os.fsync(f.fileno())
             tp.replace(self.path)
@@ -821,7 +812,7 @@ class SemanticLineageAnalyzer:
         for r in c_doms:
             if r.match_type not in (MatchType.KEYWORD, MatchType.REGEX):
                 if r.match_type == MatchType.EXACT and r.normalized in p_exact_set: continue
-                covered = parent_trie.is_covered(r.normalized)
+                covered = len(parent_trie.optimize(False)) > 0 
                 if not covered and p_kws: covered = any(pk in r.normalized for pk in p_kws)
                 if not covered and parent_compiled_regexes: covered = any(pat.search(r.normalized) for pat in parent_compiled_regexes)
                 if not covered: return False
@@ -833,8 +824,6 @@ class SemanticLineageAnalyzer:
 
     def compute(self, parsed_srcs: List['ParsedRuleSet'], sigs: List[SourceSignature]) -> Set[int]:
         if not self.enable: return set()
-        
-        # 移出鎖範圍的特徵提取，避免單線程瓶頸
         new_hashes = {s.hash for s in parsed_srcs if s.hash not in self.exist_hashes}
         if not new_hashes: return set()
         
@@ -906,7 +895,7 @@ class AdvancedTrustEvaluator:
                     trusted_rule_hashes.update(r._hash for r in src.ip_rules)
 
         for src in self.sources:
-            tot = len(src.domain_rules) + len(src.ip_rules) + len(src.generic_rules)
+            tot = src.rule_count
             if tot == 0:
                 src.weight = 0.0
                 continue
@@ -921,8 +910,7 @@ class AdvancedTrustEvaluator:
             
             consensus_multiplier = 1.0
             if not src.is_explicit_weight and trusted_rule_hashes:
-                overlap = sum(1 for r in src.domain_rules if r._hash in trusted_rule_hashes) + \
-                          sum(1 for r in src.ip_rules if r._hash in trusted_rule_hashes)
+                overlap = sum(1 for r in src.domain_rules if r._hash in trusted_rule_hashes) + sum(1 for r in src.ip_rules if r._hash in trusted_rule_hashes)
                 overlap_ratio = overlap / max(1, len(src.domain_rules) + len(src.ip_rules))
                 consensus_multiplier = 0.5 + (overlap_ratio * 1.5)
 
@@ -977,8 +965,7 @@ class RuleParser:
             elif typ in ('ip_cidr', 'source_ip_cidr'):
                 m = RE_IPV4_MAPPED_IPV6.match(val)
                 if m:
-                    v4_ip = m.group(1)
-                    prefix = int(m.group(2)) if m.group(2) else 32
+                    v4_ip, prefix = m.group(1), int(m.group(2)) if m.group(2) else 32
                     if prefix >= 96: prefix -= 96
                     val = f"{v4_ip}/{prefix}"
                 try: 
@@ -1020,14 +1007,12 @@ class RuleParser:
                 v = ln[1:].strip() if is_excl else ln
                 p = v.split(',')
                 if len(p) >= 2 and p[0].upper() in self.RMAP: 
-                    raw_attrs = p[2:]
-                    attrs_dict = {}
+                    raw_attrs, attrs_dict = p[2:], {}
                     for attr in raw_attrs:
                         attr = attr.strip()
-                        if attr.upper() in ('PROXY', 'REJECT', 'DIRECT'): continue
-                        if attr.lower() == 'no-resolve': attrs_dict['no-resolve'] = True
+                        if attr.upper() in ('PROXY', 'REJECT', 'DIRECT'): attrs_dict['policy'] = attr.upper()
+                        elif attr.lower() == 'no-resolve': attrs_dict['no-resolve'] = True
                         else: attrs_dict[attr] = True 
-                    
                     attr_str = json.dumps(attrs_dict, sort_keys=True) if attrs_dict else ""
                     _add(self.RMAP[p[0].upper()], p[1].strip(), is_excl, attr_str)
                 else: 
@@ -1118,7 +1103,7 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
                                 with os.fdopen(fd, 'wb') as f:
                                     for chunk in resp.iter_content(131072):
                                         if not chunk: continue
-                                        if html_check_count < 3:
+                                        if not curl.endswith('.srs') and html_check_count < 3:
                                             if RE_HTML_STRICT.search(chunk) and not curl.endswith('.html'):
                                                 is_html_error = True; break
                                             html_check_count += 1
@@ -1138,12 +1123,16 @@ def _dl_single(cfg: MergeConfig, url: str, td: Path, cache: Optional[WALBackend]
         
     srs = None
     if url.endswith('.srs') and cfg.validate_core_path():
-        srs, json_f = tmp, tmp.with_suffix('.json')
+        srs = tmp
+        json_f = tmp.with_suffix('.json')
         try:
             subprocess.run([str(Path(cfg.core_bin_path).expanduser().absolute()), "rule-set", "decompile", "--output", str(json_f), str(srs)], check=True, capture_output=True, timeout=cfg.compile_timeout_seconds)
             tmp = json_f
-        except Exception: pass
-        finally: srs.unlink(missing_ok=True)
+        except Exception: 
+            if srs.exists(): srs.unlink(missing_ok=True)
+            return None, None
+        finally: 
+            if srs.exists(): srs.unlink(missing_ok=True)
             
     try:
         ps = parser.parse(tmp, url)
@@ -1214,11 +1203,10 @@ def _format_policy(attrs: str, default_pol: str) -> str:
     if not attrs: return default_pol
     try:
         d = json.loads(attrs)
-        res = default_pol
+        res = d.get('policy', default_pol)
         if d.get('no_resolve') or d.get('no-resolve'): res += ",no-resolve"
         return res
-    except Exception:
-        return default_pol
+    except Exception: return default_pol
 
 def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[SemanticLineageAnalyzer] = None, smt_executor: Optional[concurrent.futures.ProcessPoolExecutor] = None) -> Tuple[str, str, str, str, float]:
     start_time = time.time()
@@ -1238,8 +1226,7 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             try:
                 cdir.mkdir(parents=True, exist_ok=True)
                 ignore_file = cache_root / ".gitignore"
-                if not ignore_file.exists():
-                    ignore_file.write_text("*\n")
+                if not ignore_file.exists(): ignore_file.write_text("*\n")
                 cache = WALBackend(cdir / "source_cache", cfg)
             except OSError: pass
 
@@ -1279,31 +1266,17 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             if explicit_weights: min_score_threshold = max(0.01, min(explicit_weights) * 0.7)
             else: min_score_threshold = max(0.01, (sum(s.weight for s in sources) / len(sources)) * 0.35)
 
-        ip_objs = {} 
-        dom_objs = {} 
-        gen_objs = {}
-        
+        ip_objs, dom_objs, gen_objs = {}, {}, {}
         for src in sources:
             for r in src.domain_rules:
-                if r._hash not in dom_objs: dom_objs[r._hash] = (src.weight, r, src.url)
-                else:
-                    existing_w, _, existing_url = dom_objs[r._hash]
-                    if src.weight > existing_w or (src.weight == existing_w and src.url < existing_url):
-                        dom_objs[r._hash] = (src.weight, r, src.url)
-                            
+                if r._hash not in dom_objs or src.weight > dom_objs[r._hash][0] or (src.weight == dom_objs[r._hash][0] and src.url < dom_objs[r._hash][2]):
+                    dom_objs[r._hash] = (src.weight, r, src.url)
             for r in src.ip_rules:
-                if r._hash not in ip_objs: ip_objs[r._hash] = (src.weight, r, src.url)
-                else:
-                    existing_w, _, existing_url = ip_objs[r._hash]
-                    if src.weight > existing_w or (src.weight == existing_w and src.url < existing_url):
-                        ip_objs[r._hash] = (src.weight, r, src.url)
-                        
+                if r._hash not in ip_objs or src.weight > ip_objs[r._hash][0] or (src.weight == ip_objs[r._hash][0] and src.url < ip_objs[r._hash][2]):
+                    ip_objs[r._hash] = (src.weight, r, src.url)
             for r in src.generic_rules:
-                if r._hash not in gen_objs: gen_objs[r._hash] = (src.weight, r, src.url)
-                else:
-                    existing_w, _, existing_url = gen_objs[r._hash]
-                    if src.weight > existing_w or (src.weight == existing_w and src.url < existing_url):
-                        gen_objs[r._hash] = (src.weight, r, src.url)
+                if r._hash not in gen_objs or src.weight > gen_objs[r._hash][0] or (src.weight == gen_objs[r._hash][0] and src.url < gen_objs[r._hash][2]):
+                    gen_objs[r._hash] = (src.weight, r, src.url)
 
         allow_tries, deny_tries, others, ip_weights = defaultdict(DomainTrieOptimizer), defaultdict(DomainTrieOptimizer), set(), []
         
@@ -1313,12 +1286,10 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
                 else: (deny_tries[r.attrs] if r.is_exclusion else allow_tries[r.attrs]).insert(r)
                 
         for h, (score, r, url) in ip_objs.items():
-            if score >= min_score_threshold - 0.001:
-                ip_weights.append((score, r, url))
+            if score >= min_score_threshold - 0.001: ip_weights.append((score, r, url))
                 
         for h, (score, r, url) in gen_objs.items():
-            if score >= min_score_threshold - 0.001:
-                others.add(r)
+            if score >= min_score_threshold - 0.001: others.add(r)
                 
         p_dom_a, p_dom_d = [], []
         if cfg.enable_trie_compression:
@@ -1338,7 +1309,7 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
             f_d_ip_strs = IntervalMerger.to_cidrs(v4_d_ivs, 4, cfg) + IntervalMerger.to_cidrs(v6_d_ivs, 6, cfg)
         except CIDRFragmentationError as e: 
             logger.error(f"[{name}] Task Failed: {e}")
-            return (name, "❌", "CIDR Limit Exceeded & Fallback Failed", "0KB", time.time() - start_time)
+            return (name, "❌", "CIDR Limit Exceeded", "0KB", time.time() - start_time)
         
         issues = []
         if cfg.enable_bdd_verification or (HAS_Z3 and cfg.enable_smt_verification):
@@ -1364,23 +1335,19 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig, lin: Optional[Semantic
                         typ_str = r.type.replace('_', '-').upper()
                         f.write(f"{pf}{typ_str},{r.val},{pol}\n")
                         continue
-                    
                     typ = 'DOMAIN' if r.match_type == MatchType.EXACT else 'DOMAIN-SUFFIX' if r.match_type == MatchType.SUFFIX else 'DOMAIN-KEYWORD' if r.match_type == MatchType.KEYWORD else 'DOMAIN-REGEX' if r.match_type == MatchType.REGEX else 'DOMAIN-WILDCARD'
                     val = f"*.{r.normalized}" if r.match_type == MatchType.WILDCARD else r.normalized
                     f.write(f"{pf}{typ},{val},{pol}\n")
                     
-                for s, attr in f_a_ip_strs: 
-                    f.write(f"{pf}IP-CIDR{'6' if ':' in s else ''},{s},{_format_policy(attr, cfg.allow_policy)}\n")
-                for s, attr in f_d_ip_strs: 
-                    f.write(f"{pf}IP-CIDR{'6' if ':' in s else ''},{s},{_format_policy(attr, cfg.deny_policy)}\n")
+                for s, attr in f_a_ip_strs: f.write(f"{pf}IP-CIDR{'6' if ':' in s else ''},{s},{_format_policy(attr, cfg.allow_policy)}\n")
+                for s, attr in f_d_ip_strs: f.write(f"{pf}IP-CIDR{'6' if ':' in s else ''},{s},{_format_policy(attr, cfg.deny_policy)}\n")
         else:
             rbt = defaultdict(list)
             for r in all_d:
-                if isinstance(r, GenericRule):
-                    rbt[(r.type, r.is_exclusion, r.attrs)].append(r.val)
-                    continue
-                typ = 'domain' if r.match_type == MatchType.EXACT else 'domain_suffix' if r.match_type == MatchType.SUFFIX else 'domain_keyword' if r.match_type == MatchType.KEYWORD else 'domain_regex' if r.match_type == MatchType.REGEX else 'domain_wildcard'
-                rbt[(typ, r.is_exclusion, r.attrs)].append(r.normalized)
+                if isinstance(r, GenericRule): rbt[(r.type, r.is_exclusion, r.attrs)].append(r.val)
+                else:
+                    typ = 'domain' if r.match_type == MatchType.EXACT else 'domain_suffix' if r.match_type == MatchType.SUFFIX else 'domain_keyword' if r.match_type == MatchType.KEYWORD else 'domain_regex' if r.match_type == MatchType.REGEX else 'domain_wildcard'
+                    rbt[(typ, r.is_exclusion, r.attrs)].append(r.normalized)
             for s, attr in f_a_ip_strs: rbt[('ip_cidr', False, attr)].append(s)
             for s, attr in f_d_ip_strs: rbt[('ip_cidr', True, attr)].append(s)
             
