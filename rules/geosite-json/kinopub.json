@@ -11,7 +11,8 @@
         "kinopub.online",
         "kpdl.link",
         "mos-gorsud.co",
-        "pushbr.com"
+        "pushbr.com",
+        "smarttvcdn.online"
       ],
       "domain_regex": "(\\w+)-static-[0-9]+\\.cdntogo\\.net$"
     }
