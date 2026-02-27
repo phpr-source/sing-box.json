@@ -25,7 +25,8 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install requests urllib3 orjson msgpack blake3 z3-solver
+          # 💡 移除 z3-solver，依賴最新版純數學零損耗演算法提速
+          pip install requests urllib3 orjson msgpack blake3
           wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
           chmod +x sb-core
 
@@ -49,7 +50,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "Update Custom Merged Rules (Hybrid V4) $(date +'%Y-%m-%d')"
+            git commit -m "Update Custom Merged Rules (Ultimate Precision) $(date +'%Y-%m-%d')"
             git pull --rebase origin main
             git push origin main
           fi
