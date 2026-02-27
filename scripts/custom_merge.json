@@ -2,57 +2,59 @@
   "global": {
     "output_dir": "rules",
     "max_workers": 8,
+    "enable_reputation": true,
+    "enable_trie_compression": true,
     "output_format": "json",
-    "max_source_age_days": 7,
-    "enable_dga_filter": true,
-    "strict_cidr_limit": true,
-    "max_cidr_fragmentation": 15000,
-    "policy_merge_strategy": "reject_wins",
-    "same_tier_conflict_resolution": "allow_wins"
+    "enable_lineage": true,
+    "max_source_age_days": 7
   },
   "merge_tasks": [
     {
       "name": "cnip",
+      "min_score": 0,
       "sources": [
-        { "url": "https://raw.githubusercontent.com/OneOhCloud/one-geoip/rule-set/one-china.srs", "tier": 0 },
-        { "url": "https://github.com/SagerNet/sing-geoip/raw/refs/heads/rule-set/geoip-cn.srs", "tier": 0 },
-        { "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cnip.srs", "tier": 1 },
-        { "url": "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geoip-srs/cn.srs", "tier": 2 },
-        { "url": "https://raw.githubusercontent.com/Yuu518/sing-box-rules/rule_set/rule_set_ip/cn.srs", "tier": 2 },
-        { "url": "https://github.com/666OS/rules/raw/refs/heads/release/singbox/ip/China.srs", "tier": 2 },
-        { "url": "https://github.com/senshinya/singbox_ruleset/raw/refs/heads/main/rule/ChinaIPs/ChinaIPs.srs", "tier": 2 }
+        { "url": "https://raw.githubusercontent.com/OneOhCloud/one-geoip/rule-set/one-china.srs", "weight": 10 },
+        { "url": "https://github.com/SagerNet/sing-geoip/raw/refs/heads/rule-set/geoip-cn.srs", "weight": 10 },
+        { "url": "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geoip-srs/cn.srs" },
+        { "url": "https://raw.githubusercontent.com/Yuu518/sing-box-rules/rule_set/rule_set_ip/cn.srs" },
+        { "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cnip.srs", "weight": 8 },
+        { "url": "https://github.com/666OS/rules/raw/refs/heads/release/singbox/ip/China.srs" },
+        { "url": "https://github.com/senshinya/singbox_ruleset/raw/refs/heads/main/rule/ChinaIPs/ChinaIPs.srs" }
       ]
     },
     {
       "name": "geosite-cn",
+      "min_score": 0,
       "sources": [
-        { "url": "https://raw.githubusercontent.com/YiXuanZX/sing-box-geosite/main/rule/cn-additional-list-clash-classical.srs", "tier": 0 },
-        { "url": "https://github.com/SagerNet/sing-geosite/raw/refs/heads/rule-set/geosite-cn.srs", "tier": 0 },
-        { "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cn.srs", "tier": 1 },
-        { "url": "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geosite-srs/cn.srs", "tier": 2 },
-        { "url": "https://github.com/Yuu518/sing-box-rules/raw/refs/heads/rule_set/rule_set_site/cn.srs", "tier": 2 },
-        { "url": "https://github.com/666OS/rules/raw/refs/heads/release/singbox/domain/China.srs", "tier": 2 },
-        { "url": "https://github.com/senshinya/singbox_ruleset/raw/refs/heads/main/rule/China/China.srs", "tier": 2 }
+        { "url": "https://raw.githubusercontent.com/YiXuanZX/sing-box-geosite/main/rule/cn-additional-list-clash-classical.srs", "weight": 10 },
+        { "url": "https://github.com/SagerNet/sing-geosite/raw/refs/heads/rule-set/geosite-cn.srs", "weight": 10 },
+        { "url": "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geosite-srs/cn.srs" },
+        { "url": "https://github.com/Yuu518/sing-box-rules/raw/refs/heads/rule_set/rule_set_site/cn.srs" },
+        { "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cn.srs", "weight": 6 },
+        { "url": "https://github.com/666OS/rules/raw/refs/heads/release/singbox/domain/China.srs" },
+        { "url": "https://github.com/senshinya/singbox_ruleset/raw/refs/heads/main/rule/China/China.srs" }
       ]
     },
     {
       "name": "adblock",
+      "min_score": 0,
       "sources": [
-        { "url": "https://raw.githubusercontent.com/Cats-Team/AdRules/main/adrules-singbox.srs", "tier": 0 },
-        { "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/ads.srs", "tier": 1 },
-        { "url": "https://raw.githubusercontent.com/217heidai/adblockfilters/main/rules/adblocksingbox.srs", "tier": 1 },
-        { "url": "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/Adblock.srs", "tier": 2 },
-        { "url": "https://github.com/senshinya/singbox_ruleset/raw/refs/heads/main/rule/Advertising/Advertising.srs", "tier": 2 },
-        { "url": "https://github.com/666OS/rules/raw/refs/heads/release/singbox/Advertising.srs", "tier": 2 },
-        { "url": "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geosite-srs/category-ads-all.srs", "tier": 2 },
-        { "url": "https://raw.githubusercontent.com/REIJI007/AdBlock_Rule_For_Sing-box/main/adblock_reject.srs", "tier": 2 }
+        { "url": "https://raw.githubusercontent.com/Cats-Team/AdRules/main/adrules-singbox.srs" },
+        { "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/ads.srs" },
+        { "url": "https://raw.githubusercontent.com/217heidai/adblockfilters/main/rules/adblocksingbox.srs" },
+        { "url": "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/Adblock.srs" },
+        { "url": "https://github.com/senshinya/singbox_ruleset/raw/refs/heads/main/rule/Advertising/Advertising.srs" },
+        { "url": "https://github.com/666OS/rules/raw/refs/heads/release/singbox/Advertising.srs" },
+        { "url": "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geosite-srs/category-ads-all.srs" },
+        { "url": "https://raw.githubusercontent.com/REIJI007/AdBlock_Rule_For_Sing-box/main/adblock_reject.srs" }
       ]
     },
     {
       "name": "category-httpdns-cn",
+      "min_score": 0,
       "sources": [
-        { "url": "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geosite-srs/category-httpdns-cn.srs", "tier": 0 },
-        { "url": "https://github.com/senshinya/singbox_ruleset/raw/refs/heads/main/rule/BlockHttpDNS/BlockHttpDNS.srs", "tier": 1 }
+        { "url": "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geosite-srs/category-httpdns-cn.srs" },
+        { "url": "https://github.com/senshinya/singbox_ruleset/raw/refs/heads/main/rule/BlockHttpDNS/BlockHttpDNS.srs" }
       ]
     }
   ]
