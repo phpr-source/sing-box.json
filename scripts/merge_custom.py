@@ -55,7 +55,7 @@ except ImportError: USE_ORJSON = False
 try: import msgpack; USE_MSGPACK = True
 except ImportError: USE_MSGPACK = False
 
-CACHE_VERSION = 317
+CACHE_VERSION = 320
 TARGET_FORMAT_VERSION = 4
 MAX_DOWNLOAD_RETRIES = 4
 MAX_DNS_CACHE = 1024
@@ -141,7 +141,7 @@ class MergeConfig:
         self.match_type_sort_order = kwargs.get('match_type_sort_order', {MatchType.EXACT: 1, MatchType.SUFFIX: 2, MatchType.WILDCARD: 3, MatchType.KEYWORD: 4, MatchType.REGEX: 5})
         self.generic_priority = kwargs.get('generic_priority', {"process_name": 90, "user": 91, "package_name": 92, "geosite": 93})
         
-        self.max_cidr_fragmentation = int(kwargs.get('max_cidr_fragmentation', 10000))
+        self.max_cidr_fragmentation = int(kwargs.get('max_cidr_fragmentation', 15000))
         self.strict_cidr_limit = bool(kwargs.get('strict_cidr_limit', True))
         
         self.keyword_chunk_size = int(kwargs.get('keyword_chunk_size', 500))
@@ -345,7 +345,6 @@ class CanaryDetector:
             if is_broad_danger or hits_critical_ip:
                 if config.protect_private_ips and net.is_private: continue
                 if any(wl.supernet_of(net) for wl in config.canary_whitelist_ips): continue
-                logger.error(f"Canary Alert: Dangerous subnet or Critical IP blocked {net}")
                 return True
         return False
 
@@ -409,12 +408,12 @@ class RuleAdjudicator:
 
 def is_source_ip_fragmentation_toxic(ip_rules: List[IPCIDRRule], total_rules: int, config: MergeConfig) -> bool:
     if not ip_rules: return False
+    if total_rules == len(ip_rules): return False 
     
     v4_nets = [ipaddress.IPv4Network((r.start_int, r.prefixlen), strict=False) for r in ip_rules if r.version == 4]
     v6_nets = [ipaddress.IPv6Network((r.start_int, r.prefixlen), strict=False) for r in ip_rules if r.version == 6]
     
     frag_count = len(list(ipaddress.collapse_addresses(v4_nets))) + len(list(ipaddress.collapse_addresses(v6_nets)))
-    if total_rules == len(ip_rules) and frag_count > config.max_cidr_fragmentation: return False
     if frag_count > config.frag_toxic_count and (frag_count / max(1, total_rules)) > config.frag_toxic_ratio: return True
     return False
 
@@ -967,14 +966,12 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig) -> Tuple[str, str, str
         safe_sources = []
         for tier, url, result in valid_sources:
             if is_source_ip_fragmentation_toxic(result.ip_rules, result.rule_count, cfg):
-                logger.warning(f"Source {url} IP fragmentation storm detected, dropped.")
                 continue
 
             dga_ratio = result.dga_count / result.rule_count if result.rule_count > 0 else 0
-            if dga_ratio > 0.3: continue
+            if result.rule_count >= 1000 and dga_ratio > 0.5: continue
             
             if CanaryDetector.is_poisoned(result.domain_rules, result.ip_rules, tier, attr_pool, cfg): 
-                logger.error(f"Canary triggered for {url}, dropped.")
                 continue 
 
             new_doms = [r for r in result.domain_rules if adjudicator.adjudicate(r, tier, len(valid_sources))]
@@ -1076,7 +1073,7 @@ def worker(task: Dict[str, Any], global_cfg: MergeConfig) -> Tuple[str, str, str
 
         sz = f"{(out_srs if out_srs and out_srs.exists() else out_p).stat().st_size / 1024:.1f}KB"
         rcnt = len(all_d) + len(f_a_ip_strs) + len(f_d_ip_strs)
-        return (name, "✅", f"Ultimate Configurable: {rcnt} rules", sz, time.time() - start_time)
+        return (name, "✅", f"Ultimate Precision: {rcnt} rules", sz, time.time() - start_time)
 
     except Exception as e:
         logger.exception(f"[{name}] Task Error")
