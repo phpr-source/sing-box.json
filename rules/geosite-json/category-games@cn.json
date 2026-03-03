@@ -48,12 +48,12 @@
         "yostar.cn"
       ],
       "domain_regex": [
-        "^.+-mihayo\\.akamaized\\.net$",
         "^cdn-akamai-.+\\.gog-services\\.com$",
         "^gog-cdn-.+\\.footprint\\.net$",
         "^images(-\\d)?\\.gog-statics\\.com$",
         "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
-        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
+        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$",
+        "^.+-mihayo\\.akamaized\\.net$"
       ]
     }
   ]
