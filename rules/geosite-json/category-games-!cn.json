@@ -324,8 +324,6 @@
         "humblebundle.com",
         "hutpromos.com",
         "hyprsense.com",
-        "illusion.co.jp",
-        "illusion.jp",
         "industrialtoys.com",
         "instituteofwar.org",
         "itch.io",
@@ -790,11 +788,11 @@
       ],
       "domain_regex": [
         "^epicgames-download\\d\\.akamaized\\.net$",
+        "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
+        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$",
         "^cdn-akamai-.+\\.gog-services\\.com$",
         "^gog-cdn-.+\\.footprint\\.net$",
-        "^images(-\\d)?\\.gog-statics\\.com$",
-        "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
-        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
+        "^images(-\\d)?\\.gog-statics\\.com$"
       ]
     }
   ]
