@@ -270,6 +270,7 @@
         "jb.gg",
         "jenkins.io",
         "jetbrains.ai",
+        "jetbrains.cloud",
         "jetbrains.com",
         "jetbrains.net",
         "jetbrains.space",
@@ -547,8 +548,8 @@
         "zsh.org"
       ],
       "domain_regex": [
-        "^github-production-release-asset-[0-9a-zA-Z]{6}\\.s3\\.amazonaws\\.com$",
-        ".+\\.dkr\\.ecr\\.[^\\.]+\\.amazonaws\\.com$"
+        ".+\\.dkr\\.ecr\\.[^\\.]+\\.amazonaws\\.com$",
+        "^github-production-release-asset-[0-9a-zA-Z]{6}\\.s3\\.amazonaws\\.com$"
       ]
     }
   ]
