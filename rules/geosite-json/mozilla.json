@@ -5,9 +5,7 @@
       "domain": "mdn.mozillademos.org",
       "domain_suffix": [
         "bugzilla.org",
-        "crates.io",
         "developer.allizom.org",
-        "docs.rs",
         "extensionworkshop.com",
         "firefox.com",
         "firefoxusercontent.com",
@@ -22,8 +20,6 @@
         "mozilla.community",
         "mozilla.net",
         "mozilla.org",
-        "rust-lang.org",
-        "rustup.rs",
         "seamonkey-project.org",
         "thunderbird.net"
       ]

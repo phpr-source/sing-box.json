@@ -8,9 +8,12 @@
         "metro.spb.ru",
         "mos.transport.vtb.ru",
         "podorozhnik.spb.ru",
+        "st-ok-pts.cdn-vk.ru",
+        "st-ok.cdn-vk.ru",
         "taxi.yandex.ru",
         "transport.mos.ru",
-        "yandex-pogoda.static-storage.net"
+        "yandex-pogoda.static-storage.net",
+        "youla-web-static.mrgcdn.ru"
       ],
       "domain_suffix": [
         ".moscow",
@@ -155,7 +158,8 @@
         "yandexwebcache.org",
         "yastat.net",
         "yastatic.net",
-        "yclients.com"
+        "yclients.com",
+        "youla.io"
       ]
     }
   ]
