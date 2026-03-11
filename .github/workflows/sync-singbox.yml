@@ -10,7 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     strategy:
       fail-fast: false
       matrix:
@@ -18,12 +17,15 @@ jobs:
           - branch: reF1nd-testing
             tag: singbox-testing
             name: Testing
+            latest: 'false'
           - branch: reF1nd-stable
             tag: singbox-stable
             name: Stable
+            latest: 'true'
           - branch: reF1nd-oldstable
             tag: singbox-oldstable
             name: OldStable
+            latest: 'false'
 
     steps:
       - name: Get Upstream Commit
@@ -37,12 +39,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          LOCAL_SHA="none"
           if gh release view ${{ matrix.tag }} --repo ${{ github.repository }} &>/dev/null; then
-            BODY=$(gh release view ${{ matrix.tag }} --repo ${{ github.repository }} --json body -q .body)
-            LOCAL_SHA=$(echo "$BODY" | grep -oE 'Built from commit: [a-f0-9]{7}' | awk '{print $4}')
-            [ -z "$LOCAL_SHA" ] && LOCAL_SHA="none"
-          else
-            LOCAL_SHA="none"
+            BODY=$(gh release view ${{ matrix.tag }} --repo ${{ github.repository }} --json body -q .body || echo "")
+            EXTRACT=$(echo "$BODY" | grep -oE 'Built from commit: [a-f0-9]{7}' | awk '{print $4}' || echo "")
+            [ -n "$EXTRACT" ] && LOCAL_SHA="$EXTRACT"
           fi
           echo "local_sha=$LOCAL_SHA" >> $GITHUB_OUTPUT
 
@@ -77,12 +78,18 @@ jobs:
           echo "BUILD_TIME=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_ENV
           echo "BUILD_TAGS=with_gvisor,with_quic,with_utls,with_acme,with_clash_api" >> $GITHUB_ENV
 
-      - name: Compile Binaries
+      - name: Compile Binaries & Generate Hashes
         if: steps.check.outputs.status == 'build'
         run: |
           LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${VERSION}"
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -tags "${BUILD_TAGS}" -o sing-box-amd64 ./cmd/sing-box
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -tags "${BUILD_TAGS}" -o sing-box-arm64 ./cmd/sing-box
+          
+          {
+            echo "HASHES<<EOF"
+            sha256sum sing-box-amd64 sing-box-arm64
+            echo "EOF"
+          } >> $GITHUB_ENV
 
       - name: Clean Old Release
         if: steps.check.outputs.status == 'build'
@@ -97,31 +104,37 @@ jobs:
         with:
           tag_name: ${{ matrix.tag }}
           name: Sing-box Lite | ${{ matrix.name }}
-          make_latest: ${{ matrix.branch == 'reF1nd-stable' && 'true' || 'false' }}
+          make_latest: ${{ matrix.latest }}
           body: |
-            ## 🚀 Automated Build | Sing-box Lite
+            ## 🚀 Automated Build | Sing-box Lite (${{ matrix.name }})
 
-            > 🤖 本版本由 GitHub Actions 自動追蹤上游源碼並編譯發佈。
+            > 🤖 本版本由 GitHub Actions 自動追蹤上游源碼並編譯發佈，提供純淨、輕量的核心體驗。
 
             ### 📌 構建資訊 (Build Info)
             | 屬性 | 詳情 |
             | :--- | :--- |
-            | 👤 **上游倉庫** | [reF1nd/sing-box](https://github.com/reF1nd/sing-box) |
-            | 🌿 **代碼分支** | `${{ matrix.branch }}` |
-            | 🎯 **源碼提交** | [`${{ steps.upstream.outputs.short_sha }}`](https://github.com/reF1nd/sing-box/commit/${{ steps.upstream.outputs.short_sha }}) |
-            | 🔖 **版本標識** | `${{ env.VERSION }}` |
-            | 🕒 **編譯時間** | `${{ env.BUILD_TIME }}` (UTC+8) |
+            | 👤 上游倉庫 | [reF1nd/sing-box](https://github.com/reF1nd/sing-box) |
+            | 🌿 代碼分支 | `${{ matrix.branch }}` |
+            | 🎯 源碼提交 | [`${{ steps.upstream.outputs.short_sha }}`](https://github.com/reF1nd/sing-box/commit/${{ steps.upstream.outputs.short_sha }}) |
+            | 🔖 版本標識 | `${{ env.VERSION }}` |
+            | 🕒 編譯時間 | `${{ env.BUILD_TIME }}` (UTC+8) |
 
             ### ⚙️ 核心特性 (Build Tags)
             ```text
             ${{ env.BUILD_TAGS }}
             ```
 
-            ### 📥 系統架構 (Architecture)
-            - 🐧 `amd64`: 適用於主流 VPS、x86 軟路由、桌上型與筆記型電腦。
-            - 📱 `arm64`: 適用於樹莓派、N1 盒子、Android 設備、ARM 架構 VPS。
+            ### 📥 系統架構與校驗 (Architecture & Checksums)
+            - 🐧 **`amd64`**: 適用於主流 VPS、x86 軟路由、桌上型與筆記型電腦。
+            - 📱 **`arm64`**: 適用於樹莓派、N1 盒子、Android 設備、ARM 架構 VPS。
 
-            > Built from commit: ${{ steps.upstream.outputs.short_sha }}
+            **SHA256 校驗碼:**
+            ```text
+            ${{ env.HASHES }}
+            ```
+
+            ---
+            *Built from commit: ${{ steps.upstream.outputs.short_sha }}*
           files: |
             sing-box-amd64
             sing-box-arm64
