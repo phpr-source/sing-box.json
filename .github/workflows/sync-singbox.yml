@@ -6,38 +6,42 @@ on:
       branch_to_build:
         description: 'Target branch (leave empty for all)'
         required: false
-        type: string
+        type: choice
+        options:
+          - ''
+          - reF1nd-testing
+          - reF1nd-stable
+          - reF1nd-oldstable
+      force_build:
+        description: 'Force build (ignore commit check)'
+        required: false
+        type: boolean
+        default: false
       enable_upx:
         description: 'Enable UPX compression'
         required: false
         type: boolean
         default: true
   schedule:
-    - cron: '0 */4 * * *'
+    - cron: '0 */6 * * *'
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+env:
+  UPSTREAM_REPO: "reF1nd/sing-box"
+  BRANCH_PREFIX: "reF1nd-"
 
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate Input Branch
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.branch_to_build != ''
-        run: |
-          TARGET="${{ github.event.inputs.branch_to_build }}"
-          if ! git ls-remote --heads https://github.com/reF1nd/sing-box.git | grep -qw "refs/heads/$TARGET"; then
-            echo "::error::Branch $TARGET does not exist in the upstream repository."
-            exit 1
-          fi
-
   build-and-release:
-    needs: prepare
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.branch_to_build == '' ||
+      inputs.branch_to_build == matrix.branch
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     permissions:
       contents: write
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.branch }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
@@ -45,27 +49,27 @@ jobs:
           - branch: reF1nd-testing
             tag: singbox-testing
             name: Testing
-            latest: 'false'
+            latest: false
           - branch: reF1nd-stable
             tag: singbox-stable
             name: Stable
-            latest: 'true'
+            latest: true
           - branch: reF1nd-oldstable
             tag: singbox-oldstable
             name: OldStable
-            latest: 'false'
+            latest: false
 
     steps:
       - name: Get Upstream Commit
         id: upstream
         run: |
-          SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/${{ matrix.branch }} | awk '{ print $1 }')
-          if [ -z "$SHA" ]; then
+          SHA=$(git ls-remote "https://github.com/${{ env.UPSTREAM_REPO }}.git" "refs/heads/${{ matrix.branch }}" | awk '{ print $1 }')
+          if [ -z "${SHA}" ]; then
             echo "::error::Failed to fetch upstream commit."
             exit 1
           fi
-          echo "sha=$SHA" >> $GITHUB_OUTPUT
-          echo "short_sha=${SHA:0:7}" >> $GITHUB_OUTPUT
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHA:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Check Local Release
         id: local
@@ -73,204 +77,240 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           LOCAL_SHA="none"
-          if gh release view ${{ matrix.tag }} --repo ${{ github.repository }} &>/dev/null; then
-            if gh release download ${{ matrix.tag }} --pattern commit.txt --repo ${{ github.repository }} -O commit.txt 2>/dev/null; then
-              if [ -s commit.txt ]; then
-                LOCAL_SHA=$(tr -d '[:space:]' < commit.txt)
-              fi
+          if gh release view "${{ matrix.tag }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            if gh release download "${{ matrix.tag }}" --pattern commit.txt --repo "${{ github.repository }}" -O commit.txt >/dev/null 2>&1; then
+              [ -s commit.txt ] && LOCAL_SHA=$(tr -d '[:space:]' < commit.txt)
             fi
           fi
-          echo "local_sha=$LOCAL_SHA" >> $GITHUB_OUTPUT
+          echo "local_sha=${LOCAL_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Determine Status
-        id: check
+      - name: Evaluate Build Requirement
+        id: eval
         run: |
-          TARGET_BRANCH="${{ github.event.inputs.branch_to_build }}"
-          if [ -n "$TARGET_BRANCH" ] && [ "$TARGET_BRANCH" != "${{ matrix.branch }}" ]; then
-            echo "status=skip" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ] || [ "${{ steps.local.outputs.local_sha }}" == "none" ] || [ "${{ steps.upstream.outputs.short_sha }}" != "${{ steps.local.outputs.local_sha }}" ]; then
-            echo "status=build" >> $GITHUB_OUTPUT
+          FORCE="${{ inputs.force_build }}"
+          if [ "$FORCE" == "true" ] || [ "${{ steps.local.outputs.local_sha }}" == "none" ] || [ "${{ steps.upstream.outputs.sha }}" != "${{ steps.local.outputs.local_sha }}" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
           else
-            echo "status=skip" >> $GITHUB_OUTPUT
+            echo "build=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Checkout Source
-        if: steps.check.outputs.status == 'build'
+        if: steps.eval.outputs.build == 'true'
         uses: actions/checkout@v4
         with:
-          repository: reF1nd/sing-box
+          repository: ${{ env.UPSTREAM_REPO }}
           ref: ${{ matrix.branch }}
           fetch-depth: 0
 
       - name: Setup Go
-        if: steps.check.outputs.status == 'build'
+        if: steps.eval.outputs.build == 'true'
         uses: actions/setup-go@v5
         with:
           go-version: 'stable'
           cache: true
 
-      - name: Download Go Modules
-        if: steps.check.outputs.status == 'build'
-        run: go mod download
-
       - name: Setup UPX
-        if: steps.check.outputs.status == 'build'
+        if: steps.eval.outputs.build == 'true'
         uses: crazy-max/ghaction-upx@v3
         with:
           install-only: true
 
-      - name: Build, Compress and Package
-        if: steps.check.outputs.status == 'build'
+      - name: Build and Package
+        if: steps.eval.outputs.build == 'true'
         run: |
-          IS_SCHEDULE="${{ github.event_name == 'schedule' }}"
-          IN_UPX="${{ github.event.inputs.enable_upx }}"
-          if [ "$IS_SCHEDULE" = "true" ] || [ "$IN_UPX" != "false" ]; then
+          go mod download
+          
+          RAW_VER=$(git describe --tags --abbrev=0 2>/dev/null | tr -d '[:space:]' | sed 's/^v//' || echo "")
+          [ -z "${RAW_VER}" ] && RAW_VER=$(awk -F'"' '/Version[ \t]*=/ {print $2}' constant/version.go 2>/dev/null | tr -d '[:space:]' || echo "")
+          [ -z "${RAW_VER}" ] && RAW_VER="${{ steps.upstream.outputs.short_sha }}"
+          
+          GO_VER=$(go version | awk '{print $3}' | sed 's/go//')
+          SHORT_BRANCH="${matrix.branch#${{ env.BRANCH_PREFIX }}}"
+          
+          ENABLE_UPX="false"
+          UPX_MSG="Disabled"
+          if [ "${{ github.event_name }}" == "schedule" ] || [ "${{ inputs.enable_upx }}" == "true" ]; then
             ENABLE_UPX="true"
-            echo "UPX_STATUS=✅ Enabled" >> $GITHUB_ENV
-          else
-            ENABLE_UPX="false"
-            echo "UPX_STATUS=❌ Disabled" >> $GITHUB_ENV
+            UPX_MSG="Enabled"
           fi
-
-          APP_VERSION=$(git describe --tags --abbrev=0 2>/dev/null || grep -E '^[[:space:]]*Version[[:space:]]*=[[:space:]]*' constant/version.go 2>/dev/null | grep -oE '["'\''`][^"'\''`]+["'\''`]' | tr -d '"'\''`' | head -n 1 || echo "")
-          [ -z "$APP_VERSION" ] && APP_VERSION="$(date +%Y%m%d)"
           
-          BUILD_TIME=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')
-          BUILD_TAGS="with_gvisor,with_quic,with_utls,with_acme,with_clash_api"
-          GO_VER=$(go version | awk '{print $3}')
+          echo "APP_VERSION=${RAW_VER}" >> "$GITHUB_ENV"
+          echo "GO_VERSION=${GO_VER}" >> "$GITHUB_ENV"
+          echo "UPX_STATUS=${UPX_MSG}" >> "$GITHUB_ENV"
           
-          echo "APP_VERSION=$APP_VERSION" >> $GITHUB_ENV
-          echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
-          echo "BUILD_TAGS=$BUILD_TAGS" >> $GITHUB_ENV
-          echo "GO_VERSION=$GO_VER" >> $GITHUB_ENV
-          
-          LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${APP_VERSION}-${{ matrix.branch }}-${{ steps.upstream.outputs.short_sha }}"
+          LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${RAW_VER}-${SHORT_BRANCH}-${{ steps.upstream.outputs.short_sha }}"
           
           TARGETS=(
             "linux amd64"
+            "linux amd64 v3"
             "linux arm64"
             "linux arm 7"
+            "linux mips softfloat"
+            "linux mipsle softfloat"
+            "linux mips64"
+            "linux mips64le"
             "windows amd64"
+            "windows arm64"
             "darwin amd64"
             "darwin arm64"
             "android arm64"
           )
           
           > failed_targets.txt
+          export CGO_ENABLED=0
           
           for TARGET in "${TARGETS[@]}"; do
-            read -r LOCAL_GOOS LOCAL_GOARCH LOCAL_GOARM <<< "$TARGET"
+            read -r LOCAL_GOOS LOCAL_GOARCH EXTRA <<< "${TARGET}"
             
-            EXT=$([ "$LOCAL_GOOS" = "windows" ] && echo ".exe" || echo "")
+            export GOOS="${LOCAL_GOOS}"
+            export GOARCH="${LOCAL_GOARCH}"
+            export GOARM="" GOMIPS="" GOMIPS64="" GOAMD64=""
+            
+            BASE_TAGS="with_quic,with_dhcp,with_wireguard,with_ech,with_utls,with_reality,with_clash_api,with_acme"
+            if [ "${LOCAL_GOOS}" = "linux" ] && [[ ! "${LOCAL_GOARCH}" == mips* ]]; then
+              BUILD_TAGS="with_gvisor,${BASE_TAGS}"
+            else
+              BUILD_TAGS="${BASE_TAGS}"
+            fi
+            
+            ARCH_SUFFIX="-${LOCAL_GOARCH}"
+            
+            if [ "${LOCAL_GOARCH}" = "amd64" ] && [ -n "${EXTRA}" ]; then
+              export GOAMD64="${EXTRA}"
+              ARCH_SUFFIX="${ARCH_SUFFIX}-${EXTRA}"
+            elif [[ "${LOCAL_GOARCH}" == *"mips64"* ]] && [ -n "${EXTRA}" ]; then
+              export GOMIPS64="${EXTRA}"
+              ARCH_SUFFIX="${ARCH_SUFFIX}-${EXTRA}"
+            elif [[ "${LOCAL_GOARCH}" == *"mips"* ]] && [ -n "${EXTRA}" ]; then
+              export GOMIPS="${EXTRA}"
+              ARCH_SUFFIX="${ARCH_SUFFIX}-${EXTRA}"
+            elif [ -n "${EXTRA}" ]; then
+              export GOARM="${EXTRA}"
+              ARCH_SUFFIX="${ARCH_SUFFIX}v${EXTRA}"
+            fi
+            
+            EXT=$([ "${LOCAL_GOOS}" = "windows" ] && echo ".exe" || echo "")
             BIN_NAME="sing-box${EXT}"
+            ARCHIVE_NAME="sing-box-${RAW_VER}-${SHORT_BRANCH}-${LOCAL_GOOS}${ARCH_SUFFIX}"
             
-            ARM_SUFFIX=$([ -n "$LOCAL_GOARM" ] && echo "v${LOCAL_GOARM}" || echo "")
-            ARCHIVE_NAME="sing-box-${APP_VERSION}-${{ matrix.branch }}-${LOCAL_GOOS}-${LOCAL_GOARCH}${ARM_SUFFIX}"
+            BUILD_TIMEOUT=$([ "${LOCAL_GOARCH}" = "arm" ] || [[ "${LOCAL_GOARCH}" == *"mips"* ]] && echo "25m" || echo "15m")
             
-            BUILD_TIMEOUT=$([ "$LOCAL_GOARCH" = "arm" ] && echo "20m" || echo "15m")
-            
-            MAX_RETRIES=3
-            RETRY_COUNT=0
-            BUILD_SUCCESS=false
-            
-            while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-              if timeout $BUILD_TIMEOUT env GOOS=$LOCAL_GOOS GOARCH=$LOCAL_GOARCH GOARM=$LOCAL_GOARM CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -tags "$BUILD_TAGS" -o "$BIN_NAME" ./cmd/sing-box; then
-                BUILD_SUCCESS=true
-                break
-              else
-                RETRY_COUNT=$((RETRY_COUNT+1))
-                sleep $((RETRY_COUNT * 5))
-              fi
-            done
-            
-            if [ "$BUILD_SUCCESS" = false ]; then
-              printf -- "- ❌ %s\n" "$ARCHIVE_NAME" >> failed_targets.txt
-              rm -f "$BIN_NAME"
+            rm -f "${BIN_NAME}" build_err.log
+            if ! timeout "${BUILD_TIMEOUT}" go build -trimpath -ldflags "${LDFLAGS}" -tags "${BUILD_TAGS}" -o "${BIN_NAME}" ./cmd/sing-box 2>build_err.log; then
+              ERR_REASON=$(tail -n 10 build_err.log 2>/dev/null | tr '\n' ' ' | sed 's/[^[:print:]]//g' | sed 's/  */ /g' || echo "Compilation failed")
+              printf -- '- ❌ `%s`: %s\n' "${ARCHIVE_NAME}" "${ERR_REASON:0:150}..." >> failed_targets.txt
               continue
             fi
             
-            if [ -f "$BIN_NAME" ]; then
-              chmod +x "$BIN_NAME"
-              if [ "$ENABLE_UPX" = "true" ] && [[ "$LOCAL_GOOS" == "linux" || "$LOCAL_GOOS" == "windows" ]]; then
-                upx --lzma --best "$BIN_NAME" || true
+            if [ -f "${BIN_NAME}" ]; then
+              chmod +x "${BIN_NAME}"
+              
+              if [ "${ENABLE_UPX}" = "true" ] && { [[ "${LOCAL_GOOS}" == "linux" && "${LOCAL_GOARCH}" =~ ^(amd64|arm64|arm)$ ]] || [[ "${LOCAL_GOOS}" == "windows" && "${LOCAL_GOARCH}" == "amd64" ]]; }; then
+                upx --lzma --best "${BIN_NAME}" >/dev/null 2>&1 || true
               fi
               
-              if [ "$LOCAL_GOOS" = "windows" ]; then
-                zip -9 -q "${ARCHIVE_NAME}.zip" "$BIN_NAME"
+              if [ "${LOCAL_GOOS}" = "windows" ]; then
+                zip -9 -q "${ARCHIVE_NAME}.zip" "${BIN_NAME}"
               else
-                tar -czf "${ARCHIVE_NAME}.tar.gz" "$BIN_NAME"
+                tar -czf "${ARCHIVE_NAME}.tar.gz" "${BIN_NAME}"
               fi
-              rm -f "$BIN_NAME"
+              rm -f "${BIN_NAME}" build_err.log
             fi
           done
           
-          if [ -s failed_targets.txt ]; then
-            echo "FAILED_MSG<<EOF" >> $GITHUB_ENV
-            echo "" >> $GITHUB_ENV
-            echo "### ⚠️ 編譯失敗目標" >> $GITHUB_ENV
-            cat failed_targets.txt >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
-          fi
+          BUILD_TIME=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')
+          echo "BUILD_TIME=${BUILD_TIME}" >> "$GITHUB_ENV"
+          
+          [ -s failed_targets.txt ] && echo "PARTIAL_FAIL=true" >> "$GITHUB_ENV"
           
           shopt -s nullglob
           archives=(*.zip *.tar.gz)
           if [ ${#archives[@]} -gt 0 ]; then
-            sha256sum "${archives[@]}" > sha256sums.txt
-            echo "FILE_HASHES<<EOF" >> $GITHUB_ENV
-            cat sha256sums.txt >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
-            echo "${{ steps.upstream.outputs.short_sha }}" > commit.txt
+            echo "| 📦 檔案名稱 (File) | 🛡️ SHA-256 校驗碼 (Hash) |" > hash_table.md
+            echo "| :--- | :--- |" >> hash_table.md
+            for arch in "${archives[@]}"; do
+              hash=$(sha256sum "$arch" | awk '{print $1}')
+              echo "| \`$arch\` | \`$hash\` |" >> hash_table.md
+            done
+            echo "${{ steps.upstream.outputs.sha }}" > commit.txt
           else
-            echo "::error::No archive files were successfully built."
+            echo "::error::Critical Failure: No binaries compiled successfully."
             exit 1
           fi
 
-      - name: Clean Old Release
-        if: steps.check.outputs.status == 'build'
+      - name: Generate Release Notes
+        if: steps.eval.outputs.build == 'true'
+        run: |
+          cat > release_notes.md <<EOF
+          <div align="center">
+          
+          # 🚀 Sing-box Core Optimized
+          ### ${{ matrix.name }} 核心自動構建版
+          
+          ![Version](https://img.shields.io/badge/Version-v${{ env.APP_VERSION }}-3B82F6?style=for-the-badge&logo=github)
+          ![Go Version](https://img.shields.io/badge/Go-${{ env.GO_VERSION }}-00ADD8?style=for-the-badge&logo=go)
+          ![UPX](https://img.shields.io/badge/UPX-${{ env.UPX_STATUS }}-10B981?style=for-the-badge)
+          
+          *提供純淨、輕量、高性能的核心體驗*
+          
+          </div>
+          
+          ---
+          
+          ### 📌 構建資訊 (Build Info)
+          
+          | 屬性 | 詳情 |
+          | :--- | :--- |
+          | 👤 **上游倉庫** | [\`${{ env.UPSTREAM_REPO }}\`](https://github.com/${{ env.UPSTREAM_REPO }}) |
+          | 🌿 **代碼分支** | [\`${{ matrix.branch }}\`](https://github.com/${{ env.UPSTREAM_REPO }}/tree/${{ matrix.branch }}) |
+          | 🎯 **源碼提交** | [\`${{ steps.upstream.outputs.short_sha }}\`](https://github.com/${{ env.UPSTREAM_REPO }}/commit/${{ steps.upstream.outputs.sha }}) |
+          | 🕒 **編譯時間** | \`${{ env.BUILD_TIME }}\` (UTC+8) |
+          
+          ### ⚙️ 包含模組與特性 (Build Tags)
+          
+          > 採用 \`CGO_ENABLED=0\` 純靜態編譯，確保極致的跨平台兼容性。
+          
+          - **通用模組**: \`with_quic, with_dhcp, with_wireguard, with_ech, with_utls, with_reality, with_clash_api, with_acme\`
+          - **Linux 系統** *(除 mips 外)*: 額外包含 \`with_gvisor\` 模組。
+          
+          ### 📥 檔案下載與校驗 (Downloads & Checksums)
+          
+          EOF
+          
+          cat hash_table.md >> release_notes.md
+          
+          if [ -s failed_targets.txt ]; then
+            echo -e "\n### ⚠️ 編譯失敗的架構 (Build Failures)\n" >> release_notes.md
+            cat failed_targets.txt >> release_notes.md
+          fi
+
+      - name: Atomic Publish Release
+        if: steps.eval.outputs.build == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete ${{ matrix.tag }} --cleanup-tag -y --repo ${{ github.repository }} 2>/dev/null || true
-          git push --delete origin refs/tags/${{ matrix.tag }} 2>/dev/null || true
+          shopt -s nullglob
+          FILES=(*.zip *.tar.gz commit.txt)
+          RELEASE_TITLE="Sing-box v${{ env.APP_VERSION }} (${{ matrix.name }})"
+          
+          LATEST_FLAG="--prerelease"
+          if [ "${{ matrix.latest }}" == "true" ]; then
+            LATEST_FLAG="--latest"
+          fi
+          
+          git push origin ":refs/tags/${{ matrix.tag }}" >/dev/null 2>&1 || true
+          gh release delete "${{ matrix.tag }}" --cleanup-tag -y --repo "${{ github.repository }}" >/dev/null 2>&1 || true
+          sleep 3
+          
+          gh release create "${{ matrix.tag }}" "${FILES[@]}" \
+            --repo "${{ github.repository }}" \
+            --title "${RELEASE_TITLE}" \
+            --notes-file release_notes.md \
+            --target "${{ github.sha }}" \
+            ${LATEST_FLAG}
 
-      - name: Publish Release
-        if: steps.check.outputs.status == 'build'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ matrix.tag }}
-          name: sing-box v${{ env.APP_VERSION }} (${{ matrix.name }})
-          make_latest: ${{ matrix.latest }}
-          body: |
-            ## 🚀 sing-box Core | ${{ matrix.name }}
-            
-            > 💡 **自動構建報告**：本版本由 GitHub Actions 自動追蹤上游源碼並編譯，提供純淨、開箱即用的跨平台核心。
-            
-            ### 📦 構建資訊
-            | 屬性 | 詳情 |
-            | :--- | :--- |
-            | 🔖 **核心版本** | `v${{ env.APP_VERSION }}` |
-            | 🌿 **編譯分支** | [`${{ matrix.branch }}`](https://github.com/reF1nd/sing-box/tree/${{ matrix.branch }}) |
-            | 🎯 **源碼提交** | [`${{ steps.upstream.outputs.short_sha }}`](https://github.com/reF1nd/sing-box/commit/${{ steps.upstream.outputs.short_sha }}) |
-            | 🕒 **編譯時間** | `${{ env.BUILD_TIME }}` (UTC+8) |
-            
-            ### 🛠️ 核心配置
-            - **Go 環境**: `${{ env.GO_VERSION }}`
-            - **編譯標籤 (Tags)**: `${{ env.BUILD_TAGS }}`
-            - **UPX 壓縮**: `${{ env.UPX_STATUS }}`
-            
-            <details>
-            <summary>🛡️ <b>展開查看檔案校驗碼 (SHA-256 Checksums)</b></summary>
-            
-            ```text
-            ${{ env.FILE_HASHES }}
-            ```
-            </details>
-            ${{ env.FAILED_MSG }}
-          files: |
-            *.zip
-            *.tar.gz
-            sha256sums.txt
-            commit.txt
+      - name: Enforce Workflow Status
+        if: steps.eval.outputs.build == 'true' && env.PARTIAL_FAIL == 'true'
+        run: |
+          echo "::error::Partial build failure detected. Check release notes for details."
+          exit 1
