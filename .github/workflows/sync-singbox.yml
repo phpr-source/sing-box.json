@@ -1,18 +1,18 @@
-name: Smart Build sing-box (reF1nd Multi-Branch)
+name: Smart Build sing-box
 
 on:
-  workflow_dispatch: # 允许手动触发 (将会强制编译所有分支)
+  workflow_dispatch:
   schedule:
-    - cron: '0 */4 * * *' # 每 4 小时检查一次 (UTC时间)
+    - cron: '0 */4 * * *'
 
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 必须有写权限以发布 Release
+      contents: write
     
     strategy:
-      fail-fast: false # 某个分支编译失败时，不影响其他分支继续运行
+      fail-fast: false
       matrix:
         include:
           - branch: reF1nd-testing
@@ -26,132 +26,14 @@ jobs:
             name: OldStable
 
     steps:
-      - name: Get Upstream SHA (${{ matrix.name }})
-        id: upstream
-        run: |
-          # 动态获取对应分支最新的 Commit SHA
-          SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/${{ matrix.branch }} | awk '{ print $1 }')
-          SHORT_SHA=${SHA:0:7}
-          echo "sha=$SHA" >> $GITHUB_OUTPUT
-          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
-          echo "Upstream Latest (${{ matrix.name }}): $SHORT_SHA"
-
-      - name: Get Local Release SHA
-        id: local
-        run: |
-          # 获取对应分支特定的 Release 标签说明
-          BODY=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ matrix.tag }} | jq -r '.body' || echo "")
-          
-          # 提取 Commit 值
-          LOCAL_SHA=$(echo "$BODY" | grep -oP 'Commit: \K\w+' || echo "none")
-          echo "local_sha=$LOCAL_SHA" >> $GITHUB_OUTPUT
-          echo "Local Last Build: $LOCAL_SHA"
-
-      - name: Compare Versions
-        id: compare
-        run: |
-          UPSTREAM="${{ steps.upstream.outputs.short_sha }}"
-          LOCAL="${{ steps.local.outputs.local_sha }}"
-          
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "status=build" >> $GITHUB_OUTPUT
-            echo "触发类型: 手动触发 -> 准备编译"
-          elif [ "$LOCAL" == "none" ]; then
-            echo "status=build" >> $GITHUB_OUTPUT
-            echo "触发类型: 首次运行/无法读取旧版本 -> 准备编译"
-          elif [ "$UPSTREAM" != "$LOCAL" ]; then
-            echo "status=build" >> $GITHUB_OUTPUT
-            echo "触发类型: 发现新版本 ($UPSTREAM vs $LOCAL) -> 准备编译"
-          else
-            echo "status=skip" >> $GITHUB_OUTPUT
-            echo "触发类型: 版本一致，无需更新"
-          fi
-
-      - name: Checkout Source
-        if: steps.compare.outputs.status == 'build'
-        uses: actions/checkout@v4
-        with:
-          repository: reF1nd/sing-box
-          ref: ${{ matrix.branch }} # 动态拉取对应分支
-          fetch-depth: 0
-
-      - name: Setup Go
-        if: steps.compare.outputs.status == 'build'
-        uses: actions/setup-go@v5
-        with:
-          go-version: 'stable'
-
-      - name: Prepare Settings
-        if: steps.compare.outputs.status == 'build'
-        run: |
-          # 生成版本号 (带上分支名标识)
-          VERSION="${{ matrix.branch }}-$(date +%Y%m%d)-${{ steps.upstream.outputs.short_sha }}"
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-          
-          # 生成具体的构建时间
-          BUILD_TIME=$(date +'%Y-%m-%d %H:%M:%S')
-          echo "BUILD_TIME=${BUILD_TIME}" >> $GITHUB_ENV
-          
-          # 编译参数
-          echo "BUILD_TAGS=with_gvisor,with_quic,with_utls,with_acme,with_clash_api" >> $GITHUB_ENV
-
-      - name: Build AMD64
-        if: steps.compare.outputs.status == 'build'
-        run: |
-          echo "Building AMD64..."
-          go build -trimpath -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}" \
-          -tags "${BUILD_TAGS}" \
-          -o sing-box-amd64 \
-          ./cmd/sing-box
-        env:
-          GOOS: linux
-          GOARCH: amd64
-          CGO_ENABLED: 0
-
-      - name: Build ARM64
-        if: steps.compare.outputs.status == 'build'
-        run: |
-          echo "Building ARM64..."
-          go build -trimpath -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}" \
-          -tags "${BUILD_TAGS}" \
-          -o sing-box-arm64 \
-          ./cmd/sing-box
-        env:
-          GOOS: linux
-          GOARCH: arm64
-          CGO_ENABLED: 0
-
-      - name: Delete Old Release
-        if: steps.compare.outputs.status == 'build'
-        uses: dev-drprasad/delete-tag-and-release@v1.1
-        with:
-          tag_name: ${{ matrix.tag }}
-          delete_release: true
+      - name: Check Updates
+        id: check
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload New Release
-        if: steps.compare.outputs.status == 'build'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ matrix.tag }}
-          name: Sing-box Lite (${{ matrix.name }})
-          body: |
-            ## 🚀 自动构建 (reF1nd ${{ matrix.name }})
-            - 来源: reF1nd/sing-box (Branch: `${{ matrix.branch }}`)
-            - 版本: `${{ env.VERSION }}`
-            - Commit: `${{ steps.upstream.outputs.short_sha }}`
-            - 更新时间: `${{ env.BUILD_TIME }}`
-            
-            ### 包含特性 (Tags)
-            `${{ env.BUILD_TAGS }}`
-            
-            ### 架构
-            - `amd64`: 适用于 VPS, x86软路由, 电脑
-            - `arm64`: 适用于 树莓派, N1盒子, Android, ARM VPS
-          files: |
-            sing-box-amd64
-            sing-box-arm64
-          fail_on_unmatched_files: true
-          # 仅让 Stable 版本占据 GitHub 的 "Latest" 徽章
-          make_latest: ${{ matrix.branch == 'reF1nd-stable' }}
+        run: |
+          SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/${{ matrix.branch }} | awk '{ print $1 }')
+          UPSTREAM=${SHA:0:7}
+          
+          if [ -z "$UPSTREAM" ]; then exit 1; fi
+          
+          LOCAL=$(gh release view ${{ matrix.tag }} --repo ${{ github.repository }} --json body --jq .body 2>/dev/null | grep -oP '```
