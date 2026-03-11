@@ -1,33 +1,46 @@
-name: Smart Build sing-box (reF1nd Dev)
+name: Smart Build sing-box (reF1nd Multi-Branch)
 
 on:
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch: # 允许手动触发 (将会强制编译所有分支)
   schedule:
     - cron: '0 */4 * * *' # 每 4 小时检查一次 (UTC时间)
 
 jobs:
-  # 任务 1: 检查版本 (针对 reF1nd-dev 分支)
-  check:
+  build-and-release:
     runs-on: ubuntu-latest
-    outputs:
-      status: ${{ steps.compare.outputs.status }}
-      upstream_sha: ${{ steps.upstream.outputs.short_sha }}
+    permissions:
+      contents: write # 必须有写权限以发布 Release
+    
+    strategy:
+      fail-fast: false # 某个分支编译失败时，不影响其他分支继续运行
+      matrix:
+        include:
+          - branch: reF1nd-testing
+            tag: singbox-testing
+            name: Testing
+          - branch: reF1nd-stable
+            tag: singbox-stable
+            name: Stable
+          - branch: reF1nd-oldstable
+            tag: singbox-oldstable
+            name: OldStable
+
     steps:
-      - name: Get Upstream SHA (reF1nd-dev)
+      - name: Get Upstream SHA (${{ matrix.name }})
         id: upstream
         run: |
-          # 获取 reF1nd 仓库 reF1nd-dev 分支最新的 Commit SHA
-          SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/reF1nd-dev | awk '{ print $1 }')
+          # 动态获取对应分支最新的 Commit SHA
+          SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/${{ matrix.branch }} | awk '{ print $1 }')
           SHORT_SHA=${SHA:0:7}
           echo "sha=$SHA" >> $GITHUB_OUTPUT
           echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
-          echo "Upstream Latest (Dev): $SHORT_SHA"
+          echo "Upstream Latest (${{ matrix.name }}): $SHORT_SHA"
 
       - name: Get Local Release SHA
         id: local
         run: |
-          # 获取你自己仓库 'singbox' 标签的 Release 说明
-          BODY=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/singbox | jq -r '.body' || echo "")
+          # 获取对应分支特定的 Release 标签说明
+          BODY=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ matrix.tag }} | jq -r '.body' || echo "")
           
           # 提取 Commit 值
           LOCAL_SHA=$(echo "$BODY" | grep -oP 'Commit: \K\w+' || echo "none")
@@ -54,41 +67,36 @@ jobs:
             echo "触发类型: 版本一致，无需更新"
           fi
 
-  # 任务 2: 编译与发布
-  build:
-    needs: check
-    if: needs.check.outputs.status == 'build'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write # 必须有写权限
-    
-    steps:
-      - name: Checkout Source (reF1nd-dev)
+      - name: Checkout Source
+        if: steps.compare.outputs.status == 'build'
         uses: actions/checkout@v4
         with:
           repository: reF1nd/sing-box
-          ref: reF1nd-dev  # 关键修改：指定拉取 dev 分支
+          ref: ${{ matrix.branch }} # 动态拉取对应分支
           fetch-depth: 0
 
       - name: Setup Go
+        if: steps.compare.outputs.status == 'build'
         uses: actions/setup-go@v5
         with:
           go-version: 'stable'
 
       - name: Prepare Settings
+        if: steps.compare.outputs.status == 'build'
         run: |
-          # 生成版本号
-          VERSION="reF1nd-dev-$(date +%Y%m%d)-${{ needs.check.outputs.upstream_sha }}"
+          # 生成版本号 (带上分支名标识)
+          VERSION="${{ matrix.branch }}-$(date +%Y%m%d)-${{ steps.upstream.outputs.short_sha }}"
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
           
-          # 生成具体的构建时间 (修复时间显示问题)
+          # 生成具体的构建时间
           BUILD_TIME=$(date +'%Y-%m-%d %H:%M:%S')
           echo "BUILD_TIME=${BUILD_TIME}" >> $GITHUB_ENV
           
-          # 你的 Lite 编译参数
+          # 编译参数
           echo "BUILD_TAGS=with_gvisor,with_quic,with_utls,with_acme,with_clash_api" >> $GITHUB_ENV
 
       - name: Build AMD64
+        if: steps.compare.outputs.status == 'build'
         run: |
           echo "Building AMD64..."
           go build -trimpath -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}" \
@@ -101,6 +109,7 @@ jobs:
           CGO_ENABLED: 0
 
       - name: Build ARM64
+        if: steps.compare.outputs.status == 'build'
         run: |
           echo "Building ARM64..."
           go build -trimpath -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}" \
@@ -112,31 +121,27 @@ jobs:
           GOARCH: arm64
           CGO_ENABLED: 0
 
-      - name: Verify Files
-        run: |
-          ls -lh sing-box-amd64 sing-box-arm64
-
-      # 删除旧 Release，实现滚动更新
       - name: Delete Old Release
+        if: steps.compare.outputs.status == 'build'
         uses: dev-drprasad/delete-tag-and-release@v1.1
         with:
-          tag_name: singbox
+          tag_name: ${{ matrix.tag }}
           delete_release: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload New Release
+        if: steps.compare.outputs.status == 'build'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: singbox
-          name: Sing-box Lite (Dev Rolling)
-          # 注意：这里引用了 env.BUILD_TIME 变量
+          tag_name: ${{ matrix.tag }}
+          name: Sing-box Lite (${{ matrix.name }})
           body: |
-            ## 🚀 自动构建 (reF1nd Dev)
-            - **来源**: reF1nd/sing-box (Branch: reF1nd-dev)
-            - **版本**: ${{ env.VERSION }}
-            - **Commit**: ${{ needs.check.outputs.upstream_sha }}
-            - **更新时间**: ${{ env.BUILD_TIME }}
+            ## 🚀 自动构建 (reF1nd ${{ matrix.name }})
+            - 来源: reF1nd/sing-box (Branch: `${{ matrix.branch }}`)
+            - 版本: `${{ env.VERSION }}`
+            - Commit: `${{ steps.upstream.outputs.short_sha }}`
+            - 更新时间: `${{ env.BUILD_TIME }}`
             
             ### 包含特性 (Tags)
             `${{ env.BUILD_TAGS }}`
@@ -148,4 +153,5 @@ jobs:
             sing-box-amd64
             sing-box-arm64
           fail_on_unmatched_files: true
-          make_latest: true
+          # 仅让 Stable 版本占据 GitHub 的 "Latest" 徽章
+          make_latest: ${{ matrix.branch == 'reF1nd-stable' }}
