@@ -1,4 +1,4 @@
-name: Smart Build sing-box (Optimized Multi-Branch)
+name: Smart Build sing-box
 
 on:
   workflow_dispatch:
@@ -26,7 +26,7 @@ jobs:
             name: OldStable
 
     steps:
-      - name: Get Upstream Commit SHA
+      - name: Get Upstream Commit
         id: upstream
         run: |
           SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/${{ matrix.branch }} | awk '{ print $1 }')
@@ -48,12 +48,7 @@ jobs:
       - name: Determine Build Requirement
         id: check
         run: |
-          UPSTREAM="${{ steps.upstream.outputs.short_sha }}"
-          LOCAL="${{ steps.local.outputs.local_sha }}"
-          
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "status=build" >> $GITHUB_OUTPUT
-          elif [ "$LOCAL" == "none" ] || [ "$UPSTREAM" != "$LOCAL" ]; then
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] || [ "${{ steps.local.outputs.local_sha }}" == "none" ] || [ "${{ steps.upstream.outputs.short_sha }}" != "${{ steps.local.outputs.local_sha }}" ]; then
             echo "status=build" >> $GITHUB_OUTPUT
           else
             echo "status=skip" >> $GITHUB_OUTPUT
@@ -67,7 +62,7 @@ jobs:
           ref: ${{ matrix.branch }}
           fetch-depth: 0
 
-      - name: Setup Go Environment
+      - name: Setup Go
         if: steps.check.outputs.status == 'build'
         uses: actions/setup-go@v5
         with:
@@ -77,52 +72,49 @@ jobs:
       - name: Prepare Build Environment
         if: steps.check.outputs.status == 'build'
         run: |
-          VERSION="${{ matrix.branch }}-$(date +%Y%m%d)-${{ steps.upstream.outputs.short_sha }}"
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "VERSION=${{ matrix.branch }}-$(date +%Y%m%d)-${{ steps.upstream.outputs.short_sha }}" >> $GITHUB_ENV
           echo "BUILD_TIME=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_ENV
           echo "BUILD_TAGS=with_gvisor,with_quic,with_utls,with_acme,with_clash_api" >> $GITHUB_ENV
 
-      - name: Compile Binaries (AMD64 & ARM64)
+      - name: Compile Binaries
         if: steps.check.outputs.status == 'build'
         run: |
           LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${VERSION}"
-          
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -tags "${BUILD_TAGS}" -o sing-box-amd64 ./cmd/sing-box
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -tags "${BUILD_TAGS}" -o sing-box-arm64 ./cmd/sing-box
 
-      - name: Delete Existing Release and Tag
+      - name: Clean Old Release
         if: steps.check.outputs.status == 'build'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release delete ${{ matrix.tag }} --cleanup-tag -y --repo ${{ github.repository }} || true
-          git push --delete origin ${{ matrix.tag }} || true
 
       - name: Publish New Release
         if: steps.check.outputs.status == 'build'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ matrix.tag }}
-          name: 📦 Sing-box Lite | ${{ matrix.name }} Edition
-          make_latest: ${{ matrix.branch == 'reF1nd-stable' }}
+          name: Sing-box Lite | ${{ matrix.name }}
+          make_latest: ${{ matrix.branch == 'reF1nd-stable' && 'true' || 'false' }}
           body: |
-            ## 🚀 自动构建发布 (Automated Build)
+            ## 🚀 自动构建发布
 
-            **📌 构建信息 (Build Info)**
+            📌 构建信息
             | 属性 | 详情 |
             | :--- | :--- |
-            | 👤 **上游仓库** | [reF1nd/sing-box](https://github.com/reF1nd/sing-box) |
-            | 🌿 **代码分支** | `${{ matrix.branch }}` |
-            | 🔖 **版本标识** | `${{ env.VERSION }}` |
-            | 🎯 **Commit** | `${{ steps.upstream.outputs.short_sha }}` |
-            | 🕒 **编译时间** | `${{ env.BUILD_TIME }}` (UTC+8) |
+            | 👤 上游仓库 | [reF1nd/sing-box](https://github.com/reF1nd/sing-box) |
+            | 🌿 代码分支 | `${{ matrix.branch }}` |
+            | 🔖 版本标识 | `${{ env.VERSION }}` |
+            | 🎯 Commit | `${{ steps.upstream.outputs.short_sha }}` |
+            | 🕒 编译时间 | `${{ env.BUILD_TIME }}` (UTC+8) |
 
-            **⚙️ 编译参数 (Build Tags)**
+            ⚙️ 编译参数
             ```text
             ${{ env.BUILD_TAGS }}
             ```
 
-            **📥 架构说明 (Architecture)**
+            📥 架构说明
             * 🐧 `amd64`: 适用于主流 VPS、x86 软路由、台式/笔记本电脑等。
             * 📱 `arm64`: 适用于树莓派、N1 盒子、Android 设备、ARM 架构 VPS 等。
 
