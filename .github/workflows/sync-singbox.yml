@@ -81,8 +81,7 @@ jobs:
             fi
           fi
 
-          FORCE="${{ inputs.force_build }}"
-          if [ "$FORCE" == "true" ] || [ "$LOCAL_SHA" == "none" ] || [ "$SHA" != "$LOCAL_SHA" ]; then
+          if [ "${{ inputs.force_build }}" == "true" ] || [ "$LOCAL_SHA" == "none" ] || [ "$SHA" != "$LOCAL_SHA" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
           else
             echo "build=false" >> "$GITHUB_OUTPUT"
@@ -114,12 +113,16 @@ jobs:
         run: |
           go mod download
           
+          FULL_BRANCH="${{ matrix.branch }}"
+          PREFIX="${{ env.BRANCH_PREFIX }}"
+          SHORT_BRANCH="${FULL_BRANCH#$PREFIX}"
+          SHORT_SHA="${{ steps.eval.outputs.short_sha }}"
+          
           RAW_VER=$(git describe --tags --abbrev=0 2>/dev/null | tr -d '[:space:]' | sed 's/^v//' || echo "")
           [ -z "${RAW_VER}" ] && RAW_VER=$(awk -F'"' '/Version[ \t]*=/ {print $2}' constant/version.go 2>/dev/null | tr -d '[:space:]' || echo "")
-          [ -z "${RAW_VER}" ] && RAW_VER="${{ steps.eval.outputs.short_sha }}"
+          [ -z "${RAW_VER}" ] && RAW_VER="$SHORT_SHA"
           
           GO_VER=$(go version | awk '{print $3}' | sed 's/go//')
-          SHORT_BRANCH="${matrix.branch#${{ env.BRANCH_PREFIX }}}"
           
           ENABLE_UPX="false"
           UPX_MSG="Disabled"
@@ -132,22 +135,12 @@ jobs:
           echo "GO_VERSION=${GO_VER}" >> "$GITHUB_ENV"
           echo "UPX_STATUS=${UPX_MSG}" >> "$GITHUB_ENV"
           
-          LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${RAW_VER}-${SHORT_BRANCH}-${{ steps.eval.outputs.short_sha }}"
+          LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${RAW_VER}-${SHORT_BRANCH}-${SHORT_SHA}"
           
           TARGETS=(
-            "linux amd64"
-            "linux amd64 v3"
-            "linux arm64"
-            "linux arm 7"
-            "linux mips softfloat"
-            "linux mipsle softfloat"
-            "linux mips64"
-            "linux mips64le"
-            "windows amd64"
-            "windows arm64"
-            "darwin amd64"
-            "darwin arm64"
-            "android arm64"
+            "linux amd64" "linux amd64 v3" "linux arm64" "linux arm 7"
+            "linux mips softfloat" "linux mipsle softfloat" "linux mips64" "linux mips64le"
+            "windows amd64" "windows arm64" "darwin amd64" "darwin arm64" "android arm64"
           )
           
           > failed_targets.txt
@@ -155,66 +148,46 @@ jobs:
           
           for TARGET in "${TARGETS[@]}"; do
             read -r LOCAL_GOOS LOCAL_GOARCH EXTRA <<< "${TARGET}"
-            
-            export GOOS="${LOCAL_GOOS}"
-            export GOARCH="${LOCAL_GOARCH}"
-            export GOARM="" GOMIPS="" GOMIPS64="" GOAMD64=""
+            export GOOS="${LOCAL_GOOS}" GOARCH="${LOCAL_GOARCH}" GOARM="" GOMIPS="" GOMIPS64="" GOAMD64=""
             
             BASE_TAGS="with_quic,with_dhcp,with_wireguard,with_ech,with_utls,with_reality,with_clash_api,with_acme"
-            if [ "${LOCAL_GOOS}" = "linux" ] && [[ ! "${LOCAL_GOARCH}" == mips* ]]; then
-              BUILD_TAGS="with_gvisor,${BASE_TAGS}"
-            else
-              BUILD_TAGS="${BASE_TAGS}"
+            BUILD_TAGS="$BASE_TAGS"
+            [[ "${LOCAL_GOOS}" == "linux" && ! "${LOCAL_GOARCH}" == mips* ]] && BUILD_TAGS="with_gvisor,$BASE_TAGS"
+            
+            ARCH_SUFFIX="-$LOCAL_GOARCH"
+            if [ "$LOCAL_GOARCH" = "amd64" ] && [ -n "$EXTRA" ]; then
+              export GOAMD64="$EXTRA"; ARCH_SUFFIX="$ARCH_SUFFIX-$EXTRA"
+            elif [[ "$LOCAL_GOARCH" == *"mips64"* ]] && [ -n "$EXTRA" ]; then
+              export GOMIPS64="$EXTRA"; ARCH_SUFFIX="$ARCH_SUFFIX-$EXTRA"
+            elif [[ "$LOCAL_GOARCH" == *"mips"* ]] && [ -n "$EXTRA" ]; then
+              export GOMIPS="$EXTRA"; ARCH_SUFFIX="$ARCH_SUFFIX-$EXTRA"
+            elif [ -n "$EXTRA" ]; then
+              export GOARM="$EXTRA"; ARCH_SUFFIX="${ARCH_SUFFIX}v$EXTRA"
             fi
             
-            ARCH_SUFFIX="-${LOCAL_GOARCH}"
-            
-            if [ "${LOCAL_GOARCH}" = "amd64" ] && [ -n "${EXTRA}" ]; then
-              export GOAMD64="${EXTRA}"
-              ARCH_SUFFIX="${ARCH_SUFFIX}-${EXTRA}"
-            elif [[ "${LOCAL_GOARCH}" == *"mips64"* ]] && [ -n "${EXTRA}" ]; then
-              export GOMIPS64="${EXTRA}"
-              ARCH_SUFFIX="${ARCH_SUFFIX}-${EXTRA}"
-            elif [[ "${LOCAL_GOARCH}" == *"mips"* ]] && [ -n "${EXTRA}" ]; then
-              export GOMIPS="${EXTRA}"
-              ARCH_SUFFIX="${ARCH_SUFFIX}-${EXTRA}"
-            elif [ -n "${EXTRA}" ]; then
-              export GOARM="${EXTRA}"
-              ARCH_SUFFIX="${ARCH_SUFFIX}v${EXTRA}"
-            fi
-            
-            EXT=$([ "${LOCAL_GOOS}" = "windows" ] && echo ".exe" || echo "")
-            BIN_NAME="sing-box${EXT}"
+            EXT=$([ "$LOCAL_GOOS" = "windows" ] && echo ".exe" || echo "")
+            BIN_NAME="sing-box$EXT"
             ARCHIVE_NAME="sing-box-${RAW_VER}-${SHORT_BRANCH}-${LOCAL_GOOS}${ARCH_SUFFIX}"
+            TIMEOUT=$([ "$LOCAL_GOARCH" = "arm" ] || [[ "$LOCAL_GOARCH" == *"mips"* ]] && echo "25m" || echo "15m")
             
-            BUILD_TIMEOUT=$([ "${LOCAL_GOARCH}" = "arm" ] || [[ "${LOCAL_GOARCH}" == *"mips"* ]] && echo "25m" || echo "15m")
-            
-            rm -f "${BIN_NAME}" build_err.log
-            if ! timeout "${BUILD_TIMEOUT}" go build -trimpath -ldflags "${LDFLAGS}" -tags "${BUILD_TAGS}" -o "${BIN_NAME}" ./cmd/sing-box 2>build_err.log; then
-              ERR_REASON=$(tail -n 10 build_err.log 2>/dev/null | tr '\n' ' ' | sed 's/[^[:print:]]//g' | sed 's/  */ /g' || echo "Compilation failed")
-              printf -- '- ❌ `%s`: %s\n' "${ARCHIVE_NAME}" "${ERR_REASON:0:150}..." >> failed_targets.txt
+            rm -f "$BIN_NAME" build_err.log
+            if ! timeout "$TIMEOUT" go build -trimpath -ldflags "$LDFLAGS" -tags "$BUILD_TAGS" -o "$BIN_NAME" ./cmd/sing-box 2>build_err.log; then
+              ERR_REASON=$(tail -n 5 build_err.log 2>/dev/null | tr '\n' ' ' | sed 's/[^[:print:]]//g' | sed 's/  */ /g' || echo "Failed")
+              printf -- '- ❌ `%s`: %s\n' "$ARCHIVE_NAME" "${ERR_REASON:0:120}..." >> failed_targets.txt
               continue
             fi
             
-            if [ -f "${BIN_NAME}" ]; then
-              chmod +x "${BIN_NAME}"
-              
-              if [ "${ENABLE_UPX}" = "true" ] && { [[ "${LOCAL_GOOS}" == "linux" && "${LOCAL_GOARCH}" =~ ^(amd64|arm64|arm)$ ]] || [[ "${LOCAL_GOOS}" == "windows" && "${LOCAL_GOARCH}" == "amd64" ]]; }; then
-                upx --lzma --best "${BIN_NAME}" >/dev/null 2>&1 || true
+            if [ -f "$BIN_NAME" ]; then
+              chmod +x "$BIN_NAME"
+              if [ "$ENABLE_UPX" = "true" ] && { [[ "$LOCAL_GOOS" == "linux" && "$LOCAL_GOARCH" =~ ^(amd64|arm64|arm)$ ]] || [[ "$LOCAL_GOOS" == "windows" && "$LOCAL_GOARCH" == "amd64" ]]; }; then
+                upx --lzma --best "$BIN_NAME" >/dev/null 2>&1 || true
               fi
-              
-              if [ "${LOCAL_GOOS}" = "windows" ]; then
-                zip -9 -q "${ARCHIVE_NAME}.zip" "${BIN_NAME}"
-              else
-                tar -czf "${ARCHIVE_NAME}.tar.gz" "${BIN_NAME}"
-              fi
-              rm -f "${BIN_NAME}" build_err.log
+              [ "$LOCAL_GOOS" = "windows" ] && zip -9 -q "$ARCHIVE_NAME.zip" "$BIN_NAME" || tar -czf "$ARCHIVE_NAME.tar.gz" "$BIN_NAME"
+              rm -f "$BIN_NAME"
             fi
           done
           
-          BUILD_TIME=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')
-          echo "BUILD_TIME=${BUILD_TIME}" >> "$GITHUB_ENV"
-          
+          echo "BUILD_TIME=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
           [ -s failed_targets.txt ] && echo "PARTIAL_FAIL=true" >> "$GITHUB_ENV"
           
           shopt -s nullglob
@@ -223,12 +196,10 @@ jobs:
             echo "| 📦 檔案名稱 (File) | 🛡️ SHA-256 校驗碼 (Hash) |" > hash_table.md
             echo "| :--- | :--- |" >> hash_table.md
             for arch in "${archives[@]}"; do
-              hash=$(sha256sum "$arch" | awk '{print $1}')
-              echo "| \`$arch\` | \`$hash\` |" >> hash_table.md
+              echo "| \`$arch\` | \`$(sha256sum "$arch" | awk '{print $1}')\` |" >> hash_table.md
             done
             echo "${{ steps.eval.outputs.sha }}" > commit.txt
           else
-            echo "::error::Critical Failure: No binaries compiled successfully."
             exit 1
           fi
 
@@ -245,8 +216,6 @@ jobs:
           ![Go Version](https://img.shields.io/badge/Go-${{ env.GO_VERSION }}-00ADD8?style=for-the-badge&logo=go)
           ![UPX](https://img.shields.io/badge/UPX-${{ env.UPX_STATUS }}-10B981?style=for-the-badge)
           
-          *提供純淨、輕量、高性能的核心體驗*
-          
           </div>
           
           ---
@@ -262,21 +231,14 @@ jobs:
           
           ### ⚙️ 包含模組與特性 (Build Tags)
           
-          > 採用 \`CGO_ENABLED=0\` 純靜態編譯，確保極致的跨平台兼容性。
-          
           - **通用模組**: \`with_quic, with_dhcp, with_wireguard, with_ech, with_utls, with_reality, with_clash_api, with_acme\`
           - **Linux 系統** *(除 mips 外)*: 額外包含 \`with_gvisor\` 模組。
           
           ### 📥 檔案下載與校驗 (Downloads & Checksums)
           
           EOF
-          
           cat hash_table.md >> release_notes.md
-          
-          if [ -s failed_targets.txt ]; then
-            echo -e "\n### ⚠️ 編譯失敗的架構 (Build Failures)\n" >> release_notes.md
-            cat failed_targets.txt >> release_notes.md
-          fi
+          [ -s failed_targets.txt ] && echo -e "\n### ⚠️ 編譯失敗的架構\n$(cat failed_targets.txt)" >> release_notes.md
 
       - name: Atomic Publish Release
         if: steps.eval.outputs.build == 'true'
@@ -285,26 +247,16 @@ jobs:
         run: |
           shopt -s nullglob
           FILES=(*.zip *.tar.gz commit.txt)
-          RELEASE_TITLE="Sing-box v${{ env.APP_VERSION }} (${{ matrix.name }})"
-          
-          LATEST_FLAG="--prerelease"
-          if [ "${{ matrix.latest }}" == "true" ]; then
-            LATEST_FLAG="--latest"
-          fi
-          
           git push origin ":refs/tags/${{ matrix.tag }}" >/dev/null 2>&1 || true
           gh release delete "${{ matrix.tag }}" --cleanup-tag -y --repo "${{ github.repository }}" >/dev/null 2>&1 || true
-          sleep 3
-          
+          sleep 5
           gh release create "${{ matrix.tag }}" "${FILES[@]}" \
             --repo "${{ github.repository }}" \
-            --title "${RELEASE_TITLE}" \
+            --title "Sing-box v${{ env.APP_VERSION }} (${{ matrix.name }})" \
             --notes-file release_notes.md \
             --target "${{ github.sha }}" \
-            ${LATEST_FLAG}
+            $([ "${{ matrix.latest }}" == "true" ] && echo "--latest" || echo "--prerelease")
 
       - name: Enforce Workflow Status
         if: steps.eval.outputs.build == 'true' && env.PARTIAL_FAIL == 'true'
-        run: |
-          echo "::error::Partial build failure detected. Check release notes for details."
-          exit 1
+        run: exit 1
