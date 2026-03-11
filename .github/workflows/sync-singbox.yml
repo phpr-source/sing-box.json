@@ -1,4 +1,4 @@
-name: Smart Build sing-box
+name: Smart Build sing-box (Optimized Multi-Branch)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    
+
     strategy:
       fail-fast: false
       matrix:
@@ -26,14 +26,107 @@ jobs:
             name: OldStable
 
     steps:
-      - name: Check Updates
-        id: check
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Get Upstream Commit SHA
+        id: upstream
         run: |
           SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/${{ matrix.branch }} | awk '{ print $1 }')
-          UPSTREAM=${SHA:0:7}
+          echo "short_sha=${SHA:0:7}" >> $GITHUB_OUTPUT
+
+      - name: Check Local Release Status
+        id: local
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view ${{ matrix.tag }} --repo ${{ github.repository }} &>/dev/null; then
+            BODY=$(gh release view ${{ matrix.tag }} --repo ${{ github.repository }} --json body -q .body)
+            LOCAL_SHA=$(echo "$BODY" | grep -oP 'Commit:\s*\K[a-f0-9]{7}' || echo "none")
+          else
+            LOCAL_SHA="none"
+          fi
+          echo "local_sha=$LOCAL_SHA" >> $GITHUB_OUTPUT
+
+      - name: Determine Build Requirement
+        id: check
+        run: |
+          UPSTREAM="${{ steps.upstream.outputs.short_sha }}"
+          LOCAL="${{ steps.local.outputs.local_sha }}"
           
-          if [ -z "$UPSTREAM" ]; then exit 1; fi
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "status=build" >> $GITHUB_OUTPUT
+          elif [ "$LOCAL" == "none" ] || [ "$UPSTREAM" != "$LOCAL" ]; then
+            echo "status=build" >> $GITHUB_OUTPUT
+          else
+            echo "status=skip" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout Source
+        if: steps.check.outputs.status == 'build'
+        uses: actions/checkout@v4
+        with:
+          repository: reF1nd/sing-box
+          ref: ${{ matrix.branch }}
+          fetch-depth: 0
+
+      - name: Setup Go Environment
+        if: steps.check.outputs.status == 'build'
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: false
+
+      - name: Prepare Build Environment
+        if: steps.check.outputs.status == 'build'
+        run: |
+          VERSION="${{ matrix.branch }}-$(date +%Y%m%d)-${{ steps.upstream.outputs.short_sha }}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "BUILD_TIME=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_ENV
+          echo "BUILD_TAGS=with_gvisor,with_quic,with_utls,with_acme,with_clash_api" >> $GITHUB_ENV
+
+      - name: Compile Binaries (AMD64 & ARM64)
+        if: steps.check.outputs.status == 'build'
+        run: |
+          LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${VERSION}"
           
-          LOCAL=$(gh release view ${{ matrix.tag }} --repo ${{ github.repository }} --json body --jq .body 2>/dev/null | grep -oP '```
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -tags "${BUILD_TAGS}" -o sing-box-amd64 ./cmd/sing-box
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -tags "${BUILD_TAGS}" -o sing-box-arm64 ./cmd/sing-box
+
+      - name: Delete Existing Release and Tag
+        if: steps.check.outputs.status == 'build'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete ${{ matrix.tag }} --cleanup-tag -y --repo ${{ github.repository }} || true
+          git push --delete origin ${{ matrix.tag }} || true
+
+      - name: Publish New Release
+        if: steps.check.outputs.status == 'build'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ matrix.tag }}
+          name: 📦 Sing-box Lite | ${{ matrix.name }} Edition
+          make_latest: ${{ matrix.branch == 'reF1nd-stable' }}
+          body: |
+            ## 🚀 自动构建发布 (Automated Build)
+
+            **📌 构建信息 (Build Info)**
+            | 属性 | 详情 |
+            | :--- | :--- |
+            | 👤 **上游仓库** | [reF1nd/sing-box](https://github.com/reF1nd/sing-box) |
+            | 🌿 **代码分支** | `${{ matrix.branch }}` |
+            | 🔖 **版本标识** | `${{ env.VERSION }}` |
+            | 🎯 **Commit** | `${{ steps.upstream.outputs.short_sha }}` |
+            | 🕒 **编译时间** | `${{ env.BUILD_TIME }}` (UTC+8) |
+
+            **⚙️ 编译参数 (Build Tags)**
+            ```text
+            ${{ env.BUILD_TAGS }}
+            ```
+
+            **📥 架构说明 (Architecture)**
+            * 🐧 `amd64`: 适用于主流 VPS、x86 软路由、台式/笔记本电脑等。
+            * 📱 `arm64`: 适用于树莓派、N1 盒子、Android 设备、ARM 架构 VPS 等。
+
+            > *此 Release 由 GitHub Actions 自动拉取上游最新代码编译并滚动更新。*
+          files: |
+            sing-box-amd64
+            sing-box-arm64
