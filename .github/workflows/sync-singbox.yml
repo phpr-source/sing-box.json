@@ -31,10 +31,6 @@ env:
 
 jobs:
   build-and-release:
-    if: >-
-      github.event_name != 'workflow_dispatch' ||
-      inputs.branch_to_build == '' ||
-      inputs.branch_to_build == matrix.branch
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -60,9 +56,16 @@ jobs:
             latest: false
 
     steps:
-      - name: Get Upstream Commit
-        id: upstream
+      - name: Evaluate Build Requirement
+        id: eval
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ inputs.branch_to_build }}" ] && [ "${{ inputs.branch_to_build }}" != "${{ matrix.branch }}" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           SHA=$(git ls-remote "https://github.com/${{ env.UPSTREAM_REPO }}.git" "refs/heads/${{ matrix.branch }}" | awk '{ print $1 }')
           if [ -z "${SHA}" ]; then
             echo "::error::Failed to fetch upstream commit."
@@ -71,24 +74,15 @@ jobs:
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "short_sha=${SHA:0:7}" >> "$GITHUB_OUTPUT"
 
-      - name: Check Local Release
-        id: local
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
           LOCAL_SHA="none"
           if gh release view "${{ matrix.tag }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             if gh release download "${{ matrix.tag }}" --pattern commit.txt --repo "${{ github.repository }}" -O commit.txt >/dev/null 2>&1; then
               [ -s commit.txt ] && LOCAL_SHA=$(tr -d '[:space:]' < commit.txt)
             fi
           fi
-          echo "local_sha=${LOCAL_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Evaluate Build Requirement
-        id: eval
-        run: |
           FORCE="${{ inputs.force_build }}"
-          if [ "$FORCE" == "true" ] || [ "${{ steps.local.outputs.local_sha }}" == "none" ] || [ "${{ steps.upstream.outputs.sha }}" != "${{ steps.local.outputs.local_sha }}" ]; then
+          if [ "$FORCE" == "true" ] || [ "$LOCAL_SHA" == "none" ] || [ "$SHA" != "$LOCAL_SHA" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
           else
             echo "build=false" >> "$GITHUB_OUTPUT"
@@ -122,7 +116,7 @@ jobs:
           
           RAW_VER=$(git describe --tags --abbrev=0 2>/dev/null | tr -d '[:space:]' | sed 's/^v//' || echo "")
           [ -z "${RAW_VER}" ] && RAW_VER=$(awk -F'"' '/Version[ \t]*=/ {print $2}' constant/version.go 2>/dev/null | tr -d '[:space:]' || echo "")
-          [ -z "${RAW_VER}" ] && RAW_VER="${{ steps.upstream.outputs.short_sha }}"
+          [ -z "${RAW_VER}" ] && RAW_VER="${{ steps.eval.outputs.short_sha }}"
           
           GO_VER=$(go version | awk '{print $3}' | sed 's/go//')
           SHORT_BRANCH="${matrix.branch#${{ env.BRANCH_PREFIX }}}"
@@ -138,7 +132,7 @@ jobs:
           echo "GO_VERSION=${GO_VER}" >> "$GITHUB_ENV"
           echo "UPX_STATUS=${UPX_MSG}" >> "$GITHUB_ENV"
           
-          LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${RAW_VER}-${SHORT_BRANCH}-${{ steps.upstream.outputs.short_sha }}"
+          LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${RAW_VER}-${SHORT_BRANCH}-${{ steps.eval.outputs.short_sha }}"
           
           TARGETS=(
             "linux amd64"
@@ -232,7 +226,7 @@ jobs:
               hash=$(sha256sum "$arch" | awk '{print $1}')
               echo "| \`$arch\` | \`$hash\` |" >> hash_table.md
             done
-            echo "${{ steps.upstream.outputs.sha }}" > commit.txt
+            echo "${{ steps.eval.outputs.sha }}" > commit.txt
           else
             echo "::error::Critical Failure: No binaries compiled successfully."
             exit 1
@@ -263,7 +257,7 @@ jobs:
           | :--- | :--- |
           | 👤 **上游倉庫** | [\`${{ env.UPSTREAM_REPO }}\`](https://github.com/${{ env.UPSTREAM_REPO }}) |
           | 🌿 **代碼分支** | [\`${{ matrix.branch }}\`](https://github.com/${{ env.UPSTREAM_REPO }}/tree/${{ matrix.branch }}) |
-          | 🎯 **源碼提交** | [\`${{ steps.upstream.outputs.short_sha }}\`](https://github.com/${{ env.UPSTREAM_REPO }}/commit/${{ steps.upstream.outputs.sha }}) |
+          | 🎯 **源碼提交** | [\`${{ steps.eval.outputs.short_sha }}\`](https://github.com/${{ env.UPSTREAM_REPO }}/commit/${{ steps.eval.outputs.sha }}) |
           | 🕒 **編譯時間** | \`${{ env.BUILD_TIME }}\` (UTC+8) |
           
           ### ⚙️ 包含模組與特性 (Build Tags)
