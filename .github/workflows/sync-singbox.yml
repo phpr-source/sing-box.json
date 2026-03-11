@@ -129,10 +129,10 @@ jobs:
           IN_UPX="${{ github.event.inputs.enable_upx }}"
           if [ "$IS_SCHEDULE" = "true" ] || [ "$IN_UPX" != "false" ]; then
             ENABLE_UPX="true"
-            echo "UPX_STATUS=已啟用 ✅" >> $GITHUB_ENV
+            echo "UPX_STATUS=✅ Enabled" >> $GITHUB_ENV
           else
             ENABLE_UPX="false"
-            echo "UPX_STATUS=已禁用 ❌" >> $GITHUB_ENV
+            echo "UPX_STATUS=❌ Disabled" >> $GITHUB_ENV
           fi
 
           APP_VERSION=$(git describe --tags --abbrev=0 2>/dev/null || grep -E '^[[:space:]]*Version[[:space:]]*=[[:space:]]*' constant/version.go 2>/dev/null | grep -oE '["'\''`][^"'\''`]+["'\''`]' | tr -d '"'\''`' | head -n 1 || echo "")
@@ -170,7 +170,7 @@ jobs:
             ARM_SUFFIX=$([ -n "$LOCAL_GOARM" ] && echo "v${LOCAL_GOARM}" || echo "")
             ARCHIVE_NAME="sing-box-${APP_VERSION}-${{ matrix.branch }}-${LOCAL_GOOS}-${LOCAL_GOARCH}${ARM_SUFFIX}"
             
-            BUILD_TIMEOUT=$([ "$LOCAL_GOARCH" = "arm" ] && [ "$LOCAL_GOARM" = "7" ] && echo "20m" || echo "15m")
+            BUILD_TIMEOUT=$([ "$LOCAL_GOARCH" = "arm" ] && echo "20m" || echo "15m")
             
             MAX_RETRIES=3
             RETRY_COUNT=0
@@ -188,6 +188,7 @@ jobs:
             
             if [ "$BUILD_SUCCESS" = false ]; then
               printf -- "- ❌ %s\n" "$ARCHIVE_NAME" >> failed_targets.txt
+              rm -f "$BIN_NAME"
               continue
             fi
             
@@ -207,7 +208,9 @@ jobs:
           done
           
           if [ -s failed_targets.txt ]; then
-            echo "FAILED_TARGETS<<EOF" >> $GITHUB_ENV
+            echo "FAILED_MSG<<EOF" >> $GITHUB_ENV
+            echo "" >> $GITHUB_ENV
+            echo "### ⚠️ 編譯失敗目標" >> $GITHUB_ENV
             cat failed_targets.txt >> $GITHUB_ENV
             echo "EOF" >> $GITHUB_ENV
           fi
@@ -230,7 +233,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete ${{ matrix.tag }} --cleanup-tag -y --repo ${{ github.repository }} || true
+          gh release delete ${{ matrix.tag }} --cleanup-tag -y --repo ${{ github.repository }} 2>/dev/null || true
+          git push --delete origin refs/tags/${{ matrix.tag }} 2>/dev/null || true
 
       - name: Publish Release
         if: steps.check.outputs.status == 'build'
@@ -255,7 +259,7 @@ jobs:
             ### 🛠️ 核心配置
             - **Go 環境**: `${{ env.GO_VERSION }}`
             - **編譯標籤 (Tags)**: `${{ env.BUILD_TAGS }}`
-            - **UPX 壓縮**: ${{ env.UPX_STATUS }}
+            - **UPX 壓縮**: `${{ env.UPX_STATUS }}`
             
             <details>
             <summary>🛡️ <b>展開查看檔案校驗碼 (SHA-256 Checksums)</b></summary>
@@ -264,8 +268,7 @@ jobs:
             ${{ env.FILE_HASHES }}
             ```
             </details>
-            
-            ${{ env.FAILED_TARGETS != '' && '### ⚠️ 編譯失敗目標\n' || '' }}${{ env.FAILED_TARGETS }}
+            ${{ env.FAILED_MSG }}
           files: |
             *.zip
             *.tar.gz
