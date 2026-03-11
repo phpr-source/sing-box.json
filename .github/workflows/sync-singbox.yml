@@ -71,6 +71,12 @@ jobs:
           go-version: 'stable'
           cache: false
 
+      - name: Setup UPX
+        if: steps.check.outputs.status == 'build'
+        uses: crazy-max/ghaction-upx@v3
+        with:
+          install-only: true
+
       - name: Prepare Build Environment
         if: steps.check.outputs.status == 'build'
         run: |
@@ -78,18 +84,22 @@ jobs:
           echo "BUILD_TIME=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_ENV
           echo "BUILD_TAGS=with_gvisor,with_quic,with_utls,with_acme,with_clash_api" >> $GITHUB_ENV
 
-      - name: Compile Binaries & Generate Hashes
+      - name: Compile & Compress Binaries
         if: steps.check.outputs.status == 'build'
         run: |
           LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${VERSION}"
-          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -tags "${BUILD_TAGS}" -o sing-box-amd64 ./cmd/sing-box
-          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -tags "${BUILD_TAGS}" -o sing-box-arm64 ./cmd/sing-box
+          ARCHS=("amd64" "arm64")
           
-          {
-            echo "HASHES<<EOF"
-            sha256sum sing-box-amd64 sing-box-arm64
-            echo "EOF"
-          } >> $GITHUB_ENV
+          echo "HASHES<<EOF" >> $GITHUB_ENV
+          
+          for ARCH in "${ARCHS[@]}"; do
+            OUTPUT="sing-box-${ARCH}"
+            GOOS=linux GOARCH=$ARCH CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -tags "${BUILD_TAGS}" -o $OUTPUT ./cmd/sing-box
+            upx --lzma --best $OUTPUT
+            sha256sum $OUTPUT >> $GITHUB_ENV
+          done
+          
+          echo "EOF" >> $GITHUB_ENV
 
       - name: Clean Old Release
         if: steps.check.outputs.status == 'build'
@@ -108,9 +118,9 @@ jobs:
           body: |
             ## 🚀 Automated Build | Sing-box Lite (${{ matrix.name }})
 
-            > 🤖 本版本由 GitHub Actions 自動追蹤上游源碼並編譯發佈，提供純淨、輕量的核心體驗。
+            > 🤖 本版本由 GitHub Actions 自動追蹤上游源碼並編譯發佈，內核已採用 **UPX 進行極限壓縮**，為路由設備釋放更多空間。
 
-            ### 📌 構建資訊 (Build Info)
+            ### 📌 構建資訊
             | 屬性 | 詳情 |
             | :--- | :--- |
             | 👤 上游倉庫 | [reF1nd/sing-box](https://github.com/reF1nd/sing-box) |
@@ -119,16 +129,15 @@ jobs:
             | 🔖 版本標識 | `${{ env.VERSION }}` |
             | 🕒 編譯時間 | `${{ env.BUILD_TIME }}` (UTC+8) |
 
-            ### ⚙️ 核心特性 (Build Tags)
+            ### ⚙️ 核心特性
             ```text
             ${{ env.BUILD_TAGS }}
             ```
 
-            ### 📥 系統架構與校驗 (Architecture & Checksums)
-            - 🐧 **`amd64`**: 適用於主流 VPS、x86 軟路由、桌上型與筆記型電腦。
-            - 📱 **`arm64`**: 適用於樹莓派、N1 盒子、Android 設備、ARM 架構 VPS。
+            ### 📥 架構與校驗 (SHA256)
+            - 🐧 **`amd64`**: 適用於 VPS、x86 軟路由、電腦
+            - 📱 **`arm64`**: 適用於 樹莓派、N1 盒子、ARM 設備
 
-            **SHA256 校驗碼:**
             ```text
             ${{ env.HASHES }}
             ```
