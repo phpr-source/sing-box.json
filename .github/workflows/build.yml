@@ -193,14 +193,16 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
       - name: Build Android APK
         run: |
           set -euo pipefail
           
-          export PATH=$PATH:$(go env GOPATH)/bin
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          gomobile init || true
+          export ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}
           
           if grep -q "^lib_android:" Makefile; then
             make lib_android
@@ -216,6 +218,7 @@ jobs:
           if [ -d "clients/android" ] && [ -f "clients/android/gradlew" ]; then
             cd clients/android
             echo "sdk.dir=$ANDROID_HOME" > local.properties
+            echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
             chmod +x gradlew
             ./gradlew assembleRelease
             find app/build/outputs/apk/release/ -name "*.apk" -exec cp {} ../../output/SFA-${APP_VER}-${{ matrix.branch_info.branch }}-universal.apk \;
