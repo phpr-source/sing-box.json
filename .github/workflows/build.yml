@@ -192,7 +192,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '21'
+          java-version: '17'
       - name: Build Android APK
         run: |
           set -euo pipefail
