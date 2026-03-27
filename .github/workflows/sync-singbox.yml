@@ -19,7 +19,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# 全局聲明權限，確保 gh cli 讀寫 release 順暢
 permissions:
   contents: write
 
@@ -37,8 +36,9 @@ jobs:
           IN_BRANCH: ${{ github.event.inputs.branch }}
         run: |
           BRANCHES=("reF1nd-testing|singbox-testing|Testing|false" "reF1nd-stable|singbox-stable|Stable|true" "reF1nd-oldstable|singbox-oldstable|OldStable|false")
-          JSON="["
+          JSON="[]"
           HAS="false"
+          
           for e in "${BRANCHES[@]}"; do
             IFS='|' read -r BR TAG TIT LAT <<< "$e"
             
@@ -54,12 +54,13 @@ jobs:
             fi
             
             if [ "$EVENT" == "workflow_dispatch" ] || [ "$SHA" != "$L_SHA" ] || [ "$L_SHA" == "none" ]; then
-              JSON="${JSON}{\"branch\":\"$BR\",\"tag\":\"$TAG\",\"title\":\"$TIT\",\"latest\":$LAT,\"sha\":\"$SHA\",\"local_sha\":\"$L_SHA\"},"
+              JSON=$(echo "$JSON" | jq -c --arg branch "$BR" --arg tag "$TAG" --arg title "$TIT" --argjson latest "$LAT" --arg sha "$SHA" --arg local_sha "$L_SHA" '. += [{"branch": $branch, "tag": $tag, "title": $title, "latest": $latest, "sha": $sha, "local_sha": $local_sha}]')
               HAS="true"
             fi
           done
-          JSON="${JSON%,}]"
-          [ "$JSON" == "]" ] && JSON="[]"
+          
+          if [ "$JSON" == "[]" ]; then HAS="false"; fi
+          
           echo "matrix={\"include\":$JSON}" >> $GITHUB_OUTPUT
           echo "has_builds=$HAS" >> $GITHUB_OUTPUT
 
@@ -102,18 +103,29 @@ jobs:
           export GOOS=${{ matrix.target.os }}
           export GOARCH=${{ matrix.target.arch }}
           export CGO_ENABLED=0
-          [ -n "${{ matrix.target.amd }}" ] && export GOAMD64="${{ matrix.target.amd }}"
-          [ -n "${{ matrix.target.arm }}" ] && export GOARM="${{ matrix.target.arm }}"
-          [ -n "${{ matrix.target.mips }}" ] && export GOMIPS="${{ matrix.target.mips }}"
-
-          APP_VER=$(git describe --tags --abbrev=0 2>/dev/null || grep -oE '["'\''`][^"'\''`]+["'\''`]' constant/version.go 2>/dev/null | tr -d '"'\''`' | head -n 1 || date +%Y%m%d)
           
           SUF=""
-          [ -n "${{ matrix.target.amd }}" ] && SUF="v${{ matrix.target.amd }}"
-          [ -n "${{ matrix.target.arm }}" ] && SUF="v${{ matrix.target.arm }}"
-          [ -n "${{ matrix.target.mips }}" ] && SUF="-${{ matrix.target.mips }}"
+          if [ -n "${{ matrix.target.amd }}" ]; then
+            export GOAMD64="${{ matrix.target.amd }}"
+            SUF="v${{ matrix.target.amd }}"
+          fi
+          if [ -n "${{ matrix.target.arm }}" ]; then
+            export GOARM="${{ matrix.target.arm }}"
+            SUF="v${{ matrix.target.arm }}"
+          fi
+          if [ -n "${{ matrix.target.mips }}" ]; then
+            export GOMIPS="${{ matrix.target.mips }}"
+            SUF="-${{ matrix.target.mips }}"
+          fi
+
+          APP_VER=$(git describe --tags --abbrev=0 2>/dev/null || grep -oE '["'\''`][^"'\''`]+["'\''`]' constant/version.go 2>/dev/null | tr -d '"'\''`' | head -n 1 || date +%Y%m%d)
           NAME="sing-box-${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${SUF}"
-          BIN="sing-box$([ "${{ matrix.target.os }}" == "windows" ] && echo ".exe")"
+          
+          if [ "${{ matrix.target.os }}" == "windows" ]; then
+            BIN="sing-box.exe"
+          else
+            BIN="sing-box"
+          fi
           
           TAGS="with_gvisor,with_quic,with_utls,with_acme,with_clash_api,with_v2ray_api,with_ech"
           LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.branch_info.sha }}"
@@ -143,9 +155,6 @@ jobs:
           else
             tar -czf "output/${NAME}.tar.gz" "$NAME"
           fi
-          
-          # 將 Go 版本寫入臨時檔案以供後續提取
-          go version | awk '{print $3}' > output/go_version.txt
 
       - uses: actions/upload-artifact@v4
         with:
@@ -154,7 +163,7 @@ jobs:
 
   release:
     needs: [prepare, build]
-    if: needs.prepare.outputs.has_builds == 'true' # 修正：防止空矩陣報錯
+    if: needs.prepare.outputs.has_builds == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -167,11 +176,15 @@ jobs:
           ref: ${{ matrix.branch_info.branch }}
           fetch-depth: 0
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
       - name: Generate Changelog
         run: |
           if [ "${{ matrix.branch_info.local_sha }}" != "none" ] && git cat-file -t ${{ matrix.branch_info.local_sha }} >/dev/null 2>&1; then
             LOG=$(git log --pretty=format:"- %s (%h)" ${{ matrix.branch_info.local_sha }}..${{ matrix.branch_info.sha }})
-            [ -z "$LOG" ] && LOG="- 無新增提交紀錄 (本次為手動強制重構建)"
+            if [ -z "$LOG" ]; then LOG="- 無新增提交紀錄 (本次為手動強制重構建)"; fi
           else
             LOG=$(git log --pretty=format:"- %s (%h)" -n 5 ${{ matrix.branch_info.sha }})
             LOG="- *由於無本地歷史，顯示最近 5 次提交：*
@@ -190,15 +203,12 @@ jobs:
       - name: Prepare Assets & Checksums
         run: |
           cd release_assets
-          wget -qO geoip.db https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db
-          wget -qO geosite.db https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db
+          curl -L --retry 3 --retry-delay 2 -o geoip.db https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db
+          curl -L --retry 3 --retry-delay 2 -o geosite.db https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db
           
-          # 提取編譯使用的 Go 版本並清理臨時檔案
-          GO_VER=$(cat go_version.txt | head -n 1)
+          GO_VER=$(go version | awk '{print $3}')
           echo "GO_VERSION=$GO_VER" >> $GITHUB_ENV
-          rm -f go_version.txt
           
-          # 修正：精確指定校驗目標，避免混入雜訊
           sha256sum *.zip *.tar.gz geoip.db geosite.db > sha256sums.txt
           
           echo "${{ matrix.branch_info.sha }}" > commit.txt
@@ -211,7 +221,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release delete ${{ matrix.branch_info.tag }} --cleanup-tag -y --repo ${{ github.repository }} 2>/dev/null || true
-          git push --delete origin refs/tags/${{ matrix.branch_info.tag }} 2>/dev/null || true
+          git push https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git --delete refs/tags/${{ matrix.branch_info.tag }} 2>/dev/null || true
 
       - name: Publish Release
         uses: softprops/action-gh-release@v2
