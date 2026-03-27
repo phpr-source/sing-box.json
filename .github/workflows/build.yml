@@ -174,7 +174,6 @@ jobs:
           repository: ${{ matrix.branch_info.repo }}
           ref: ${{ matrix.branch_info.branch }}
           fetch-depth: 0
-          path: core
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
@@ -185,15 +184,16 @@ jobs:
       - name: Build Android APK
         run: |
           set -euo pipefail
-          git clone --recursive https://github.com/SagerNet/sing-box-for-android.git sfa
-          cd sfa
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          go mod edit -replace github.com/sagernet/sing-box=../core
-          go mod tidy
-          ./gradlew assembleRelease
           APP_VER="${{ matrix.branch_info.app_ver }}"
-          mkdir ../output
-          find app/build/outputs/apk/release/ -name "*.apk" -exec cp {} ../output/SFA-${APP_VER}-${{ matrix.branch_info.branch }}-universal.apk \;
+          mkdir -p output
+          if [ -d "clients/android" ]; then
+            cd clients/android
+            echo "sdk.dir=$ANDROID_HOME" > local.properties
+            ./gradlew assembleRelease
+            find app/build/outputs/apk/release/ -name "*.apk" -exec cp {} ../../output/SFA-${APP_VER}-${{ matrix.branch_info.branch }}-universal.apk \;
+          else
+            echo "Android client not found in this branch."
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.branch_info.branch }}-android-apk
@@ -238,15 +238,20 @@ jobs:
           set -euo pipefail
           cd release_assets
           APP_VER="${{ matrix.branch_info.app_ver }}"
+          
           curl -L --retry 3 --retry-delay 2 -o Dashboard-metacubexd.zip https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip
           curl -L --retry 3 --retry-delay 2 -o Dashboard-yacd.zip https://github.com/haishanh/yacd/archive/refs/heads/gh-pages.zip
+          curl -L --retry 3 --retry-delay 2 -o Dashboard-zashboard.zip https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.zip
           curl -L --retry 3 --retry-delay 2 -o geoip.db https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db
           curl -L --retry 3 --retry-delay 2 -o geosite.db https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db
+          
           cat << 'EOF' > config.json
           { "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }
           EOF
+          
           echo "${{ matrix.branch_info.sha }}" > commit.txt
           find . -maxdepth 1 -type f -print0 | xargs -0 sha256sum > sha256sums.txt
+          
           if [ "${{ matrix.branch_info.rolling }}" = "true" ]; then
             echo "REL_TAG=${{ matrix.branch_info.tag }}" >> "$GITHUB_ENV"
             echo "REL_NAME=${{ matrix.branch_info.title }} (Rolling)" >> "$GITHUB_ENV"
