@@ -43,31 +43,47 @@ jobs:
             "reF1nd/sing-box|reF1nd-testing|ref1nd-test|reF1nd-Testing|true"
             "reF1nd/sing-box|reF1nd-stable|ref1nd-stable|reF1nd-Stable|false"
             "SagerNet/sing-box|main|singbox-alpha|Official-Alpha|true"
-            "SagerNet/sing-box|dev-next|singbox-stable|Official-Stable|false"
+            "SagerNet/sing-box|release|singbox-stable|Official-Stable|false"
           )
           JSON="[]"
           HAS="false"
           for e in "${TARGETS[@]}"; do
             IFS='|' read -r REPO BR TAG TIT ROLLING <<< "$e"
-            if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ] && [ "$IN_BRANCH" != "$TIT" ]; then continue; fi
+            
+            # 手動觸發過濾
+            if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ] && [ "$IN_BRANCH" != "$TIT" ]; then 
+              echo "Skipped $TIT: Not selected in manual trigger."
+              continue
+            fi
+            
+            # 檢查上游分支是否存在
             SHA=$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$BR" | awk '{print $1}')
-            [ -z "$SHA" ] && continue
+            if [ -z "$SHA" ]; then
+              echo "Skipped $TIT: Branch '$BR' not found in repository '$REPO'."
+              continue
+            fi
+            
             TMPDIR="$(mktemp -d)"
             git clone --bare --filter=blob:none "https://github.com/${REPO}.git" "$TMPDIR"
             APP_VER=$(git --git-dir="$TMPDIR" describe --tags --abbrev=0 "$SHA" 2>/dev/null | sed 's/^v//' || true)
             rm -rf "$TMPDIR"
             [ -z "${APP_VER:-}" ] && APP_VER="${SHA:0:8}"
+            
             if [ "$ROLLING" = "true" ]; then
               CHK_TAG="$TAG"
             else
               CHK_TAG=$(gh release list --limit 4000 --exclude-drafts --repo ${{ github.repository }} --json tagName,name --jq ".[] | select(.name | endswith(\" | $TIT\")) | .tagName" | head -n 1 || true)
             fi
+            
             L_SHA="none"
             if [ -n "${CHK_TAG:-}" ] && gh release view "$CHK_TAG" --repo ${{ github.repository }} &>/dev/null; then
               L_SHA=$(gh release download "$CHK_TAG" --pattern commit.txt --repo ${{ github.repository }} -O - 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)
               [ -z "$L_SHA" ] && L_SHA="none"
             fi
+            
+            # 判斷是否需要構建
             if [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "repository_dispatch" ] || [ "$SHA" != "$L_SHA" ] || [ "$L_SHA" = "none" ]; then
+              echo "Added $TIT to build matrix (Target SHA: $SHA)"
               JSON=$(echo "$JSON" | jq -c \
                 --arg repo "$REPO" \
                 --arg branch "$BR" \
@@ -79,8 +95,11 @@ jobs:
                 --arg app_ver "$APP_VER" \
                 '. += [{"repo": $repo, "branch": $branch, "tag": $tag, "title": $title, "rolling": $rolling, "sha": $sha, "local_sha": $local_sha, "app_ver": $app_ver}]')
               HAS="true"
+            else
+              echo "Skipped $TIT: No new commits detected (Already up-to-date)."
             fi
           done
+          
           echo "matrix={\"include\":$JSON}" >> "$GITHUB_OUTPUT"
           echo "has_builds=$HAS" >> "$GITHUB_OUTPUT"
 
@@ -174,6 +193,7 @@ jobs:
           repository: ${{ matrix.branch_info.repo }}
           ref: ${{ matrix.branch_info.branch }}
           fetch-depth: 0
+          submodules: recursive  # 必須開啟，否則無法拉取到 clients/android 內部的 Gradle 代碼
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
@@ -186,13 +206,14 @@ jobs:
           set -euo pipefail
           APP_VER="${{ matrix.branch_info.app_ver }}"
           mkdir -p output
-          if [ -d "clients/android" ]; then
+          if [ -d "clients/android" ] && [ -f "clients/android/gradlew" ]; then
             cd clients/android
             echo "sdk.dir=$ANDROID_HOME" > local.properties
+            chmod +x gradlew
             ./gradlew assembleRelease
             find app/build/outputs/apk/release/ -name "*.apk" -exec cp {} ../../output/SFA-${APP_VER}-${{ matrix.branch_info.branch }}-universal.apk \;
           else
-            echo "Android client not found in this branch."
+            echo "Android client (gradlew) not found in this branch."
           fi
       - uses: actions/upload-artifact@v4
         with:
