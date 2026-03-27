@@ -50,16 +50,12 @@ jobs:
           for e in "${TARGETS[@]}"; do
             IFS='|' read -r REPO BR TAG TIT ROLLING <<< "$e"
             
-            # 手動觸發過濾
             if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ] && [ "$IN_BRANCH" != "$TIT" ]; then 
-              echo "Skipped $TIT: Not selected in manual trigger."
               continue
             fi
             
-            # 檢查上游分支是否存在
             SHA=$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$BR" | awk '{print $1}')
             if [ -z "$SHA" ]; then
-              echo "Skipped $TIT: Branch '$BR' not found in repository '$REPO'."
               continue
             fi
             
@@ -81,9 +77,7 @@ jobs:
               [ -z "$L_SHA" ] && L_SHA="none"
             fi
             
-            # 判斷是否需要構建
             if [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "repository_dispatch" ] || [ "$SHA" != "$L_SHA" ] || [ "$L_SHA" = "none" ]; then
-              echo "Added $TIT to build matrix (Target SHA: $SHA)"
               JSON=$(echo "$JSON" | jq -c \
                 --arg repo "$REPO" \
                 --arg branch "$BR" \
@@ -95,8 +89,6 @@ jobs:
                 --arg app_ver "$APP_VER" \
                 '. += [{"repo": $repo, "branch": $branch, "tag": $tag, "title": $title, "rolling": $rolling, "sha": $sha, "local_sha": $local_sha, "app_ver": $app_ver}]')
               HAS="true"
-            else
-              echo "Skipped $TIT: No new commits detected (Already up-to-date)."
             fi
           done
           
@@ -193,7 +185,7 @@ jobs:
           repository: ${{ matrix.branch_info.repo }}
           ref: ${{ matrix.branch_info.branch }}
           fetch-depth: 0
-          submodules: recursive  # 必須開啟，否則無法拉取到 clients/android 內部的 Gradle 代碼
+          submodules: recursive
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
@@ -204,16 +196,22 @@ jobs:
       - name: Build Android APK
         run: |
           set -euo pipefail
+          
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          
+          make lib_android || true
+          make lib_android_legacy || true
+          
           APP_VER="${{ matrix.branch_info.app_ver }}"
           mkdir -p output
+          
           if [ -d "clients/android" ] && [ -f "clients/android/gradlew" ]; then
             cd clients/android
             echo "sdk.dir=$ANDROID_HOME" > local.properties
             chmod +x gradlew
             ./gradlew assembleRelease
             find app/build/outputs/apk/release/ -name "*.apk" -exec cp {} ../../output/SFA-${APP_VER}-${{ matrix.branch_info.branch }}-universal.apk \;
-          else
-            echo "Android client (gradlew) not found in this branch."
           fi
       - uses: actions/upload-artifact@v4
         with:
