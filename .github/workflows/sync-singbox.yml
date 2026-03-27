@@ -20,20 +20,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate Input Branch
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.branch_to_build != ''
-        run: |
-          TARGET="${{ github.event.inputs.branch_to_build }}"
-          if ! git ls-remote --heads https://github.com/reF1nd/sing-box.git | grep -qw "refs/heads/$TARGET"; then
-            echo "::error::Branch $TARGET does not exist in the upstream repository."
-            exit 1
-          fi
-
   build-and-release:
-    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -56,45 +43,43 @@ jobs:
             latest: 'false'
 
     steps:
-      - name: Get Upstream Commit
-        id: upstream
-        run: |
-          SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/${{ matrix.branch }} | awk '{ print $1 }')
-          if [ -z "$SHA" ]; then
-            echo "::error::Failed to fetch upstream commit."
-            exit 1
-          fi
-          echo "sha=$SHA" >> $GITHUB_OUTPUT
-          echo "short_sha=${SHA:0:7}" >> $GITHUB_OUTPUT
-
-      - name: Check Local Release
-        id: local
+      - name: Check Status & Upstream
+        id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_BRANCH: ${{ github.event.inputs.branch_to_build }}
         run: |
+          # 1. 檢查是否因為手動輸入而需要跳過當前分支
+          if [ -n "$TARGET_BRANCH" ] && [ "$TARGET_BRANCH" != "${{ matrix.branch }}" ]; then
+            echo "status=skip" >> $GITHUB_OUTPUT
+            echo "Skipping branch ${{ matrix.branch }} as it does not match input $TARGET_BRANCH"
+            exit 0
+          fi
+
+          # 2. 獲取上游最新 SHA
+          UPSTREAM_SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/${{ matrix.branch }} | awk '{ print $1 }')
+          if [ -z "$UPSTREAM_SHA" ]; then
+            echo "::error::Failed to fetch upstream commit for ${{ matrix.branch }}."
+            exit 1
+          fi
+          SHORT_SHA=${UPSTREAM_SHA:0:7}
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+
+          # 3. 獲取本地 Release 的 SHA
           LOCAL_SHA="none"
           if gh release view ${{ matrix.tag }} --repo ${{ github.repository }} &>/dev/null; then
             if gh release download ${{ matrix.tag }} --pattern commit.txt --repo ${{ github.repository }} -O commit.txt 2>/dev/null; then
-              if [ -s commit.txt ]; then
-                LOCAL_SHA=$(tr -d '[:space:]' < commit.txt)
-              fi
+              [ -s commit.txt ] && LOCAL_SHA=$(tr -d '[:space:]' < commit.txt)
             fi
           fi
-          echo "local_sha=$LOCAL_SHA" >> $GITHUB_OUTPUT
 
-      - name: Determine Status
-        id: check
-        run: |
-          TARGET_BRANCH="${{ github.event.inputs.branch_to_build }}"
-          if [ -n "$TARGET_BRANCH" ] && [ "$TARGET_BRANCH" != "${{ matrix.branch }}" ]; then
-            echo "status=skip" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ] || [ "${{ steps.local.outputs.local_sha }}" == "none" ] || [ "${{ steps.upstream.outputs.short_sha }}" != "${{ steps.local.outputs.local_sha }}" ]; then
+          # 4. 判斷是否需要編譯
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] || [ "$LOCAL_SHA" == "none" ] || [ "$SHORT_SHA" != "$LOCAL_SHA" ]; then
             echo "status=build" >> $GITHUB_OUTPUT
+            echo "Update found or forced build. Upstream: $SHORT_SHA, Local: $LOCAL_SHA"
           else
             echo "status=skip" >> $GITHUB_OUTPUT
+            echo "No update needed. SHA: $SHORT_SHA"
           fi
 
       - name: Checkout Source
@@ -125,6 +110,7 @@ jobs:
       - name: Build, Compress and Package
         if: steps.check.outputs.status == 'build'
         run: |
+          # 環境變數設定
           IS_SCHEDULE="${{ github.event_name == 'schedule' }}"
           IN_UPX="${{ github.event.inputs.enable_upx }}"
           if [ "$IS_SCHEDULE" = "true" ] || [ "$IN_UPX" != "false" ]; then
@@ -147,7 +133,7 @@ jobs:
           echo "BUILD_TAGS=$BUILD_TAGS" >> $GITHUB_ENV
           echo "GO_VERSION=$GO_VER" >> $GITHUB_ENV
           
-          LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${APP_VERSION}-${{ matrix.branch }}-${{ steps.upstream.outputs.short_sha }}"
+          LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${APP_VERSION}-${{ matrix.branch }}-${{ steps.check.outputs.short_sha }}"
           
           TARGETS=(
             "linux amd64"
@@ -160,7 +146,9 @@ jobs:
           )
           
           > failed_targets.txt
+          mkdir -p output_archives
           
+          # 執行多架構編譯
           for TARGET in "${TARGETS[@]}"; do
             read -r LOCAL_GOOS LOCAL_GOARCH LOCAL_GOARM <<< "$TARGET"
             
@@ -170,62 +158,53 @@ jobs:
             ARM_SUFFIX=$([ -n "$LOCAL_GOARM" ] && echo "v${LOCAL_GOARM}" || echo "")
             ARCHIVE_NAME="sing-box-${APP_VERSION}-${{ matrix.branch }}-${LOCAL_GOOS}-${LOCAL_GOARCH}${ARM_SUFFIX}"
             
-            BUILD_TIMEOUT=$([ "$LOCAL_GOARCH" = "arm" ] && echo "20m" || echo "15m")
+            echo "Building $ARCHIVE_NAME..."
             
-            MAX_RETRIES=3
-            RETRY_COUNT=0
-            BUILD_SUCCESS=false
-            
-            while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-              if timeout $BUILD_TIMEOUT env GOOS=$LOCAL_GOOS GOARCH=$LOCAL_GOARCH GOARM=$LOCAL_GOARM CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -tags "$BUILD_TAGS" -o "$BIN_NAME" ./cmd/sing-box; then
-                BUILD_SUCCESS=true
-                break
-              else
-                RETRY_COUNT=$((RETRY_COUNT+1))
-                sleep $((RETRY_COUNT * 5))
-              fi
-            done
-            
-            if [ "$BUILD_SUCCESS" = false ]; then
-              printf -- "- ❌ %s\n" "$ARCHIVE_NAME" >> failed_targets.txt
-              rm -f "$BIN_NAME"
+            # 編譯
+            if ! env GOOS=$LOCAL_GOOS GOARCH=$LOCAL_GOARCH GOARM=$LOCAL_GOARM CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -tags "$BUILD_TAGS" -o "$BIN_NAME" ./cmd/sing-box; then
+              echo "- ❌ $ARCHIVE_NAME (Build Failed)" >> failed_targets.txt
               continue
             fi
             
-            if [ -f "$BIN_NAME" ]; then
-              chmod +x "$BIN_NAME"
-              if [ "$ENABLE_UPX" = "true" ] && [[ "$LOCAL_GOOS" == "linux" || "$LOCAL_GOOS" == "windows" ]]; then
-                upx --lzma --best "$BIN_NAME" || true
-              fi
-              
-              if [ "$LOCAL_GOOS" = "windows" ]; then
-                zip -9 -q "${ARCHIVE_NAME}.zip" "$BIN_NAME"
-              else
-                tar -czf "${ARCHIVE_NAME}.tar.gz" "$BIN_NAME"
-              fi
-              rm -f "$BIN_NAME"
+            chmod +x "$BIN_NAME"
+            
+            # UPX 壓縮 (僅限 Linux 與 Windows)
+            if [ "$ENABLE_UPX" = "true" ] && [[ "$LOCAL_GOOS" == "linux" || "$LOCAL_GOOS" == "windows" ]]; then
+              echo "Compressing $BIN_NAME with UPX..."
+              upx --lzma --best "$BIN_NAME" || echo "UPX failed for $BIN_NAME, skipping compression."
             fi
+            
+            # 壓縮打包至 output_archives 目錄
+            if [ "$LOCAL_GOOS" = "windows" ]; then
+              zip -9 -q "output_archives/${ARCHIVE_NAME}.zip" "$BIN_NAME"
+            else
+              tar -czf "output_archives/${ARCHIVE_NAME}.tar.gz" "$BIN_NAME"
+            fi
+            
+            rm -f "$BIN_NAME"
           done
           
+          # 生成校驗碼與提交紀錄
+          cd output_archives
+          if ls *.zip *.tar.gz 1> /dev/null 2>&1; then
+            sha256sum *.zip *.tar.gz > sha256sums.txt
+            echo "FILE_HASHES<<EOF" >> $GITHUB_ENV
+            cat sha256sums.txt >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+            echo "${{ steps.check.outputs.short_sha }}" > commit.txt
+          else
+            echo "::error::No archive files were successfully built."
+            exit 1
+          fi
+          cd ..
+          
+          # 處理錯誤訊息
           if [ -s failed_targets.txt ]; then
             echo "FAILED_MSG<<EOF" >> $GITHUB_ENV
             echo "" >> $GITHUB_ENV
             echo "### ⚠️ 編譯失敗目標" >> $GITHUB_ENV
             cat failed_targets.txt >> $GITHUB_ENV
             echo "EOF" >> $GITHUB_ENV
-          fi
-          
-          shopt -s nullglob
-          archives=(*.zip *.tar.gz)
-          if [ ${#archives[@]} -gt 0 ]; then
-            sha256sum "${archives[@]}" > sha256sums.txt
-            echo "FILE_HASHES<<EOF" >> $GITHUB_ENV
-            cat sha256sums.txt >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
-            echo "${{ steps.upstream.outputs.short_sha }}" > commit.txt
-          else
-            echo "::error::No archive files were successfully built."
-            exit 1
           fi
 
       - name: Clean Old Release
@@ -253,13 +232,13 @@ jobs:
             | :--- | :--- |
             | 🔖 **核心版本** | `v${{ env.APP_VERSION }}` |
             | 🌿 **編譯分支** | [`${{ matrix.branch }}`](https://github.com/reF1nd/sing-box/tree/${{ matrix.branch }}) |
-            | 🎯 **源碼提交** | [`${{ steps.upstream.outputs.short_sha }}`](https://github.com/reF1nd/sing-box/commit/${{ steps.upstream.outputs.short_sha }}) |
+            | 🎯 **源碼提交** | [`${{ steps.check.outputs.short_sha }}`](https://github.com/reF1nd/sing-box/commit/${{ steps.check.outputs.short_sha }}) |
             | 🕒 **編譯時間** | `${{ env.BUILD_TIME }}` (UTC+8) |
             
             ### 🛠️ 核心配置
             - **Go 環境**: `${{ env.GO_VERSION }}`
             - **編譯標籤 (Tags)**: `${{ env.BUILD_TAGS }}`
-            - **UPX 壓縮**: `${{ env.UPX_STATUS }}`
+            - **UPX 壓縮**: `${{ env.UPX_STATUS }}` (僅限 Linux & Windows)
             
             <details>
             <summary>🛡️ <b>展開查看檔案校驗碼 (SHA-256 Checksums)</b></summary>
@@ -270,7 +249,7 @@ jobs:
             </details>
             ${{ env.FAILED_MSG }}
           files: |
-            *.zip
-            *.tar.gz
-            sha256sums.txt
-            commit.txt
+            output_archives/*.zip
+            output_archives/*.tar.gz
+            output_archives/sha256sums.txt
+            output_archives/commit.txt
