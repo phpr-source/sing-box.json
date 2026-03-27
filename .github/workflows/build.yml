@@ -197,12 +197,17 @@ jobs:
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
-          ndk-version: r26b
+          ndk-version: r26d
       - name: Build Android APK
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           set -euo pipefail
           
-          export ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}
+          export PATH=$PATH:$(go env GOPATH)/bin
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          gomobile init
           
           if grep -q "^lib_android:" Makefile; then
             make lib_android
