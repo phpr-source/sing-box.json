@@ -1,0 +1,239 @@
+name: Build sing-box reFind
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Target branch (Select "all" for full sync)'
+        type: choice
+        options: ['all', 'reF1nd-testing', 'reF1nd-stable', 'reF1nd-oldstable']
+        default: 'all'
+  schedule:
+    - cron: '0 */4 * * *'
+  repository_dispatch:
+    types: [upstream_sync]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+      has_builds: ${{ steps.set.outputs.has_builds }}
+    steps:
+      - id: set
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
+          IN_BRANCH: ${{ github.event.inputs.branch }}
+          PAYLOAD_BRANCH: ${{ github.event.client_payload.branch }}
+        run: |
+          BRANCHES=("reF1nd-testing|singbox-testing|Testing|true" "reF1nd-stable|stable|Stable|false" "reF1nd-oldstable|oldstable|OldStable|false")
+          JSON="[]"
+          HAS="false"
+          
+          for e in "${BRANCHES[@]}"; do
+            IFS='|' read -r BR TAG TIT ROLLING <<< "$e"
+            
+            if [ "$EVENT" == "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ] && [ "$IN_BRANCH" != "$BR" ]; then continue; fi
+            if [ "$EVENT" == "repository_dispatch" ] && [ -n "$PAYLOAD_BRANCH" ] && [ "$PAYLOAD_BRANCH" != "$BR" ]; then continue; fi
+            
+            SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/$BR | awk '{print $1}')
+            
+            CHK_TAG=""
+            if [ "$ROLLING" == "true" ]; then
+              CHK_TAG="$TAG"
+            else
+              CHK_TAG=$(gh release list --limit 100 --repo ${{ github.repository }} --json tagName,name --jq ".[] | select(.name | endswith(\" | $TIT\")) | .tagName" | head -n 1)
+            fi
+            
+            L_SHA="none"
+            if [ -n "$CHK_TAG" ] && gh release view "$CHK_TAG" --repo ${{ github.repository }} &>/dev/null; then
+              L_SHA=$(gh release download "$CHK_TAG" --pattern commit.txt --repo ${{ github.repository }} -O - 2>/dev/null | head -n 1 | tr -d '[:space:]')
+              [ -z "$L_SHA" ] && L_SHA="none"
+            fi
+            
+            if [ "$EVENT" == "workflow_dispatch" ] || [ "$EVENT" == "repository_dispatch" ] || [ "$SHA" != "$L_SHA" ] || [ "$L_SHA" == "none" ]; then
+              JSON=$(echo "$JSON" | jq -c --arg branch "$BR" --arg tag "$TAG" --arg title "$TIT" --argjson rolling "$ROLLING" --arg sha "$SHA" --arg local_sha "$L_SHA" '. += [{"branch": $branch, "tag": $tag, "title": $title, "rolling": $rolling, "sha": $sha, "local_sha": $local_sha}]')
+              HAS="true"
+            fi
+          done
+          
+          if [ "$JSON" == "[]" ]; then HAS="false"; fi
+          echo "matrix={\"include\":$JSON}" >> $GITHUB_OUTPUT
+          echo "has_builds=$HAS" >> $GITHUB_OUTPUT
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.has_builds == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        branch_info: ${{ fromJson(needs.prepare.outputs.matrix).include }}
+        flavor: [lite, full]
+        target:
+          - { os: linux, arch: amd64, amd: v3, upx: false }
+          - { os: linux, arch: arm64, upx: false }
+          - { os: linux, arch: arm, arm: 5, upx: true }
+          - { os: linux, arch: arm, arm: 6, upx: true }
+          - { os: linux, arch: arm, arm: 7, upx: true }
+          - { os: linux, arch: mipsle, mips: softfloat, upx: true }
+          - { os: linux, arch: s390x, upx: false }
+          - { os: windows, arch: amd64, amd: v3, upx: false }
+          - { os: darwin, arch: amd64, upx: false }
+          - { os: darwin, arch: arm64, upx: false }
+          - { os: android, arch: arm64, upx: false }
+          - { os: freebsd, arch: amd64, upx: false }
+          - { os: freebsd, arch: arm64, upx: false }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: reF1nd/sing-box
+          ref: ${{ matrix.branch_info.branch }}
+          fetch-depth: 0
+
+      - name: Prepare Cache Key
+        run: echo "${{ matrix.target.os }}-${{ matrix.target.arch }}-${{ matrix.flavor }}" > .cache-key
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache-dependency-path: |
+            go.sum
+            .cache-key
+
+      - uses: crazy-max/ghaction-upx@v3
+        if: matrix.target.upx == true
+        with:
+          install-only: true
+
+      - name: Build
+        run: |
+          export GOOS=${{ matrix.target.os }}
+          export GOARCH=${{ matrix.target.arch }}
+          export CGO_ENABLED=0
+          
+          SUF=""
+          if [ -n "${{ matrix.target.amd }}" ]; then export GOAMD64="${{ matrix.target.amd }}"; SUF="v${{ matrix.target.amd }}"; fi
+          if [ -n "${{ matrix.target.arm }}" ]; then export GOARM="${{ matrix.target.arm }}"; SUF="v${{ matrix.target.arm }}"; fi
+          if [ -n "${{ matrix.target.mips }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; SUF="-${{ matrix.target.mips }}"; fi
+
+          APP_VER=$(git describe --tags --always --abbrev=0 2>/dev/null | sed 's/^v//' | tr -d '"'\''`' | head -n 1 || date +%Y%m%d)
+          
+          UPX_LABEL=$([ "${{ matrix.target.upx }}" == "true" ] && echo "-upx" || echo "")
+          NAME="sing-box-${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${SUF}-${{ matrix.flavor }}${UPX_LABEL}"
+          
+          if [ "${{ matrix.target.os }}" == "windows" ]; then BIN="sing-box.exe"; else BIN="sing-box"; fi
+          
+          if [ "${{ matrix.flavor }}" == "lite" ]; then
+            TAGS="with_quic,with_utls,with_clash_api"
+          else
+            TAGS="with_gvisor,with_quic,with_utls,with_acme,with_clash_api,with_v2ray_api,with_ech,with_wireguard"
+          fi
+          
+          LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.branch_info.sha }}"
+          go build -trimpath -ldflags "$LDFLAGS" -tags "$TAGS" -o "$BIN" ./cmd/sing-box
+          chmod +x "$BIN"
+          
+          if [ "${{ matrix.target.upx }}" == "true" ]; then upx --lzma --best "$BIN" || true; fi
+          
+          cat << 'EOF' > config.json
+          { "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }
+          EOF
+          
+          mkdir "$NAME" && mv "$BIN" "$NAME/" && mv config.json "$NAME/"
+          mkdir output
+          if [ "${{ matrix.target.os }}" == "windows" ]; then zip -9 -r -q "output/${NAME}.zip" "$NAME"; else tar -czf "output/${NAME}.tar.gz" "$NAME"; fi
+
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'output/*'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd }}${{ matrix.target.arm }}${{ matrix.target.mips }}-${{ matrix.flavor }}
+          path: output/*
+
+  release:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.has_builds == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        branch_info: ${{ fromJson(needs.prepare.outputs.matrix).include }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: reF1nd/sing-box
+          ref: ${{ matrix.branch_info.branch }}
+          fetch-depth: 0
+
+      - name: Generate Smart Changelog
+        run: |
+          LOG_RAW=$(git log --pretty=format:"- %s (%h)" ${{ matrix.branch_info.local_sha }}..${{ matrix.branch_info.sha }} 2>/dev/null || git log --pretty=format:"- %s (%h)" -n 10 ${{ matrix.branch_info.sha }})
+          FEAT=$(echo "$LOG_RAW" | grep -iE 'feat|add|new|support' || true)
+          FIX=$(echo "$LOG_RAW" | grep -iE 'fix|bug|patch' || true)
+          OTHER=$(echo "$LOG_RAW" | grep -v -iE 'feat|add|new|support|fix|bug|patch' || true)
+          
+          echo "CHANGELOG<<EOF" >> $GITHUB_ENV
+          [ -n "$FEAT" ] && echo "### ✨ Features" >> $GITHUB_ENV && echo "$FEAT" >> $GITHUB_ENV
+          [ -n "$FIX" ] && echo "### 🐛 Bug Fixes" >> $GITHUB_ENV && echo "$FIX" >> $GITHUB_ENV
+          [ -n "$OTHER" ] && echo "### 🔄 Other Changes" >> $GITHUB_ENV && echo "$OTHER" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-${{ matrix.branch_info.branch }}-*
+          merge-multiple: true
+          path: release_assets
+
+      - name: Prepare Assets & Determine Tag
+        run: |
+          cd release_assets
+          APP_VER=$(git describe --tags --always --abbrev=0 2>/dev/null | sed 's/^v//' | tr -d '"'\''`' | head -n 1 || date +%Y%m%d)
+          
+          curl -L --retry 3 --retry-delay 2 -o geoip.db https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db
+          curl -L --retry 3 --retry-delay 2 -o geosite.db https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db
+          curl -L --retry 3 --retry-delay 2 -o geosite-cn.srs https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs
+          
+          sha256sum *.* > sha256sums.txt
+          echo "${{ matrix.branch_info.sha }}" > commit.txt
+          
+          if [ "${{ matrix.branch_info.rolling }}" == "true" ]; then
+            echo "REL_TAG=${{ matrix.branch_info.tag }}" >> $GITHUB_ENV
+            echo "REL_NAME=${{ matrix.branch_info.title }} (Rolling)" >> $GITHUB_ENV
+          else
+            echo "REL_TAG=v${APP_VER}-${{ matrix.branch_info.title }}" >> $GITHUB_ENV
+            echo "REL_NAME=v${APP_VER} | ${{ matrix.branch_info.title }}" >> $GITHUB_ENV
+          fi
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.REL_TAG }}
+          name: ${{ env.REL_NAME }}
+          target_commitish: ${{ matrix.branch_info.sha }}
+          prerelease: ${{ matrix.branch_info.rolling }}
+          make_latest: ${{ matrix.branch_info.rolling == false && 'true' || 'false' }}
+          files: release_assets/*
+          body: |
+            ## 🚀 sing-box Core (${{ matrix.branch_info.title }})
+            
+            > 🤖 自動同步上游源碼構建 | 包含完整 Build Provenance 安全認證
+            
+            ${{ env.CHANGELOG }}
+            
+            ### 📦 構建矩陣與資源
+            - **版本風味**: `full` (全功能含 WireGuard) / `lite` (輕量版)
+            - **開箱即用**: 內附 `config.json`, `geoip.db`, `geosite.db`, `geosite-cn.srs`
+            - **UPX 壓縮**: 針對 MIPS/ARM 等路由器架構獨立提供 `-upx` 標識檔
