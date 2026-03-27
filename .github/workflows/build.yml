@@ -13,6 +13,9 @@ on:
   repository_dispatch:
     types: [upstream_sync]
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -79,19 +82,21 @@ jobs:
       fail-fast: false
       matrix:
         branch_info: ${{ fromJson(needs.prepare.outputs.matrix).include }}
+        flavor: [lite, full]
         target:
-          - { os: linux, arch: amd64, amd: v3 }
-          - { os: linux, arch: amd64, amd: v1 }
-          - { os: linux, arch: arm64 }
-          - { os: linux, arch: arm, arm: 7 }
-          - { os: windows, arch: amd64, amd: v3 }
-          - { os: windows, arch: amd64, amd: v1 }
-          - { os: windows, arch: arm64 }
-          - { os: darwin, arch: amd64, amd: v3 }
-          - { os: darwin, arch: amd64, amd: v1 }
-          - { os: darwin, arch: arm64 }
-          - { os: android, arch: arm64 }
-          - { os: android, arch: amd64 }
+          - { os: linux, arch: amd64, amd: v3, upx: false }
+          - { os: linux, arch: arm64, upx: false }
+          - { os: linux, arch: arm, arm: 5, upx: true }
+          - { os: linux, arch: arm, arm: 6, upx: true }
+          - { os: linux, arch: arm, arm: 7, upx: true }
+          - { os: linux, arch: mipsle, mips: softfloat, upx: true }
+          - { os: linux, arch: s390x, upx: false }
+          - { os: windows, arch: amd64, amd: v3, upx: false }
+          - { os: darwin, arch: amd64, upx: false }
+          - { os: darwin, arch: arm64, upx: false }
+          - { os: android, arch: arm64, upx: false }
+          - { os: freebsd, arch: amd64, upx: false }
+          - { os: freebsd, arch: arm64, upx: false }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -100,7 +105,7 @@ jobs:
           fetch-depth: 0
 
       - name: Prepare Cache Key
-        run: echo "${{ matrix.target.os }}-${{ matrix.target.arch }}-${{ matrix.target.amd }}" > .cache-key
+        run: echo "${{ matrix.target.os }}-${{ matrix.target.arch }}-${{ matrix.flavor }}" > .cache-key
 
       - uses: actions/setup-go@v5
         with:
@@ -109,6 +114,11 @@ jobs:
             go.sum
             .cache-key
 
+      - uses: crazy-max/ghaction-upx@v3
+        if: matrix.target.upx == true
+        with:
+          install-only: true
+
       - name: Build
         run: |
           export GOOS=${{ matrix.target.os }}
@@ -116,19 +126,28 @@ jobs:
           export CGO_ENABLED=0
           
           SUF=""
-          if [ -n "${{ matrix.target.amd }}" ] && [ "${{ matrix.target.amd }}" != "v1" ]; then export GOAMD64="${{ matrix.target.amd }}"; SUF="${{ matrix.target.amd }}"; fi
+          if [ -n "${{ matrix.target.amd }}" ]; then export GOAMD64="${{ matrix.target.amd }}"; SUF="v${{ matrix.target.amd }}"; fi
           if [ -n "${{ matrix.target.arm }}" ]; then export GOARM="${{ matrix.target.arm }}"; SUF="v${{ matrix.target.arm }}"; fi
+          if [ -n "${{ matrix.target.mips }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; SUF="-${{ matrix.target.mips }}"; fi
 
           APP_VER=$(git describe --tags --always --abbrev=0 2>/dev/null | sed 's/^v//' | tr -d '"'\''`' | head -n 1 || date +%Y%m%d)
-          NAME="sing-box-${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${SUF}"
+          
+          UPX_LABEL=$([ "${{ matrix.target.upx }}" == "true" ] && echo "-upx" || echo "")
+          NAME="sing-box-${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${SUF}-${{ matrix.flavor }}${UPX_LABEL}"
           
           if [ "${{ matrix.target.os }}" == "windows" ]; then BIN="sing-box.exe"; else BIN="sing-box"; fi
           
-          TAGS="with_gvisor,with_quic,with_utls,with_acme,with_clash_api,with_v2ray_api,with_wireguard,with_ech,with_reality"
-          LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.branch_info.sha }}"
+          if [ "${{ matrix.flavor }}" == "lite" ]; then
+            TAGS="with_quic,with_utls,with_clash_api"
+          else
+            TAGS="with_gvisor,with_quic,with_utls,with_acme,with_clash_api,with_v2ray_api,with_wireguard"
+          fi
           
+          LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.branch_info.sha }}"
           go build -trimpath -ldflags "$LDFLAGS" -tags "$TAGS" -o "$BIN" ./cmd/sing-box
           chmod +x "$BIN"
+          
+          if [ "${{ matrix.target.upx }}" == "true" ]; then upx --lzma --best "$BIN" || true; fi
           
           cat << 'EOF' > config.json
           { "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }
@@ -145,7 +164,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: bin-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd }}${{ matrix.target.arm }}
+          name: bin-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd }}${{ matrix.target.arm }}${{ matrix.target.mips }}-${{ matrix.flavor }}
           path: output/*
 
   release:
@@ -217,6 +236,7 @@ jobs:
             
             ${{ env.CHANGELOG }}
             
-            ### 📦 構建資源清單
-            - 內附 `config.json`, `geoip.db`, `geosite.db`, `geosite-cn.srs` 規則文件
-            - 已啟用編譯標籤：`with_quic`, `with_utls`, `with_reality`, `with_wireguard`, `with_clash_api` 等完整特性
+            ### 📦 構建矩陣與資源
+            - **版本風味**: `full` (全功能含 WireGuard) / `lite` (輕量版)
+            - **開箱即用**: 內附 `config.json`, `geoip.db`, `geosite.db`, `geosite-cn.srs`
+            - **UPX 壓縮**: 針對 MIPS/ARM 等路由器架構獨立提供 `-upx` 標識檔
