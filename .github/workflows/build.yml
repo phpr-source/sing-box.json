@@ -192,16 +192,23 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
       - name: Build Android APK
         run: |
           set -euo pipefail
           
+          export PATH=$PATH:$(go env GOPATH)/bin
           go install golang.org/x/mobile/cmd/gomobile@latest
-          gomobile init
+          go install golang.org/x/mobile/cmd/gobind@latest
+          gomobile init || true
           
-          make lib_android || true
-          make lib_android_legacy || true
+          if grep -q "^lib_android:" Makefile; then
+            make lib_android
+          fi
+          
+          if grep -q "^lib_android_legacy:" Makefile; then
+            make lib_android_legacy
+          fi
           
           APP_VER="${{ matrix.branch_info.app_ver }}"
           mkdir -p output
