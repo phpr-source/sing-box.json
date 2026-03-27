@@ -169,6 +169,7 @@ jobs:
     if: needs.prepare.outputs.has_builds == 'true'
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         branch_info: ${{ fromJson(needs.prepare.outputs.matrix).include }}
     steps:
@@ -222,7 +223,6 @@ jobs:
         with:
           tag_name: ${{ env.REL_TAG }}
           name: ${{ env.REL_NAME }}
-          target_commitish: ${{ matrix.branch_info.sha }}
           prerelease: ${{ matrix.branch_info.rolling }}
           make_latest: ${{ matrix.branch_info.rolling == false && 'true' || 'false' }}
           files: release_assets/*
