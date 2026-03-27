@@ -1,12 +1,12 @@
-name: Build sing-box reFind
+name: Build sing-box Core & SFA
 
 on:
   workflow_dispatch:
     inputs:
       branch:
-        description: 'Target branch (Select "all" for full sync)'
+        description: 'Target version (Select "all" for full sync)'
         type: choice
-        options: ['all', 'reF1nd-testing', 'reF1nd-stable', 'reF1nd-oldstable']
+        options: ['all', 'reF1nd-Testing', 'reF1nd-Stable', 'Official-Alpha', 'Official-Stable']
         default: 'all'
   schedule:
     - cron: '0 */4 * * *'
@@ -37,44 +37,39 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT: ${{ github.event_name }}
           IN_BRANCH: ${{ github.event.inputs.branch }}
-          PAYLOAD_BRANCH: ${{ github.event.client_payload.branch }}
         run: |
           set -euo pipefail
-
-          BRANCHES=("reF1nd-testing|singbox-testing|Testing|true" "reF1nd-stable|stable|Stable|false" "reF1nd-oldstable|oldstable|OldStable|false")
+          TARGETS=(
+            "reF1nd/sing-box|reF1nd-testing|ref1nd-test|reF1nd-Testing|true"
+            "reF1nd/sing-box|reF1nd-stable|ref1nd-stable|reF1nd-Stable|false"
+            "SagerNet/sing-box|main|singbox-alpha|Official-Alpha|true"
+            "SagerNet/sing-box|dev-next|singbox-stable|Official-Stable|false"
+          )
           JSON="[]"
           HAS="false"
-          
-          for e in "${BRANCHES[@]}"; do
-            IFS='|' read -r BR TAG TIT ROLLING <<< "$e"
-            
-            if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ] && [ "$IN_BRANCH" != "$BR" ]; then continue; fi
-            if [ "$EVENT" = "repository_dispatch" ] && [ -n "${PAYLOAD_BRANCH:-}" ] && [ "$PAYLOAD_BRANCH" != "$BR" ]; then continue; fi
-            
-            SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git "refs/heads/$BR" | awk '{print $1}')
+          for e in "${TARGETS[@]}"; do
+            IFS='|' read -r REPO BR TAG TIT ROLLING <<< "$e"
+            if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ] && [ "$IN_BRANCH" != "$TIT" ]; then continue; fi
+            SHA=$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$BR" | awk '{print $1}')
             [ -z "$SHA" ] && continue
-
             TMPDIR="$(mktemp -d)"
-            git clone --bare --filter=blob:none https://github.com/reF1nd/sing-box.git "$TMPDIR"
+            git clone --bare --filter=blob:none "https://github.com/${REPO}.git" "$TMPDIR"
             APP_VER=$(git --git-dir="$TMPDIR" describe --tags --abbrev=0 "$SHA" 2>/dev/null | sed 's/^v//' || true)
             rm -rf "$TMPDIR"
-            
             [ -z "${APP_VER:-}" ] && APP_VER="${SHA:0:8}"
-            
             if [ "$ROLLING" = "true" ]; then
               CHK_TAG="$TAG"
             else
               CHK_TAG=$(gh release list --limit 4000 --exclude-drafts --repo ${{ github.repository }} --json tagName,name --jq ".[] | select(.name | endswith(\" | $TIT\")) | .tagName" | head -n 1 || true)
             fi
-            
             L_SHA="none"
             if [ -n "${CHK_TAG:-}" ] && gh release view "$CHK_TAG" --repo ${{ github.repository }} &>/dev/null; then
               L_SHA=$(gh release download "$CHK_TAG" --pattern commit.txt --repo ${{ github.repository }} -O - 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)
               [ -z "$L_SHA" ] && L_SHA="none"
             fi
-            
             if [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "repository_dispatch" ] || [ "$SHA" != "$L_SHA" ] || [ "$L_SHA" = "none" ]; then
               JSON=$(echo "$JSON" | jq -c \
+                --arg repo "$REPO" \
                 --arg branch "$BR" \
                 --arg tag "$TAG" \
                 --arg title "$TIT" \
@@ -82,15 +77,14 @@ jobs:
                 --arg sha "$SHA" \
                 --arg local_sha "$L_SHA" \
                 --arg app_ver "$APP_VER" \
-                '. += [{"branch": $branch, "tag": $tag, "title": $title, "rolling": $rolling, "sha": $sha, "local_sha": $local_sha, "app_ver": $app_ver}]')
+                '. += [{"repo": $repo, "branch": $branch, "tag": $tag, "title": $title, "rolling": $rolling, "sha": $sha, "local_sha": $local_sha, "app_ver": $app_ver}]')
               HAS="true"
             fi
           done
-          
           echo "matrix={\"include\":$JSON}" >> "$GITHUB_OUTPUT"
           echo "has_builds=$HAS" >> "$GITHUB_OUTPUT"
 
-  build:
+  build_core:
     needs: prepare
     if: needs.prepare.outputs.has_builds == 'true'
     runs-on: ubuntu-latest
@@ -98,96 +92,76 @@ jobs:
       fail-fast: false
       matrix:
         branch_info: ${{ fromJson(needs.prepare.outputs.matrix).include }}
-        flavor: [lite, full]
         target:
-          - { os: linux, arch: amd64, amd: v3, upx: false }
-          - { os: linux, arch: arm64, upx: false }
-          - { os: linux, arch: arm, arm: 5, upx: true }
-          - { os: linux, arch: arm, arm: 6, upx: true }
-          - { os: linux, arch: arm, arm: 7, upx: true }
-          - { os: linux, arch: mipsle, mips: softfloat, upx: true }
-          - { os: linux, arch: s390x, upx: false }
-          - { os: windows, arch: amd64, amd: v3, upx: false }
-          - { os: darwin, arch: amd64, upx: false }
-          - { os: darwin, arch: arm64, upx: false }
-          - { os: android, arch: arm64, upx: false }
-          - { os: freebsd, arch: amd64, upx: false }
-          - { os: freebsd, arch: arm64, upx: false }
+          - { os: linux, arch: amd64, amd: v3, flavor: full, upx: false }
+          - { os: linux, arch: amd64, flavor: full, upx: false }
+          - { os: linux, arch: arm64, flavor: full, upx: false }
+          - { os: linux, arch: arm, arm: 7, flavor: full, upx: true }
+          - { os: linux, arch: arm, arm: 5, flavor: lite, upx: true }
+          - { os: linux, arch: mipsle, flavor: lite, upx: true }
+          - { os: linux, arch: mipsle, mips: softfloat, flavor: lite, upx: true }
+          - { os: windows, arch: amd64, amd: v3, flavor: full, upx: false }
+          - { os: windows, arch: amd64, flavor: full, upx: false }
+          - { os: darwin, arch: amd64, flavor: full, upx: false }
+          - { os: darwin, arch: arm64, flavor: full, upx: false }
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: reF1nd/sing-box
+          repository: ${{ matrix.branch_info.repo }}
           ref: ${{ matrix.branch_info.branch }}
           fetch-depth: 0
-
       - name: Prepare Cache Key
-        run: |
-          set -euo pipefail
-          echo '${{ toJSON(matrix.target) }}-${{ matrix.flavor }}' > .cache-key
-
+        run: echo '${{ toJSON(matrix.target) }}' > .cache-key
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
           cache-dependency-path: |
             go.sum
             .cache-key
-
       - uses: crazy-max/ghaction-upx@v3
         if: matrix.target.upx == true
         with:
           install-only: true
-
-      - name: Build
+      - name: Build Core
         run: |
           set -euo pipefail
           export GOOS=${{ matrix.target.os }}
           export GOARCH=${{ matrix.target.arch }}
           export CGO_ENABLED=0
-          
           SUF=""
-          if [ -n "${{ matrix.target.amd || '' }}" ]; then export GOAMD64="${{ matrix.target.amd }}"; SUF="${{ matrix.target.amd }}"; fi
+          if [ -n "${{ matrix.target.amd || '' }}" ]; then export GOAMD64="${{ matrix.target.amd }}"; SUF="v${{ matrix.target.amd }}"; fi
           if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; SUF="v${{ matrix.target.arm }}"; fi
           if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; SUF="-${{ matrix.target.mips }}"; fi
-
           APP_VER="${{ matrix.branch_info.app_ver }}"
-          
-          if [ "${{ matrix.flavor }}" = "lite" ]; then
+          if [ "${{ matrix.target.flavor }}" = "lite" ]; then
             TAGS="with_quic,with_utls,with_clash_api"
           else
             TAGS="with_gvisor,with_quic,with_utls,with_acme,with_clash_api,with_v2ray_api,with_wireguard"
           fi
-          
           UPX_LABEL=$([ "${{ matrix.target.upx }}" = "true" ] && echo "-upx" || echo "")
-          NAME="sing-box-${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${SUF}-${{ matrix.flavor }}${UPX_LABEL}"
-          
+          NAME="sing-box-${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${SUF}-${{ matrix.target.flavor }}${UPX_LABEL}"
           if [ "${{ matrix.target.os }}" = "windows" ]; then BIN="sing-box.exe"; else BIN="sing-box"; fi
-          
           LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.branch_info.sha }}"
           go build -trimpath -ldflags "$LDFLAGS" -tags "$TAGS" -o "$BIN" ./cmd/sing-box
           chmod +x "$BIN"
-          
           if [ "${{ matrix.target.upx }}" = "true" ]; then upx --lzma --best "$BIN" || true; fi
-          
-          cat << 'EOF' > config.json
-          { "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }
-          EOF
-          
-          mkdir "$NAME" && mv "$BIN" "$NAME/" && mv config.json "$NAME/"
           mkdir output
-          if [ "${{ matrix.target.os }}" = "windows" ]; then zip -9 -r -q "output/${NAME}.zip" "$NAME"; else tar -czf "output/${NAME}.tar.gz" "$NAME"; fi
-
-      - name: Attest Build Provenance
-        uses: actions/attest-build-provenance@v2
+          if [ "${{ matrix.target.os }}" = "windows" ]; then 
+            zip -9 -q "output/${NAME}.zip" "$BIN"
+          else 
+            tar -czf "output/${NAME}.tar.gz" "$BIN"
+          fi
+          if [ "${{ matrix.target.upx }}" = "true" ]; then cp "$BIN" "output/${NAME}.upx"; fi
+      - uses: actions/attest-build-provenance@v2
         with:
           subject-path: 'output/*'
-
       - uses: actions/upload-artifact@v4
         with:
-          name: bin-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd || '' }}${{ matrix.target.arm != '' && format('v{0}', matrix.target.arm) || '' }}${{ matrix.target.mips != '' && format('-{0}', matrix.target.mips) || '' }}-${{ matrix.flavor }}
+          name: bin-${{ matrix.branch_info.branch }}-core-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd || '' }}${{ matrix.target.arm != '' && format('v{0}', matrix.target.arm) || '' }}${{ matrix.target.mips != '' && format('-{0}', matrix.target.mips) || '' }}-${{ matrix.target.flavor }}
           path: output/*
 
-  release:
-    needs: [prepare, build]
+  build_android:
+    needs: prepare
     if: needs.prepare.outputs.has_builds == 'true'
     runs-on: ubuntu-latest
     strategy:
@@ -197,46 +171,82 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: reF1nd/sing-box
+          repository: ${{ matrix.branch_info.repo }}
           ref: ${{ matrix.branch_info.branch }}
           fetch-depth: 0
+          path: core
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - name: Build Android APK
+        run: |
+          set -euo pipefail
+          git clone --recursive https://github.com/SagerNet/sing-box-for-android.git sfa
+          cd sfa
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          go mod edit -replace github.com/sagernet/sing-box=../core
+          go mod tidy
+          ./gradlew assembleRelease
+          APP_VER="${{ matrix.branch_info.app_ver }}"
+          mkdir ../output
+          find app/build/outputs/apk/release/ -name "*.apk" -exec cp {} ../output/SFA-${APP_VER}-${{ matrix.branch_info.branch }}-universal.apk \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.branch_info.branch }}-android-apk
+          path: output/*.apk
+          if-no-files-found: ignore
 
+  release:
+    needs: [prepare, build_core, build_android]
+    if: needs.prepare.outputs.has_builds == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        branch_info: ${{ fromJson(needs.prepare.outputs.matrix).include }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.branch_info.repo }}
+          ref: ${{ matrix.branch_info.branch }}
+          fetch-depth: 0
       - name: Generate Smart Changelog
         run: |
           set -euo pipefail
           LOG_RAW=$(git log --pretty=format:"- %s (%h)" ${{ matrix.branch_info.local_sha }}..${{ matrix.branch_info.sha }} 2>/dev/null || git log --pretty=format:"- %s (%h)" -n 10 ${{ matrix.branch_info.sha }})
-          
           FEAT=$(echo "$LOG_RAW" | grep -iE '^-\s*(feat|add|new|support)\b' || true)
           FIX=$(echo "$LOG_RAW" | grep -iE '^-\s*(fix|bug|patch)\b' || true)
           OTHER=$(echo "$LOG_RAW" | grep -v -iE '^-\s*(feat|add|new|support|fix|bug|patch)\b' || true)
-          
           {
             echo "CHANGELOG<<EOF"
-            [ -n "$FEAT" ] && echo "### ✨ Features" && echo "$FEAT"
-            [ -n "$FIX" ] && echo "### 🐛 Bug Fixes" && echo "$FIX"
-            [ -n "$OTHER" ] && echo "### 🔄 Other Changes" && echo "$OTHER"
+            [ -n "$FEAT" ] && echo "### Features" && echo "$FEAT"
+            [ -n "$FIX" ] && echo "### Bug Fixes" && echo "$FIX"
+            [ -n "$OTHER" ] && echo "### Other Changes" && echo "$OTHER"
             echo "EOF"
           } >> "$GITHUB_ENV"
-
       - uses: actions/download-artifact@v4
         with:
           pattern: bin-${{ matrix.branch_info.branch }}-*
           merge-multiple: true
           path: release_assets
-
       - name: Prepare Assets & Determine Tag
         run: |
           set -euo pipefail
           cd release_assets
           APP_VER="${{ matrix.branch_info.app_ver }}"
-          
+          curl -L --retry 3 --retry-delay 2 -o Dashboard-metacubexd.zip https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip
+          curl -L --retry 3 --retry-delay 2 -o Dashboard-yacd.zip https://github.com/haishanh/yacd/archive/refs/heads/gh-pages.zip
           curl -L --retry 3 --retry-delay 2 -o geoip.db https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db
           curl -L --retry 3 --retry-delay 2 -o geosite.db https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db
-          curl -L --retry 3 --retry-delay 2 -o geosite-cn.srs https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs
-          
+          cat << 'EOF' > config.json
+          { "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }
+          EOF
           echo "${{ matrix.branch_info.sha }}" > commit.txt
           find . -maxdepth 1 -type f -print0 | xargs -0 sha256sum > sha256sums.txt
-          
           if [ "${{ matrix.branch_info.rolling }}" = "true" ]; then
             echo "REL_TAG=${{ matrix.branch_info.tag }}" >> "$GITHUB_ENV"
             echo "REL_NAME=${{ matrix.branch_info.title }} (Rolling)" >> "$GITHUB_ENV"
@@ -244,7 +254,6 @@ jobs:
             echo "REL_TAG=v${APP_VER}-${{ matrix.branch_info.title }}" >> "$GITHUB_ENV"
             echo "REL_NAME=v${APP_VER} | ${{ matrix.branch_info.title }}" >> "$GITHUB_ENV"
           fi
-
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
@@ -254,13 +263,6 @@ jobs:
           make_latest: ${{ matrix.branch_info.rolling == false && 'true' || 'false' }}
           files: release_assets/*
           body: |
-            ## 🚀 sing-box Core (${{ matrix.branch_info.title }})
-            
-            > 🤖 自動同步上游源碼構建 | 包含完整 Build Provenance 安全認證
+            ## sing-box Core & SFA (${{ matrix.branch_info.title }})
             
             ${{ env.CHANGELOG }}
-            
-            ### 📦 構建矩陣與資源
-            - **版本風味**: `full` (全功能含 WireGuard) / `lite` (輕量版)
-            - **開箱即用**: 內附 `config.json`, `geoip.db`, `geosite.db`, `geosite-cn.srs`
-            - **UPX 壓縮**: 針對 MIPS/ARM 等路由器架構獨立提供 `-upx` 標識檔
