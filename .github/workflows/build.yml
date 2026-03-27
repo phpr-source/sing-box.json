@@ -39,6 +39,8 @@ jobs:
           IN_BRANCH: ${{ github.event.inputs.branch }}
           PAYLOAD_BRANCH: ${{ github.event.client_payload.branch }}
         run: |
+          set -euo pipefail
+
           BRANCHES=("reF1nd-testing|singbox-testing|Testing|true" "reF1nd-stable|stable|Stable|false" "reF1nd-oldstable|oldstable|OldStable|false")
           JSON="[]"
           HAS="false"
@@ -46,33 +48,47 @@ jobs:
           for e in "${BRANCHES[@]}"; do
             IFS='|' read -r BR TAG TIT ROLLING <<< "$e"
             
-            if [ "$EVENT" == "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ] && [ "$IN_BRANCH" != "$BR" ]; then continue; fi
-            if [ "$EVENT" == "repository_dispatch" ] && [ -n "$PAYLOAD_BRANCH" ] && [ "$PAYLOAD_BRANCH" != "$BR" ]; then continue; fi
+            if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ] && [ "$IN_BRANCH" != "$BR" ]; then continue; fi
+            if [ "$EVENT" = "repository_dispatch" ] && [ -n "${PAYLOAD_BRANCH:-}" ] && [ "$PAYLOAD_BRANCH" != "$BR" ]; then continue; fi
             
-            SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/$BR | awk '{print $1}')
+            SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git "refs/heads/$BR" | awk '{print $1}')
+            [ -z "$SHA" ] && continue
+
+            TMPDIR="$(mktemp -d)"
+            git clone --bare --filter=blob:none https://github.com/reF1nd/sing-box.git "$TMPDIR"
+            APP_VER=$(git --git-dir="$TMPDIR" describe --tags --abbrev=0 "$SHA" 2>/dev/null | sed 's/^v//' || true)
+            rm -rf "$TMPDIR"
             
-            CHK_TAG=""
-            if [ "$ROLLING" == "true" ]; then
+            [ -z "${APP_VER:-}" ] && APP_VER="${SHA:0:8}"
+            
+            if [ "$ROLLING" = "true" ]; then
               CHK_TAG="$TAG"
             else
-              CHK_TAG=$(gh release list --limit 100 --repo ${{ github.repository }} --json tagName,name --jq ".[] | select(.name | endswith(\" | $TIT\")) | .tagName" | head -n 1)
+              CHK_TAG=$(gh release list --limit 4000 --exclude-drafts --repo ${{ github.repository }} --json tagName,name --jq ".[] | select(.name | endswith(\" | $TIT\")) | .tagName" | head -n 1 || true)
             fi
             
             L_SHA="none"
-            if [ -n "$CHK_TAG" ] && gh release view "$CHK_TAG" --repo ${{ github.repository }} &>/dev/null; then
-              L_SHA=$(gh release download "$CHK_TAG" --pattern commit.txt --repo ${{ github.repository }} -O - 2>/dev/null | head -n 1 | tr -d '[:space:]')
+            if [ -n "${CHK_TAG:-}" ] && gh release view "$CHK_TAG" --repo ${{ github.repository }} &>/dev/null; then
+              L_SHA=$(gh release download "$CHK_TAG" --pattern commit.txt --repo ${{ github.repository }} -O - 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)
               [ -z "$L_SHA" ] && L_SHA="none"
             fi
             
-            if [ "$EVENT" == "workflow_dispatch" ] || [ "$EVENT" == "repository_dispatch" ] || [ "$SHA" != "$L_SHA" ] || [ "$L_SHA" == "none" ]; then
-              JSON=$(echo "$JSON" | jq -c --arg branch "$BR" --arg tag "$TAG" --arg title "$TIT" --argjson rolling "$ROLLING" --arg sha "$SHA" --arg local_sha "$L_SHA" '. += [{"branch": $branch, "tag": $tag, "title": $title, "rolling": $rolling, "sha": $sha, "local_sha": $local_sha}]')
+            if [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "repository_dispatch" ] || [ "$SHA" != "$L_SHA" ] || [ "$L_SHA" = "none" ]; then
+              JSON=$(echo "$JSON" | jq -c \
+                --arg branch "$BR" \
+                --arg tag "$TAG" \
+                --arg title "$TIT" \
+                --argjson rolling "$ROLLING" \
+                --arg sha "$SHA" \
+                --arg local_sha "$L_SHA" \
+                --arg app_ver "$APP_VER" \
+                '. += [{"branch": $branch, "tag": $tag, "title": $title, "rolling": $rolling, "sha": $sha, "local_sha": $local_sha, "app_ver": $app_ver}]')
               HAS="true"
             fi
           done
           
-          if [ "$JSON" == "[]" ]; then HAS="false"; fi
-          echo "matrix={\"include\":$JSON}" >> $GITHUB_OUTPUT
-          echo "has_builds=$HAS" >> $GITHUB_OUTPUT
+          echo "matrix={\"include\":$JSON}" >> "$GITHUB_OUTPUT"
+          echo "has_builds=$HAS" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
@@ -105,7 +121,9 @@ jobs:
           fetch-depth: 0
 
       - name: Prepare Cache Key
-        run: echo "${{ matrix.target.os }}-${{ matrix.target.arch }}-${{ matrix.flavor }}" > .cache-key
+        run: |
+          set -euo pipefail
+          echo '${{ toJSON(matrix.target) }}-${{ matrix.flavor }}' > .cache-key
 
       - uses: actions/setup-go@v5
         with:
@@ -121,33 +139,34 @@ jobs:
 
       - name: Build
         run: |
+          set -euo pipefail
           export GOOS=${{ matrix.target.os }}
           export GOARCH=${{ matrix.target.arch }}
           export CGO_ENABLED=0
           
           SUF=""
-          if [ -n "${{ matrix.target.amd }}" ]; then export GOAMD64="${{ matrix.target.amd }}"; SUF="v${{ matrix.target.amd }}"; fi
-          if [ -n "${{ matrix.target.arm }}" ]; then export GOARM="${{ matrix.target.arm }}"; SUF="v${{ matrix.target.arm }}"; fi
-          if [ -n "${{ matrix.target.mips }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; SUF="-${{ matrix.target.mips }}"; fi
+          if [ -n "${{ matrix.target.amd || '' }}" ]; then export GOAMD64="${{ matrix.target.amd }}"; SUF="${{ matrix.target.amd }}"; fi
+          if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; SUF="v${{ matrix.target.arm }}"; fi
+          if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; SUF="-${{ matrix.target.mips }}"; fi
 
-          APP_VER=$(git describe --tags --always --abbrev=0 2>/dev/null | sed 's/^v//' | tr -d '"'\''`' | head -n 1 || date +%Y%m%d)
+          APP_VER="${{ matrix.branch_info.app_ver }}"
           
-          UPX_LABEL=$([ "${{ matrix.target.upx }}" == "true" ] && echo "-upx" || echo "")
-          NAME="sing-box-${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${SUF}-${{ matrix.flavor }}${UPX_LABEL}"
-          
-          if [ "${{ matrix.target.os }}" == "windows" ]; then BIN="sing-box.exe"; else BIN="sing-box"; fi
-          
-          if [ "${{ matrix.flavor }}" == "lite" ]; then
+          if [ "${{ matrix.flavor }}" = "lite" ]; then
             TAGS="with_quic,with_utls,with_clash_api"
           else
             TAGS="with_gvisor,with_quic,with_utls,with_acme,with_clash_api,with_v2ray_api,with_wireguard"
           fi
           
+          UPX_LABEL=$([ "${{ matrix.target.upx }}" = "true" ] && echo "-upx" || echo "")
+          NAME="sing-box-${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${SUF}-${{ matrix.flavor }}${UPX_LABEL}"
+          
+          if [ "${{ matrix.target.os }}" = "windows" ]; then BIN="sing-box.exe"; else BIN="sing-box"; fi
+          
           LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.branch_info.sha }}"
           go build -trimpath -ldflags "$LDFLAGS" -tags "$TAGS" -o "$BIN" ./cmd/sing-box
           chmod +x "$BIN"
           
-          if [ "${{ matrix.target.upx }}" == "true" ]; then upx --lzma --best "$BIN" || true; fi
+          if [ "${{ matrix.target.upx }}" = "true" ]; then upx --lzma --best "$BIN" || true; fi
           
           cat << 'EOF' > config.json
           { "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }
@@ -155,7 +174,7 @@ jobs:
           
           mkdir "$NAME" && mv "$BIN" "$NAME/" && mv config.json "$NAME/"
           mkdir output
-          if [ "${{ matrix.target.os }}" == "windows" ]; then zip -9 -r -q "output/${NAME}.zip" "$NAME"; else tar -czf "output/${NAME}.tar.gz" "$NAME"; fi
+          if [ "${{ matrix.target.os }}" = "windows" ]; then zip -9 -r -q "output/${NAME}.zip" "$NAME"; else tar -czf "output/${NAME}.tar.gz" "$NAME"; fi
 
       - name: Attest Build Provenance
         uses: actions/attest-build-provenance@v2
@@ -164,7 +183,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: bin-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd }}${{ matrix.target.arm }}${{ matrix.target.mips }}-${{ matrix.flavor }}
+          name: bin-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd || '' }}${{ matrix.target.arm != '' && format('v{0}', matrix.target.arm) || '' }}${{ matrix.target.mips != '' && format('-{0}', matrix.target.mips) || '' }}-${{ matrix.flavor }}
           path: output/*
 
   release:
@@ -184,16 +203,20 @@ jobs:
 
       - name: Generate Smart Changelog
         run: |
+          set -euo pipefail
           LOG_RAW=$(git log --pretty=format:"- %s (%h)" ${{ matrix.branch_info.local_sha }}..${{ matrix.branch_info.sha }} 2>/dev/null || git log --pretty=format:"- %s (%h)" -n 10 ${{ matrix.branch_info.sha }})
-          FEAT=$(echo "$LOG_RAW" | grep -iE 'feat|add|new|support' || true)
-          FIX=$(echo "$LOG_RAW" | grep -iE 'fix|bug|patch' || true)
-          OTHER=$(echo "$LOG_RAW" | grep -v -iE 'feat|add|new|support|fix|bug|patch' || true)
           
-          echo "CHANGELOG<<EOF" >> $GITHUB_ENV
-          [ -n "$FEAT" ] && echo "### ✨ Features" >> $GITHUB_ENV && echo "$FEAT" >> $GITHUB_ENV
-          [ -n "$FIX" ] && echo "### 🐛 Bug Fixes" >> $GITHUB_ENV && echo "$FIX" >> $GITHUB_ENV
-          [ -n "$OTHER" ] && echo "### 🔄 Other Changes" >> $GITHUB_ENV && echo "$OTHER" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          FEAT=$(echo "$LOG_RAW" | grep -iE '^-\s*(feat|add|new|support)\b' || true)
+          FIX=$(echo "$LOG_RAW" | grep -iE '^-\s*(fix|bug|patch)\b' || true)
+          OTHER=$(echo "$LOG_RAW" | grep -v -iE '^-\s*(feat|add|new|support|fix|bug|patch)\b' || true)
+          
+          {
+            echo "CHANGELOG<<EOF"
+            [ -n "$FEAT" ] && echo "### ✨ Features" && echo "$FEAT"
+            [ -n "$FIX" ] && echo "### 🐛 Bug Fixes" && echo "$FIX"
+            [ -n "$OTHER" ] && echo "### 🔄 Other Changes" && echo "$OTHER"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@v4
         with:
@@ -203,22 +226,23 @@ jobs:
 
       - name: Prepare Assets & Determine Tag
         run: |
+          set -euo pipefail
           cd release_assets
-          APP_VER=$(git describe --tags --always --abbrev=0 2>/dev/null | sed 's/^v//' | tr -d '"'\''`' | head -n 1 || date +%Y%m%d)
+          APP_VER="${{ matrix.branch_info.app_ver }}"
           
           curl -L --retry 3 --retry-delay 2 -o geoip.db https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db
           curl -L --retry 3 --retry-delay 2 -o geosite.db https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db
           curl -L --retry 3 --retry-delay 2 -o geosite-cn.srs https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs
           
-          sha256sum *.* > sha256sums.txt
           echo "${{ matrix.branch_info.sha }}" > commit.txt
+          find . -maxdepth 1 -type f -print0 | xargs -0 sha256sum > sha256sums.txt
           
-          if [ "${{ matrix.branch_info.rolling }}" == "true" ]; then
-            echo "REL_TAG=${{ matrix.branch_info.tag }}" >> $GITHUB_ENV
-            echo "REL_NAME=${{ matrix.branch_info.title }} (Rolling)" >> $GITHUB_ENV
+          if [ "${{ matrix.branch_info.rolling }}" = "true" ]; then
+            echo "REL_TAG=${{ matrix.branch_info.tag }}" >> "$GITHUB_ENV"
+            echo "REL_NAME=${{ matrix.branch_info.title }} (Rolling)" >> "$GITHUB_ENV"
           else
-            echo "REL_TAG=v${APP_VER}-${{ matrix.branch_info.title }}" >> $GITHUB_ENV
-            echo "REL_NAME=v${APP_VER} | ${{ matrix.branch_info.title }}" >> $GITHUB_ENV
+            echo "REL_TAG=v${APP_VER}-${{ matrix.branch_info.title }}" >> "$GITHUB_ENV"
+            echo "REL_NAME=v${APP_VER} | ${{ matrix.branch_info.title }}" >> "$GITHUB_ENV"
           fi
 
       - name: Publish Release
