@@ -284,7 +284,8 @@ jobs:
           
           keytool -genkey -v -keystore ci-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias release -storepass password -keypass password -dname "CN=sing-box,O=CI,C=US"
           
-          if ! ./gradlew assembleRelease \
+          # 極致優化：關閉 daemon、跳過 Lint、並僅編譯 Play Flavor 以節省大量構建時間
+          if ! ./gradlew assemblePlayRelease --no-daemon -x lint \
             -Pandroid.injected.signing.store.file=$(pwd)/ci-release.jks \
             -Pandroid.injected.signing.store.password=password \
             -Pandroid.injected.signing.key.alias=release \
@@ -295,7 +296,6 @@ jobs:
           
           APP_VER="${{ matrix.branch_info.app_ver }}"
           
-          # 動態遞迴提取 APK，完美兼容所有 Product Flavors 嵌套目錄
           TARGET_APK=""
           APK_FALLBACK=""
           while IFS= read -r apk; do
