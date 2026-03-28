@@ -245,7 +245,7 @@ jobs:
           repository: SagerNet/sing-box-for-android
           ref: ${{ needs.prepare.outputs.sfa_sha }}
           submodules: recursive
-          path: sing-box-for-android
+          path: core/clients/android
 
       - uses: actions/setup-go@v5
         with:
@@ -264,21 +264,25 @@ jobs:
           export ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME
           export PATH=$PATH:$(go env GOPATH)/bin
           
-          # 補回 Gomobile 安裝與初始化
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          gomobile init
-          
           cd core
-          if grep -q "^lib_android:" Makefile; then
-            make lib_android
-          elif grep -q "^android:" Makefile; then
-            make android
-          else
-            echo "::error::Android make target not found in core Makefile."
+          
+          # 1. 使用官方 Makefile 安裝客製化 gomobile 分支並編譯底層 AAR
+          if ! make lib_install; then
+            echo "::error::Gomobile fork installation failed."
             exit 1
           fi
           
-          cd ../sing-box-for-android
+          if ! make lib_android; then
+            echo "::error::Gomobile AAR Build failed."
+            exit 1
+          fi
+          
+          # 2. 將編譯出的 aar 庫精確轉移至 Android 專案內
+          mkdir -p clients/android/app/libs
+          find . -maxdepth 1 -name "*.aar" -exec cp {} clients/android/app/libs/ \;
+          
+          # 3. 執行純粹的 Gradle 打包
+          cd clients/android
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
           
@@ -288,19 +292,26 @@ jobs:
           fi
           
           APP_VER="${{ matrix.branch_info.app_ver }}"
-          mkdir -p ../output
-          APK_FOUND=false
           
-          while IFS= read -r apk; do
-            filename=$(basename "$apk")
-            cp "$apk" "../output/SFA-${APP_VER}-${{ matrix.branch_info.branch }}-${filename}"
-            APK_FOUND=true
-          done < <(find app/build/outputs/apk -type f -name "*release*.apk")
+          APK_CANDIDATES=(
+            "app/build/outputs/apk/release/app-universal-release.apk"
+            "app/build/outputs/apk/release/app-release.apk"
+          )
+          TARGET_APK=""
+          for apk in "${APK_CANDIDATES[@]}"; do
+            if [ -f "$apk" ]; then
+              TARGET_APK="$apk"
+              break
+            fi
+          done
           
-          if [ "$APK_FOUND" = "false" ]; then
+          if [ -z "$TARGET_APK" ]; then
             echo "::error::Strict Mode: Expected APK output not found."
             exit 1
           fi
+          
+          mkdir -p ../../../output
+          cp "$TARGET_APK" "../../../output/SFA-${APP_VER}-${{ matrix.branch_info.branch }}-universal.apk"
 
       - name: Check APK Existence
         id: check_apk
@@ -428,7 +439,7 @@ jobs:
           
           ### 📦 資源與供應鏈追溯
           - **核心二進位檔**: 壓縮包內無資料夾嵌套，適合腳本一鍵覆蓋。
-          - **一體化資源包 (Essential-Assets)**: 下載解壓後即可與核心搭配使用。外部依賴採執行當下動態鎖定：
+          - **一體化資源包 (Essential-Assets)**: 下載解壓後即可與核心搭配使用。外部依賴採執行當下動態鎖定 (Runtime-Locked)：
             - *GeoIP Version*: \`${GEOIP_TAG}\`
             - *Geosite Version*: \`${GEOSITE_TAG}\`
             - *Metacubexd SHA*: \`${META_SHA:0:7}\`
