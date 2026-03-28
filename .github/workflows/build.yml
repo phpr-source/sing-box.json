@@ -240,12 +240,13 @@ jobs:
           fetch-depth: 0
           path: core
 
+      # 致命修復點：將 Android 倉庫直接對齊到核心的 submodule 位置，完全棄用 go mod edit
       - uses: actions/checkout@v4
         with:
           repository: SagerNet/sing-box-for-android
           ref: ${{ needs.prepare.outputs.sfa_sha }}
           submodules: recursive
-          path: sfa
+          path: core/clients/android
 
       - uses: actions/setup-go@v5
         with:
@@ -260,10 +261,10 @@ jobs:
       - name: Build Android APK
         run: |
           set -euo pipefail
-          cd sfa
+          
+          # 進入子模組所在目錄，Gradle 將自動向上尋找 ../../go.mod
+          cd core/clients/android
           echo "sdk.dir=$ANDROID_HOME" > local.properties
-          go mod edit -replace github.com/sagernet/sing-box=../core
-          go mod download
           
           if ! ./gradlew assembleRelease; then
             echo "::error::SFA Build failed. Halting artifact generation."
@@ -289,8 +290,8 @@ jobs:
             exit 1
           fi
           
-          mkdir -p ../output
-          cp "$TARGET_APK" "../output/SFA-${APP_VER}-${{ matrix.branch_info.branch }}-universal.apk"
+          mkdir -p ../../../output
+          cp "$TARGET_APK" "../../../output/SFA-${APP_VER}-${{ matrix.branch_info.branch }}-universal.apk"
 
       - name: Check APK Existence
         id: check_apk
@@ -418,7 +419,7 @@ jobs:
           
           ### 📦 資源與供應鏈追溯
           - **核心二進位檔**: 壓縮包內無資料夾嵌套，適合腳本一鍵覆蓋。
-          - **一體化資源包 (Essential-Assets)**: 執行時嚴格鎖定上游狀態 (Runtime-Locked)。若依賴下載失敗將直接阻斷發布以確保資源包完整性：
+          - **一體化資源包 (Essential-Assets)**: 下載解壓後即可與核心搭配使用。外部依賴採執行當下動態鎖定 (Runtime-Locked)：
             - *GeoIP Version*: \`${GEOIP_TAG}\`
             - *Geosite Version*: \`${GEOSITE_TAG}\`
             - *Metacubexd SHA*: \`${META_SHA:0:7}\`
