@@ -240,7 +240,6 @@ jobs:
           fetch-depth: 0
           path: core
 
-      # 注意這裡的路徑：必須與 core 平級並命名為 sing-box-for-android
       - uses: actions/checkout@v4
         with:
           repository: SagerNet/sing-box-for-android
@@ -265,7 +264,10 @@ jobs:
           export ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME
           export PATH=$PATH:$(go env GOPATH)/bin
           
-          # 1. 核心編譯：在 core 中執行 make，自動生成 AAR 並注入相鄰的 Android 專案
+          # 補回 Gomobile 安裝與初始化
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          
           cd core
           if grep -q "^lib_android:" Makefile; then
             make lib_android
@@ -276,7 +278,6 @@ jobs:
             exit 1
           fi
           
-          # 2. Android 打包：不再需要虛假的 go mod edit，直接使用 Gradle 構建
           cd ../sing-box-for-android
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
@@ -286,7 +287,6 @@ jobs:
             exit 1
           fi
           
-          # 3. 收集所有 Release 變體 APK
           APP_VER="${{ matrix.branch_info.app_ver }}"
           mkdir -p ../output
           APK_FOUND=false
