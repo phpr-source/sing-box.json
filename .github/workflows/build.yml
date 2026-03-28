@@ -240,12 +240,13 @@ jobs:
           fetch-depth: 0
           path: core
 
+      # 注意這裡的路徑：必須與 core 平級並命名為 sing-box-for-android
       - uses: actions/checkout@v4
         with:
           repository: SagerNet/sing-box-for-android
           ref: ${{ needs.prepare.outputs.sfa_sha }}
           submodules: recursive
-          path: core/clients/android
+          path: sing-box-for-android
 
       - uses: actions/setup-go@v5
         with:
@@ -260,51 +261,46 @@ jobs:
       - name: Build Android APK
         run: |
           set -euo pipefail
+          
           export ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME
           export PATH=$PATH:$(go env GOPATH)/bin
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          gomobile init
           
-          cd core/clients/android
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
-          
-          cd library
-          go mod edit -replace github.com/sagernet/sing-box=../../..
-          go mod tidy
-          
-          if ! make; then
-            echo "::error::Gomobile AAR Build failed. Halting artifact generation."
+          # 1. 核心編譯：在 core 中執行 make，自動生成 AAR 並注入相鄰的 Android 專案
+          cd core
+          if grep -q "^lib_android:" Makefile; then
+            make lib_android
+          elif grep -q "^android:" Makefile; then
+            make android
+          else
+            echo "::error::Android make target not found in core Makefile."
             exit 1
           fi
           
-          cd ..
+          # 2. Android 打包：不再需要虛假的 go mod edit，直接使用 Gradle 構建
+          cd ../sing-box-for-android
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
+          
           if ! ./gradlew assembleRelease; then
             echo "::error::SFA Gradle Build failed. Halting artifact generation."
             exit 1
           fi
           
+          # 3. 收集所有 Release 變體 APK
           APP_VER="${{ matrix.branch_info.app_ver }}"
+          mkdir -p ../output
+          APK_FOUND=false
           
-          APK_CANDIDATES=(
-            "app/build/outputs/apk/release/app-universal-release.apk"
-            "app/build/outputs/apk/release/app-release.apk"
-          )
-          TARGET_APK=""
-          for apk in "${APK_CANDIDATES[@]}"; do
-            if [ -f "$apk" ]; then
-              TARGET_APK="$apk"
-              break
-            fi
-          done
+          while IFS= read -r apk; do
+            filename=$(basename "$apk")
+            cp "$apk" "../output/SFA-${APP_VER}-${{ matrix.branch_info.branch }}-${filename}"
+            APK_FOUND=true
+          done < <(find app/build/outputs/apk -type f -name "*release*.apk")
           
-          if [ -z "$TARGET_APK" ]; then
+          if [ "$APK_FOUND" = "false" ]; then
             echo "::error::Strict Mode: Expected APK output not found."
             exit 1
           fi
-          
-          mkdir -p ../../../output
-          cp "$TARGET_APK" "../../../output/SFA-${APP_VER}-${{ matrix.branch_info.branch }}-universal.apk"
 
       - name: Check APK Existence
         id: check_apk
