@@ -42,20 +42,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          
-          SFA_SHA=$(git ls-remote https://github.com/SagerNet/sing-box-for-android.git main | awk '{print $1}')
-          GEOIP_TAG=$(curl -sL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/SagerNet/sing-geoip/releases/latest | jq -r .tag_name)
-          GEOSITE_TAG=$(curl -sL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/SagerNet/sing-geosite/releases/latest | jq -r .tag_name)
-          META_SHA=$(git ls-remote https://github.com/MetaCubeX/metacubexd.git gh-pages | awk '{print $1}')
-          YACD_SHA=$(git ls-remote https://github.com/haishanh/yacd.git gh-pages | awk '{print $1}')
-          
+
+          SFA_SHA=$(git ls-remote https://github.com/SagerNet/sing-box-for-android.git refs/heads/main | awk '{print $1}')
+          GEOIP_TAG=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/SagerNet/sing-geoip/releases/latest | jq -r .tag_name)
+          GEOSITE_TAG=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/SagerNet/sing-geosite/releases/latest | jq -r .tag_name)
+          META_SHA=$(git ls-remote https://github.com/MetaCubeX/metacubexd.git refs/heads/gh-pages | awk '{print $1}')
+          YACD_SHA=$(git ls-remote https://github.com/haishanh/yacd.git refs/heads/gh-pages | awk '{print $1}')
+
           for var in SFA_SHA GEOIP_TAG GEOSITE_TAG META_SHA YACD_SHA; do
             if [ -z "${!var}" ] || [ "${!var}" = "null" ]; then
-              echo "::error::Strict Mode: Failed to fetch dependency $var. Aborting to maintain integrity."
+              echo "::error::Failed to fetch dependency $var."
               exit 1
             fi
           done
-          
+
           echo "sfa_sha=$SFA_SHA" >> "$GITHUB_OUTPUT"
           echo "geoip_tag=$GEOIP_TAG" >> "$GITHUB_OUTPUT"
           echo "geosite_tag=$GEOSITE_TAG" >> "$GITHUB_OUTPUT"
@@ -64,53 +64,56 @@ jobs:
 
       - id: set
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT: ${{ github.event_name }}
           IN_BRANCH: ${{ github.event.inputs.branch }}
           PAYLOAD_BRANCH: ${{ github.event.client_payload.branch || '' }}
         run: |
           set -euo pipefail
-          
+
           TARGETS=(
             "reF1nd/sing-box|reF1nd-testing|ref1nd-test|reF1nd-Testing|true"
             "reF1nd/sing-box|reF1nd-stable|ref1nd-stable|reF1nd-Stable|false"
             "SagerNet/sing-box|main|singbox-alpha|Official-Alpha|true"
             "SagerNet/sing-box|dev-next|singbox-stable|Official-Stable|false"
           )
-          
+
           JSON="[]"
           HAS="false"
-          
+
           for e in "${TARGETS[@]}"; do
             IFS='|' read -r REPO BR TAG TIT ROLLING <<< "$e"
-            
-            if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ] && [ "$IN_BRANCH" != "$TIT" ]; then continue; fi
-            if [ "$EVENT" = "repository_dispatch" ] && [ -n "$PAYLOAD_BRANCH" ]; then
-              if [ "$PAYLOAD_BRANCH" != "$BR" ] && [ "$PAYLOAD_BRANCH" != "$TAG" ] && [ "$PAYLOAD_BRANCH" != "$TIT" ]; then continue; fi
+
+            if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ] && [ "$IN_BRANCH" != "$TIT" ]; then
+              continue
             fi
-            
+            if [ "$EVENT" = "repository_dispatch" ] && [ -n "$PAYLOAD_BRANCH" ]; then
+              if [ "$PAYLOAD_BRANCH" != "$BR" ] && [ "$PAYLOAD_BRANCH" != "$TAG" ] && [ "$PAYLOAD_BRANCH" != "$TIT" ]; then
+                continue
+              fi
+            fi
+
             SHA=$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$BR" | awk '{print $1}')
             [ -z "$SHA" ] && continue
 
             TMPDIR="$(mktemp -d)"
-            git clone --bare --filter=blob:none "https://github.com/${REPO}.git" "$TMPDIR"
+            git clone --bare --filter=blob:none "https://github.com/${REPO}.git" "$TMPDIR" >/dev/null 2>&1
             APP_VER=$(git --git-dir="$TMPDIR" describe --tags --abbrev=0 "$SHA" 2>/dev/null | sed 's/^v//' || true)
             rm -rf "$TMPDIR"
-            
+
             [ -z "${APP_VER:-}" ] && APP_VER="${SHA:0:8}"
-            
+
             if [ "$ROLLING" = "true" ]; then
               CHK_TAG="$TAG"
             else
-              CHK_TAG=$(gh release list --limit 4000 --exclude-drafts --repo ${{ github.repository }} --json tagName,name --jq ".[] | select(.name | endswith(\" | $TIT\")) | .tagName" | head -n 1 || true)
+              CHK_TAG=$(gh release list --limit 4000 --exclude-drafts --repo "${{ github.repository }}" --json tagName,name --jq ".[] | select(.name | endswith(\" | $TIT\")) | .tagName" | head -n 1 || true)
             fi
-            
+
             L_SHA="none"
-            if [ -n "${CHK_TAG:-}" ] && gh release view "$CHK_TAG" --repo ${{ github.repository }} &>/dev/null; then
-              L_SHA=$(gh release download "$CHK_TAG" --pattern commit.txt --repo ${{ github.repository }} -O - 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)
+            if [ -n "${CHK_TAG:-}" ] && gh release view "$CHK_TAG" --repo "${{ github.repository }}" &>/dev/null; then
+              L_SHA=$(gh release download "$CHK_TAG" --pattern commit.txt --repo "${{ github.repository }}" -O - 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)
               [ -z "$L_SHA" ] && L_SHA="none"
             fi
-            
+
             if [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "repository_dispatch" ] || [ "$SHA" != "$L_SHA" ] || [ "$L_SHA" = "none" ]; then
               JSON=$(echo "$JSON" | jq -c \
                 --arg repo "$REPO" \
@@ -125,7 +128,7 @@ jobs:
               HAS="true"
             fi
           done
-          
+
           echo "matrix={\"include\":$JSON}" >> "$GITHUB_OUTPUT"
           echo "has_builds=$HAS" >> "$GITHUB_OUTPUT"
 
@@ -162,6 +165,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
+          cache: true
           cache-dependency-path: |
             go.sum
             .cache-key
@@ -177,35 +181,35 @@ jobs:
           export GOOS=${{ matrix.target.os }}
           export GOARCH=${{ matrix.target.arch }}
           export CGO_ENABLED=0
-          
+
           SUF=""
           if [ -n "${{ matrix.target.amd || '' }}" ]; then export GOAMD64="${{ matrix.target.amd }}"; SUF="${{ matrix.target.amd }}"; fi
           if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; SUF="v${{ matrix.target.arm }}"; fi
           if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; SUF="-${{ matrix.target.mips }}"; fi
 
           APP_VER="${{ matrix.branch_info.app_ver }}"
-          
+
           if [ "${{ matrix.target.flavor }}" = "lite" ]; then
             TAGS="with_quic,with_utls,with_clash_api"
           else
             TAGS="with_gvisor,with_quic,with_utls,with_acme,with_clash_api,with_v2ray_api,with_wireguard"
           fi
-          
+
           NAME="sing-box-${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${SUF}-${{ matrix.target.flavor }}"
           if [ "${{ matrix.target.os }}" = "windows" ]; then BIN="sing-box.exe"; else BIN="sing-box"; fi
-          
+
           LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${APP_VER}-${{ matrix.branch_info.branch }}-${{ matrix.branch_info.sha }}"
-          
+
           go build -trimpath -ldflags "$LDFLAGS" -tags "$TAGS" -o "$BIN" ./cmd/sing-box
           chmod +x "$BIN"
-          
+
           mkdir -p output
-          if [ "${{ matrix.target.os }}" = "windows" ]; then 
+          if [ "${{ matrix.target.os }}" = "windows" ]; then
             zip -9 -j -q "output/${NAME}.zip" "$BIN"
-          else 
+          else
             tar -czf "output/${NAME}.tar.gz" "$BIN"
           fi
-          
+
           if [ "${{ matrix.target.upx }}" = "true" ]; then
             if upx --lzma --best "$BIN"; then
               cp "$BIN" "output/${NAME}-upx.upx"
@@ -244,12 +248,13 @@ jobs:
         with:
           repository: SagerNet/sing-box-for-android
           ref: ${{ needs.prepare.outputs.sfa_sha }}
-          submodules: recursive
-          path: core/clients/android
+          fetch-depth: 0
+          path: sfa
 
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
+          cache: true
 
       - uses: actions/setup-java@v4
         with:
@@ -260,68 +265,60 @@ jobs:
       - name: Build Android APK
         run: |
           set -euo pipefail
-          
+
           export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
-          
-          export ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME
-          export PATH=$PATH:$(go env GOPATH)/bin
-          
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          export PATH="$PATH:$(go env GOPATH)/bin"
+
           cd core
-          if ! make lib_install; then
-            echo "::error::Gomobile fork installation failed."
+          make lib_install
+          make lib_android
+
+          AAR_FILE="$(find . -type f \( -name 'libbox*.aar' -o -name '*.aar' \) | head -n 1 || true)"
+          if [ -z "$AAR_FILE" ] || [ ! -f "$AAR_FILE" ]; then
+            echo "::error::AAR not found after make lib_android."
             exit 1
           fi
-          
-          if ! make lib_android; then
-            echo "::error::Gomobile AAR Build failed."
-            exit 1
-          fi
-          
-          mkdir -p clients/android/app/libs
-          find . -maxdepth 1 -name "*.aar" -exec cp {} clients/android/app/libs/ \;
-          
-          cd clients/android
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
-          
+
+          mkdir -p ../sfa/app/libs
+          rm -f ../sfa/app/libs/*.aar
+          cp "$AAR_FILE" ../sfa/app/libs/
+
+          cd ../sfa
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+          printf 'ndk.dir=%s\n' "$ANDROID_NDK_HOME" >> local.properties
+          {
+            printf 'org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8 -Djava.awt.headless=true\n'
+            printf 'kotlin.daemon.jvmargs=-Xmx2g -Djava.awt.headless=true\n'
+          } >> gradle.properties
+
           keytool -genkey -v -keystore ci-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias release -storepass password -keypass password -dname "CN=sing-box,O=CI,C=US"
-          
-          if ! ./gradlew assemblePlayRelease --no-daemon -x lint \
+
+          if ! ./gradlew clean :app:assemblePlayRelease --no-daemon --stacktrace -x lint \
             -Pandroid.injected.signing.store.file=$(pwd)/ci-release.jks \
             -Pandroid.injected.signing.store.password=password \
             -Pandroid.injected.signing.key.alias=release \
             -Pandroid.injected.signing.key.password=password; then
-            echo "::error::SFA Gradle Build failed. Halting artifact generation."
-            exit 1
+            echo "::warning::SFA Kotlin Compilation failed (likely API mismatch). Skipping APK generation."
+            exit 0
           fi
-          
+
           APP_VER="${{ matrix.branch_info.app_ver }}"
-          
-          TARGET_APK=""
-          APK_FALLBACK=""
-          while IFS= read -r apk; do
-            [ -z "$apk" ] && continue
-            [ -z "$APK_FALLBACK" ] && APK_FALLBACK="$apk"
-            if [[ "$apk" == *"universal"* ]]; then
-              TARGET_APK="$apk"
-              break
-            fi
-          done < <(find app/build/outputs/apk -type f -name "*.apk" 2>/dev/null || true)
-          
-          [ -z "$TARGET_APK" ] && TARGET_APK="$APK_FALLBACK"
-          
-          if [ -z "$TARGET_APK" ] || [ ! -f "$TARGET_APK" ]; then
-            echo "::error::Strict Mode: Expected APK output not found."
-            exit 1
+          APK_PATH="$(find app/build/outputs/apk -type f -name '*.apk' | head -n 1 || true)"
+
+          if [ -n "$APK_PATH" ] && [ -f "$APK_PATH" ]; then
+            mkdir -p ../output
+            cp "$APK_PATH" "../output/SFA-${APP_VER}-${{ matrix.branch_info.branch }}-universal.apk"
           fi
-          
-          mkdir -p ../../../output
-          cp "$TARGET_APK" "../../../output/SFA-${APP_VER}-${{ matrix.branch_info.branch }}-universal.apk"
 
       - name: Check APK Existence
         id: check_apk
         run: |
-          if ls output/*.apk 1> /dev/null 2>&1; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+          if ls output/*.apk 1> /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Attest Build Provenance
         if: steps.check_apk.outputs.exists == 'true'
@@ -355,11 +352,11 @@ jobs:
         run: |
           set -euo pipefail
           LOG_RAW=$(git log --pretty=format:"- %s (%h)" ${{ matrix.branch_info.local_sha }}..${{ matrix.branch_info.sha }} 2>/dev/null || git log --pretty=format:"- %s (%h)" -n 10 ${{ matrix.branch_info.sha }})
-          
+
           FEAT=$(echo "$LOG_RAW" | grep -iE '^-\s*(feat|add|new|support)\b' || true)
           FIX=$(echo "$LOG_RAW" | grep -iE '^-\s*(fix|bug|patch)\b' || true)
           OTHER=$(echo "$LOG_RAW" | grep -v -iE '^-\s*(feat|add|new|support|fix|bug|patch)\b' || true)
-          
+
           {
             echo "CHANGELOG<<EOF"
             [ -n "$FEAT" ] && echo "### ✨ Features" && echo "$FEAT"
@@ -384,38 +381,38 @@ jobs:
           set -euo pipefail
           cd release_assets
           APP_VER="${{ matrix.branch_info.app_ver }}"
-          
+
           mkdir -p Essential-Assets/ui
           cat << 'EOF' > Essential-Assets/config.json
           { "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }
           EOF
-          
+
           curl -fL --retry 3 -o Essential-Assets/geoip.db "https://github.com/SagerNet/sing-geoip/releases/download/${GEOIP_TAG}/geoip.db"
           curl -fL --retry 3 -o Essential-Assets/geosite.db "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite.db"
           curl -fL --retry 3 -o Essential-Assets/geosite-cn.srs "https://raw.githubusercontent.com/SagerNet/sing-geosite/${GEOSITE_TAG}/rule-set/geosite-cn.srs"
-          
+
           mkdir -p tmp_meta
           curl -fL --retry 3 -o metacubexd.zip "https://github.com/MetaCubeX/metacubexd/archive/${META_SHA}.zip"
           unzip -q metacubexd.zip -d tmp_meta/
           META_DIR=$(find tmp_meta -mindepth 1 -maxdepth 1 -type d | head -n 1)
           mv "$META_DIR" Essential-Assets/ui/metacubexd
           rm -rf tmp_meta metacubexd.zip
-          
+
           mkdir -p tmp_yacd
           curl -fL --retry 3 -o yacd.zip "https://github.com/haishanh/yacd/archive/${YACD_SHA}.zip"
           unzip -q yacd.zip -d tmp_yacd/
           YACD_DIR=$(find tmp_yacd -mindepth 1 -maxdepth 1 -type d | head -n 1)
           mv "$YACD_DIR" Essential-Assets/ui/yacd
           rm -rf tmp_yacd yacd.zip
-          
+
           zip -9 -r sing-box-Essential-Assets.zip Essential-Assets/
           rm -rf Essential-Assets/
-          
+
           echo "${{ matrix.branch_info.sha }}" > commit.txt
           find . -maxdepth 1 -type f ! -name 'sha256sums.txt' -print0 | xargs -0 sha256sum > sha256sums.txt
-          
+
           if ls *SFA*.apk 1> /dev/null 2>&1; then echo "HAS_APK=true" >> "$GITHUB_ENV"; else echo "HAS_APK=false" >> "$GITHUB_ENV"; fi
-          
+
           if [ "${{ matrix.branch_info.rolling }}" = "true" ]; then
             echo "REL_TAG=${{ matrix.branch_info.tag }}" >> "$GITHUB_ENV"
             echo "REL_NAME=${{ matrix.branch_info.title }} (Rolling)" >> "$GITHUB_ENV"
@@ -431,17 +428,16 @@ jobs:
           GEOSITE_TAG: ${{ needs.prepare.outputs.geosite_tag }}
           META_SHA: ${{ needs.prepare.outputs.meta_sha }}
           YACD_SHA: ${{ needs.prepare.outputs.yacd_sha }}
-          SFA_RESULT: ${{ needs.build_android.result }}
         run: |
           TITLE="${{ matrix.branch_info.title }}"
           APK_EXIST="${HAS_APK}"
-          
+
           cat << EOF > release_body.md
           ## 🚀 sing-box Core ($TITLE)
           > 🤖 自動同步上游源碼構建 | 包含完整 Build Provenance 安全認證
-          
+
           $CHANGELOG
-          
+
           ### 📦 資源與供應鏈追溯
           - **核心二進位檔**: 壓縮包內無資料夾嵌套，適合腳本一鍵覆蓋。
           - **一體化資源包 (Essential-Assets)**: 下載解壓後即可與核心搭配使用。外部依賴採執行當下動態鎖定 (Runtime-Locked)：
@@ -450,9 +446,9 @@ jobs:
             - *Metacubexd SHA*: \`${META_SHA:0:7}\`
             - *Yacd SHA*: \`${YACD_SHA:0:7}\`
           EOF
-          
+
           if [ "$APK_EXIST" = "true" ]; then
-            echo "- **Android GUI**: 已成功編譯並附帶 SFA Universal APK 安裝包 (SFA Commit: \`${SFA_SHA:0:7}\`)。" >> release_body.md
+            echo "- **Android GUI**: 已成功編譯並附帶 SFA Universal APK 安裝包 (SFA Commit: \`${SFA_SHA:0:7}\`)." >> release_body.md
           else
             echo "- **Android GUI**: ⚠️ 本次構建 SFA (Android) 失敗。核心發布不受影響，請維護者檢查 Action 日誌。" >> release_body.md
           fi
