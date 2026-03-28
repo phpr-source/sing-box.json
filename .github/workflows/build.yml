@@ -263,6 +263,8 @@ jobs:
           
           export ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME
           export PATH=$PATH:$(go env GOPATH)/bin
+          # 致命防禦：強制 Java headless 模式，阻斷 KSP 的 AWT UI 初始化導致的 NullPointerException
+          export _JAVA_OPTIONS="-Djava.awt.headless=true"
           
           cd core
           if ! make lib_install; then
@@ -284,7 +286,6 @@ jobs:
           
           keytool -genkey -v -keystore ci-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias release -storepass password -keypass password -dname "CN=sing-box,O=CI,C=US"
           
-          # 極致優化：關閉 daemon、跳過 Lint、並僅編譯 Play Flavor 以節省大量構建時間
           if ! ./gradlew assemblePlayRelease --no-daemon -x lint \
             -Pandroid.injected.signing.store.file=$(pwd)/ci-release.jks \
             -Pandroid.injected.signing.store.password=password \
@@ -296,18 +297,14 @@ jobs:
           
           APP_VER="${{ matrix.branch_info.app_ver }}"
           
-          TARGET_APK=""
-          APK_FALLBACK=""
-          while IFS= read -r apk; do
-            [ -z "$apk" ] && continue
-            [ -z "$APK_FALLBACK" ] && APK_FALLBACK="$apk"
-            if [[ "$apk" == *"universal"* ]]; then
-              TARGET_APK="$apk"
-              break
-            fi
-          done < <(find app/build/outputs/apk -type f -name "*release*.apk" 2>/dev/null || true)
+          echo "--- Generated APK files ---"
+          find app/build/outputs/apk -type f -name "*.apk" || true
           
-          [ -z "$TARGET_APK" ] && TARGET_APK="$APK_FALLBACK"
+          # 精確提取邏輯：優先尋找 universal 版本，若受限於 Flavor 未開啟則退而求其次抓取標準 release
+          TARGET_APK=$(find app/build/outputs/apk -type f -name "*universal*release*.apk" | head -n 1 || true)
+          if [ -z "$TARGET_APK" ]; then
+            TARGET_APK=$(find app/build/outputs/apk -type f -name "*release*.apk" | head -n 1 || true)
+          fi
           
           if [ -z "$TARGET_APK" ] || [ ! -f "$TARGET_APK" ]; then
             echo "::error::Strict Mode: Expected APK output not found."
