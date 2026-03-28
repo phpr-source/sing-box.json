@@ -261,6 +261,9 @@ jobs:
         run: |
           set -euo pipefail
           
+          # 強制所有 JVM 實例 (包含 Kotlin/KSP Daemon) 啟用 Headless 模式
+          export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
+          
           export ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME
           export PATH=$PATH:$(go env GOPATH)/bin
           
@@ -282,11 +285,13 @@ jobs:
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
           
+          # 寫入 gradle.properties 確保 Kotlin Daemon 完全接手設定
+          echo "org.gradle.jvmargs=-Djava.awt.headless=true" >> gradle.properties
+          echo "kotlin.daemon.jvmargs=-Djava.awt.headless=true" >> gradle.properties
+          
           keytool -genkey -v -keystore ci-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias release -storepass password -keypass password -dname "CN=sing-box,O=CI,C=US"
           
-          # 極致優化：關閉 daemon、跳過 Lint、僅編譯 Play Flavor，並使用 Headless 模式防報錯
           if ! ./gradlew assemblePlayRelease --no-daemon -x lint \
-            -Djava.awt.headless=true \
             -Pandroid.injected.signing.store.file=$(pwd)/ci-release.jks \
             -Pandroid.injected.signing.store.password=password \
             -Pandroid.injected.signing.key.alias=release \
