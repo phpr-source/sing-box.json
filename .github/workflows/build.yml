@@ -265,8 +265,6 @@ jobs:
           export PATH=$PATH:$(go env GOPATH)/bin
           
           cd core
-          
-          # 1. 使用官方 Makefile 安裝客製化 gomobile 分支並編譯底層 AAR
           if ! make lib_install; then
             echo "::error::Gomobile fork installation failed."
             exit 1
@@ -277,16 +275,22 @@ jobs:
             exit 1
           fi
           
-          # 2. 將編譯出的 aar 庫精確轉移至 Android 專案內
           mkdir -p clients/android/app/libs
           find . -maxdepth 1 -name "*.aar" -exec cp {} clients/android/app/libs/ \;
           
-          # 3. 執行純粹的 Gradle 打包
           cd clients/android
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
           
-          if ! ./gradlew assembleRelease; then
+          # 動態生成 CI 專用臨時簽名金鑰，繞過 keystore 密碼報錯
+          keytool -genkey -v -keystore ci-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias release -storepass password -keypass password -dname "CN=sing-box,O=CI,C=US"
+          
+          # 強制注入自訂簽名以執行 Release 打包
+          if ! ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=$(pwd)/ci-release.jks \
+            -Pandroid.injected.signing.store.password=password \
+            -Pandroid.injected.signing.key.alias=release \
+            -Pandroid.injected.signing.key.password=password; then
             echo "::error::SFA Gradle Build failed. Halting artifact generation."
             exit 1
           fi
