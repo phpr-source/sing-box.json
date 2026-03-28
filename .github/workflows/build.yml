@@ -282,10 +282,8 @@ jobs:
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
           
-          # 動態生成 CI 專用臨時簽名金鑰，繞過 keystore 密碼報錯
           keytool -genkey -v -keystore ci-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias release -storepass password -keypass password -dname "CN=sing-box,O=CI,C=US"
           
-          # 強制注入自訂簽名以執行 Release 打包
           if ! ./gradlew assembleRelease \
             -Pandroid.injected.signing.store.file=$(pwd)/ci-release.jks \
             -Pandroid.injected.signing.store.password=password \
@@ -297,19 +295,21 @@ jobs:
           
           APP_VER="${{ matrix.branch_info.app_ver }}"
           
-          APK_CANDIDATES=(
-            "app/build/outputs/apk/release/app-universal-release.apk"
-            "app/build/outputs/apk/release/app-release.apk"
-          )
+          # 動態遞迴提取 APK，完美兼容所有 Product Flavors 嵌套目錄
           TARGET_APK=""
-          for apk in "${APK_CANDIDATES[@]}"; do
-            if [ -f "$apk" ]; then
+          APK_FALLBACK=""
+          while IFS= read -r apk; do
+            [ -z "$apk" ] && continue
+            [ -z "$APK_FALLBACK" ] && APK_FALLBACK="$apk"
+            if [[ "$apk" == *"universal"* ]]; then
               TARGET_APK="$apk"
               break
             fi
-          done
+          done < <(find app/build/outputs/apk -type f -name "*release*.apk" 2>/dev/null || true)
           
-          if [ -z "$TARGET_APK" ]; then
+          [ -z "$TARGET_APK" ] && TARGET_APK="$APK_FALLBACK"
+          
+          if [ -z "$TARGET_APK" ] || [ ! -f "$TARGET_APK" ]; then
             echo "::error::Strict Mode: Expected APK output not found."
             exit 1
           fi
