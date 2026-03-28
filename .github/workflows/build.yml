@@ -387,9 +387,9 @@ jobs:
           { "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }
           EOF
 
-          curl -fL --retry 3 -o Essential-Assets/geoip.db "https://github.com/SagerNet/sing-geoip/releases/download/${GEOIP_TAG}/geoip.db"
-          curl -fL --retry 3 -o Essential-Assets/geosite.db "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite.db"
-          curl -fL --retry 3 -o Essential-Assets/geosite-cn.srs "https://raw.githubusercontent.com/SagerNet/sing-geosite/${GEOSITE_TAG}/rule-set/geosite-cn.srs"
+          curl -fL --retry 3 -o Essential-Assets/geoip.db "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geoip.db"
+          curl -fL --retry 3 -o Essential-Assets/geosite.db "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geosite.db"
+          curl -fL --retry 3 -o Essential-Assets/geosite-cn.srs "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite-cn.srs"
 
           mkdir -p tmp_meta
           curl -fL --retry 3 -o metacubexd.zip "https://github.com/MetaCubeX/metacubexd/archive/${META_SHA}.zip"
