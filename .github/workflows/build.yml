@@ -373,6 +373,7 @@ jobs:
 
       - name: Prepare All-in-One Assets & Determine Tag
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEOIP_TAG: ${{ needs.prepare.outputs.geoip_tag }}
           GEOSITE_TAG: ${{ needs.prepare.outputs.geosite_tag }}
           META_SHA: ${{ needs.prepare.outputs.meta_sha }}
@@ -389,7 +390,10 @@ jobs:
 
           curl -fL --retry 3 -o Essential-Assets/geoip.db "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geoip.db"
           curl -fL --retry 3 -o Essential-Assets/geosite.db "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geosite.db"
-          curl -fL --retry 3 -o Essential-Assets/geosite-cn.srs "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite-cn.srs"
+
+          if ! gh release download "$GEOSITE_TAG" --repo SagerNet/sing-geosite --pattern "geosite-cn.srs" -O Essential-Assets/geosite-cn.srs 2>/dev/null; then
+            gh release download "$GEOSITE_TAG" --repo SagerNet/sing-geosite --pattern "geosite-cn.db" -O Essential-Assets/geosite-cn.db || true
+          fi
 
           mkdir -p tmp_meta
           curl -fL --retry 3 -o metacubexd.zip "https://github.com/MetaCubeX/metacubexd/archive/${META_SHA}.zip"
