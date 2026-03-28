@@ -240,7 +240,6 @@ jobs:
           fetch-depth: 0
           path: core
 
-      # 致命修復點：將 Android 倉庫直接對齊到核心的 submodule 位置，完全棄用 go mod edit
       - uses: actions/checkout@v4
         with:
           repository: SagerNet/sing-box-for-android
@@ -262,12 +261,29 @@ jobs:
         run: |
           set -euo pipefail
           
-          # 進入子模組所在目錄，Gradle 將自動向上尋找 ../../go.mod
+          # 安裝 Gomobile 與 NDK 以供編譯 .aar 使用
+          export ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME
+          export PATH=$PATH:$(go env GOPATH)/bin
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          
           cd core/clients/android
           echo "sdk.dir=$ANDROID_HOME" > local.properties
+          echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
           
+          # 將 SFA 的依賴精確對齊至外層的本地 Core (../..)
+          go mod edit -replace github.com/sagernet/sing-box=../..
+          go mod tidy
+          
+          # 步驟一：使用 Gomobile 構建 libbox.aar 與 libbox-legacy.aar
+          if ! make; then
+            echo "::error::Gomobile AAR Build failed. Halting artifact generation."
+            exit 1
+          fi
+          
+          # 步驟二：打包 APK
           if ! ./gradlew assembleRelease; then
-            echo "::error::SFA Build failed. Halting artifact generation."
+            echo "::error::SFA Gradle Build failed. Halting artifact generation."
             exit 1
           fi
           
