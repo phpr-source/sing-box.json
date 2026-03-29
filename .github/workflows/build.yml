@@ -99,7 +99,7 @@ jobs:
           TARGETS=(
             "reF1nd/sing-box|reF1nd-testing|reF1nd-Testing|true"
             "reF1nd/sing-box|reF1nd-stable|reF1nd-Stable|false"
-            "SagerNet/sing-box|dev|Official-Alpha|true"
+            "SagerNet/sing-box|dev-next|Official-Alpha|true"
             "SagerNet/sing-box|testing|Official-Stable|false" 
           )
 
@@ -120,15 +120,7 @@ jobs:
 
             BR_INPUT="$BR"
             SHA=""
-            
-            # 核心修復：嚴格隔離降級池，避免 Alpha 降級到 Stable 造成資產衝突
-            if [[ "$TIT" == *"Alpha"* ]] || [[ "$TIT" == *"Testing"* ]]; then
-              FALLBACK_BRANCHES=("$BR_INPUT" "main" "dev" "next" "main-next" "dev-next")
-            else
-              FALLBACK_BRANCHES=("$BR_INPUT" "testing" "stable" "main")
-            fi
-
-            for search_br in "${FALLBACK_BRANCHES[@]}"; do
+            for search_br in "$BR_INPUT" "dev-next" "testing" "main" "dev" "main-next" "next"; do
               SHA=$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$search_br" | awk '{print $1}')
               if [ -n "$SHA" ]; then
                 if [ "$search_br" != "$BR_INPUT" ]; then
@@ -140,7 +132,12 @@ jobs:
             done
 
             if [ -z "$SHA" ]; then
-              echo "::error::Critical failure: Could not resolve ANY valid branch for $REPO ($TIT)."
+              echo "::warning::No alternative branches found for $REPO. Attempting HEAD fallback."
+              SHA=$(git ls-remote "https://github.com/${REPO}.git" "HEAD" | awk '{print $1}')
+            fi
+
+            if [ -z "$SHA" ]; then
+              echo "::error::Critical failure: Could not resolve ANY valid branch or HEAD for $REPO."
               exit 1
             fi
 
@@ -323,7 +320,6 @@ jobs:
           cache: true
           cache-dependency-path: sing-box/go.mod
 
-      # 核心修復：升級至 Java 21 以匹配最新 SFA 與 AGP 8+ 的編譯要求
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -367,7 +363,7 @@ jobs:
 
           if [ -z "$KEYSTORE_BASE64" ]; then
             echo "::warning::KEYSTORE_BASE64 is empty! Automatically generating a temporary keystore to allow build to pass."
-            keytool -genkey -v -keystore ci-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias release -storepass password -keypass password -dname "CN=sing-box,O=CI,C=US"
+            keytool -genkey -v -keystore ci-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias "$KEY_ALIAS" -storepass "$KEYSTORE_PASS" -keypass "$KEY_PASS" -dname "CN=sing-box,O=CI,C=US"
           else
             echo "$KEYSTORE_BASE64" | base64 --decode > ci-release.jks
           fi
@@ -602,7 +598,7 @@ jobs:
           if [ "$APK_STATUS" = "success" ]; then
             echo "- ✅ **Android GUI**: SFA Universal APK 構建成功 (SFA Commit: \`${SFA_SHA:0:7}\`)." >> release_body.md
           else
-            echo "- ❌ **Android GUI**: 構建失敗或憑證缺失。本次發佈未包含 APK。" >> release_body.md
+            echo "- ❌ **Android GUI**: 構建失敗。本次發佈未包含 APK。" >> release_body.md
           fi
 
           cat << EOF >> release_body.md
@@ -627,11 +623,14 @@ jobs:
           echo "REL_NAME=$REL_NAME" >> "$GITHUB_ENV"
 
       - name: Publish Release
-        uses: softprops/action-gh-release@v2
+        uses: ncipollo/release-action@v1
         with:
-          tag_name: ${{ matrix.branch_info.tag }}
+          tag: ${{ matrix.branch_info.tag }}
           name: ${{ env.REL_NAME }}
-          prerelease: ${{ matrix.branch_info.rolling }}
-          make_latest: ${{ matrix.branch_info.rolling == false && 'true' || 'false' }}
-          files: release_assets/*
-          body_path: release_body.md
+          prerelease: ${{ matrix.branch_info.rolling == 'true' }}
+          makeLatest: ${{ matrix.branch_info.rolling == 'false' }}
+          artifacts: "release_assets/*"
+          bodyFile: release_body.md
+          allowUpdates: true
+          replacesArtifacts: true
+          token: ${{ secrets.GITHUB_TOKEN }}
