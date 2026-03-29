@@ -312,8 +312,6 @@ jobs:
       fail-fast: false
       matrix:
         branch_info: ${{ fromJson(needs.check_updates.outputs.matrix).include }}
-    env:
-      GRADLE_USER_HOME: ${{ runner.temp }}/gradle-home
     steps:
       - uses: actions/checkout@v4
         with:
@@ -381,6 +379,7 @@ jobs:
 
       - name: Build Android AAR & APK
         env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/gradle-home
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'password' }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'release' }}
