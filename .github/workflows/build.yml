@@ -353,20 +353,7 @@ jobs:
             exit 1
           fi
 
-          NDK_VERSION="$(python - <<'PY'
-import re, sys
-from pathlib import Path
-for p in Path("sfa").rglob("build.gradle*"):
-    try:
-        text = p.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        continue
-    m = re.search(r'ndkVersion\s*(?:=)?\s*[\'"]([^\'"]+)[\'"]', text)
-    if m:
-        print(m.group(1))
-        sys.exit(0)
-PY
-          )"
+          NDK_VERSION=$(find sfa -type f -name "*build.gradle*" -exec awk -F"['\"]" '/ndkVersion/ {print $2}' {} + | head -n 1 || true)
 
           if [ -n "${NDK_VERSION:-}" ]; then
             if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
@@ -519,7 +506,7 @@ EOF
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          sleep 5 # 給予 API 短暫同步時間
+          sleep 5
           COUNT=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" | jq '.total_count // 0')
           if [ "$COUNT" -eq 0 ]; then
             echo "::error::No artifacts found for this run. Halting release to prevent empty deployment."
