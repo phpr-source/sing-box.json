@@ -44,6 +44,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          
+          # SFA 官方倉庫有時預設分支為 main，若報錯可替換為 master
           SFA_SHA=$(git ls-remote https://github.com/SagerNet/sing-box-for-android.git refs/heads/main | awk '{print $1}')
           GEOIP_TAG=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/SagerNet/sing-geoip/releases/latest | jq -r .tag_name)
           GEOSITE_TAG=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/SagerNet/sing-geosite/releases/latest | jq -r .tag_name)
@@ -78,25 +80,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          CORE_TARGETS_JSON='[
-            {"os":"linux","arch":"amd64","amd":"v3","flavor":"full","upx":false},
-            {"os":"linux","arch":"amd64","flavor":"full","upx":false},
-            {"os":"linux","arch":"arm64","flavor":"full","upx":false},
-            {"os":"linux","arch":"arm","arm":"7","flavor":"full","upx":true},
-            {"os":"linux","arch":"arm","arm":"7","flavor":"lite","upx":true},
-            {"os":"linux","arch":"arm","arm":"5","flavor":"lite","upx":true},
-            {"os":"linux","arch":"mipsle","flavor":"lite","upx":true},
-            {"os":"linux","arch":"mipsle","mips":"softfloat","flavor":"lite","upx":true},
-            {"os":"windows","arch":"amd64","amd":"v3","flavor":"full","upx":false},
-            {"os":"darwin","arch":"amd64","flavor":"full","upx":false},
-            {"os":"darwin","arch":"arm64","flavor":"full","upx":false}
-          ]'
+          CORE_TARGETS_JSON='[{"os":"linux","arch":"amd64","amd":"v3","flavor":"full","upx":false},{"os":"linux","arch":"amd64","flavor":"full","upx":false},{"os":"linux","arch":"arm64","flavor":"full","upx":false},{"os":"linux","arch":"arm","arm":"7","flavor":"full","upx":true},{"os":"linux","arch":"arm","arm":"7","flavor":"lite","upx":true},{"os":"linux","arch":"arm","arm":"5","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","mips":"softfloat","flavor":"lite","upx":true},{"os":"windows","arch":"amd64","amd":"v3","flavor":"full","upx":false},{"os":"darwin","arch":"amd64","flavor":"full","upx":false},{"os":"darwin","arch":"arm64","flavor":"full","upx":false}]'
           echo "core_targets=$CORE_TARGETS_JSON" >> "$GITHUB_OUTPUT"
 
           TARGETS=(
             "reF1nd/sing-box|reF1nd-testing|reF1nd-Testing|true"
             "reF1nd/sing-box|reF1nd-stable|reF1nd-Stable|false"
-            "SagerNet/sing-box|main|Official-Alpha|true"
+            "SagerNet/sing-box|dev-next|Official-Alpha|true"
             "SagerNet/sing-box|testing|Official-Stable|false" 
           )
 
