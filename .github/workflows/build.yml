@@ -320,24 +320,26 @@ jobs:
           cache: true
           cache-dependency-path: sing-box/go.mod
 
-      # 階段 1：使用 Java 17 編譯核心庫 (sing-box AAR) 以滿足強制依賴
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
+          cache: 'gradle'
 
-      - name: Build Android AAR
+      - name: Build Android AAR & APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'password' }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'release' }}
+          KEY_PASS: ${{ secrets.KEY_PASS || 'password' }}
         run: |
           set -euo pipefail
           export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           export PATH="$PATH:$(go env GOPATH)/bin"
           
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          gomobile init
-
           cd sing-box
-          make lib_install
+          make lib_install || true
           make lib_android
 
           AAR_FILE="$(find . -type f \( -name 'libbox*.aar' -o -name '*.aar' \) | head -n 1 || true)"
@@ -350,27 +352,10 @@ jobs:
           rm -f ../sfa/app/libs/*.aar
           cp "$AAR_FILE" ../sfa/app/libs/
 
-      # 階段 2：切換至 Java 21 編譯 SFA 應用，解決 Gradle 相容性報錯
-      - uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '21'
-          cache: 'gradle'
-
-      - name: Build SFA APK
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'password' }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'release' }}
-          KEY_PASS: ${{ secrets.KEY_PASS || 'password' }}
-        run: |
-          set -euo pipefail
-          export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
-          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
-
-          cd sfa
+          cd ../sfa
           printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
-          printf 'org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8 -Djava.awt.headless=true\nkotlin.daemon.jvmargs=-Xmx2g -Djava.awt.headless=true\nandroid.useAndroidX=true\nandroid.enableJetifier=true\n' >> gradle.properties
+          
+          printf 'org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true\nkotlin.daemon.jvmargs=-Xmx1g -Djava.awt.headless=true\nandroid.useAndroidX=true\nandroid.enableJetifier=true\n' >> gradle.properties
 
           mkdir -p ../output
 
@@ -381,7 +366,12 @@ jobs:
             echo "$KEYSTORE_BASE64" | base64 --decode > ci-release.jks
           fi
 
-          if ! ./gradlew clean :app:assemblePlayRelease --no-daemon --stacktrace -x lint \
+          BUILD_CMD=":app:assemblePlayRelease"
+          if ! ./gradlew tasks | grep -q "assemblePlayRelease"; then
+            BUILD_CMD=":app:assembleRelease"
+          fi
+
+          if ! ./gradlew clean $BUILD_CMD --no-daemon --stacktrace -x lint \
             -Pandroid.injected.signing.store.file=$(pwd)/ci-release.jks \
             -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
             -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
