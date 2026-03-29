@@ -91,8 +91,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          CORE_TARGETS_JSON=$(cat << 'EOF' | jq -c .
-          [
+          CORE_TARGETS_JSON=$(echo '[
             {"os":"linux","arch":"amd64","amd":"v3","flavor":"full","upx":false},
             {"os":"linux","arch":"amd64","flavor":"full","upx":false},
             {"os":"linux","arch":"arm64","flavor":"full","upx":false},
@@ -104,9 +103,8 @@ jobs:
             {"os":"windows","arch":"amd64","amd":"v3","flavor":"full","upx":false},
             {"os":"darwin","arch":"amd64","flavor":"full","upx":false},
             {"os":"darwin","arch":"arm64","flavor":"full","upx":false}
-          ]
-          EOF
-          )
+          ]' | jq -c .)
+          
           echo "core_targets=$CORE_TARGETS_JSON" >> "$GITHUB_OUTPUT"
 
           TARGETS=(
@@ -415,14 +413,15 @@ jobs:
           chmod +x ./gradlew
 
           printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
-          cat >> gradle.properties <<'EOF'
-org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true
-org.gradle.caching=false
-org.gradle.configuration-cache=false
-kotlin.daemon.jvmargs=-Xmx1g -Djava.awt.headless=true
-android.useAndroidX=true
-android.enableJetifier=true
-EOF
+          
+          {
+            echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true"
+            echo "org.gradle.caching=false"
+            echo "org.gradle.configuration-cache=false"
+            echo "kotlin.daemon.jvmargs=-Xmx1g -Djava.awt.headless=true"
+            echo "android.useAndroidX=true"
+            echo "android.enableJetifier=true"
+          } >> gradle.properties
 
           mkdir -p ../output
 
@@ -629,9 +628,7 @@ EOF
           rm -f SUCCESS-* apk_meta.env gradle-build-error.log
 
           mkdir -p Essential-Assets/ui
-          cat << 'EOF' > Essential-Assets/config.json
-          { "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }
-          EOF
+          echo '{ "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }' > Essential-Assets/config.json
 
           fetch_with_retry() {
             local max_attempts=3
@@ -738,15 +735,15 @@ EOF
           REL_NAME="v$DISPLAY_VER | $TITLE"
           [ "${{ matrix.branch_info.rolling }}" = "true" ] && REL_NAME="$TITLE (Rolling) | $DISPLAY_VER"
 
-          cat << EOF > release_body.md
-          ## 🚀 sing-box Core ($TITLE)
-          > ⏱️ **Build Time (UTC)**: \`${BUILD_TIME}\`
-          > 🤖 **Provenance**: 部分容錯發佈 (Partial Tolerance Release)，具備標準校驗鏈。
-
-          $CHANGELOG
-
-          ### 📦 產物與容錯狀態清單
-          EOF
+          {
+            echo "## 🚀 sing-box Core ($TITLE)"
+            echo "> ⏱️ **Build Time (UTC)**: \`${BUILD_TIME}\`"
+            echo "> 🤖 **Provenance**: 部分容錯發佈 (Partial Tolerance Release)，具備標準校驗鏈。"
+            echo ""
+            echo -e "$CHANGELOG"
+            echo ""
+            echo "### 📦 產物與容錯狀態清單"
+          } > release_body.md
 
           if [ "$APK_STATUS" = "success" ]; then
             echo "- ✅ **Android GUI**: SFA Universal APK 構建成功 (SFA Commit: \`${SFA_SHA:0:7}\`)." >> release_body.md
@@ -754,24 +751,24 @@ EOF
             echo "- ❌ **Android GUI**: 構建失敗。本次發佈未包含 APK。" >> release_body.md
           fi
 
-          cat << EOF >> release_body.md
-          - ✅ **一體化資源包**:
-            - *GeoIP*: \`${GEOIP_TAG}\` | *Geosite*: \`${GEOSITE_TAG}\`
-            - *Metacubexd*: \`${META_SHA:0:7}\` | *YACD*: \`${YACD_SHA:0:7}\`
-          
-          <details open>
-          <summary><b>🚦 Core 平台構建報告</b></summary>
-          
-          **Successful Targets:**
-          $EXPLICIT_SUCCESS
-
-          **Failed or Skipped Targets:**
-          $EXPLICIT_FAILED
-
-          </details>
-          
-          > 💡 **聲明**: 本倉庫採容錯策略運行，未列於成功清單的平台即代表本次構建失敗被跳過。請核對 \`sha256sums.txt\` 以確保下載檔案一致性。
-          EOF
+          {
+            echo "- ✅ **一體化資源包**:"
+            echo "  - *GeoIP*: \`${GEOIP_TAG}\` | *Geosite*: \`${GEOSITE_TAG}\`"
+            echo "  - *Metacubexd*: \`${META_SHA:0:7}\` | *YACD*: \`${YACD_SHA:0:7}\`"
+            echo ""
+            echo "<details open>"
+            echo "<summary><b>🚦 Core 平台構建報告</b></summary>"
+            echo ""
+            echo "**Successful Targets:**"
+            echo -e "$EXPLICIT_SUCCESS"
+            echo ""
+            echo "**Failed or Skipped Targets:**"
+            echo -e "$EXPLICIT_FAILED"
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "> 💡 **聲明**: 本倉庫採容錯策略運行，未列於成功清單的平台即代表本次構建失敗被跳過。請核對 \`sha256sums.txt\` 以確保下載檔案一致性。"
+          } >> release_body.md
 
           echo "REL_NAME=$REL_NAME" >> "$GITHUB_OUTPUT"
 
