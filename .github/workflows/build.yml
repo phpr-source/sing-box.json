@@ -44,11 +44,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          SFA_SHA=$(git ls-remote https://github.com/SagerNet/sing-box-for-android.git refs/heads/main | awk '{print $1}')
-          GEOIP_TAG=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/SagerNet/sing-geoip/releases/latest | jq -r .tag_name)
-          GEOSITE_TAG=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/SagerNet/sing-geosite/releases/latest | jq -r .tag_name)
-          META_SHA=$(git ls-remote https://github.com/MetaCubeX/metacubexd.git refs/heads/gh-pages | awk '{print $1}')
-          YACD_SHA=$(git ls-remote https://github.com/haishanh/yacd.git refs/heads/gh-pages | awk '{print $1}')
+          
+          fetch_with_retry() {
+            local max_attempts=3
+            local attempt=1
+            while [ $attempt -le $max_attempts ]; do
+              if "$@"; then return 0; fi
+              echo "::warning::Command '$1' failed. Retrying ($attempt/$max_attempts)..."
+              sleep 3
+              attempt=$((attempt + 1))
+            done
+            return 1
+          }
+
+          SFA_SHA=$(fetch_with_retry git ls-remote https://github.com/SagerNet/sing-box-for-android.git refs/heads/main | awk '{print $1}')
+          GEOIP_TAG=$(fetch_with_retry curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/SagerNet/sing-geoip/releases/latest | jq -r .tag_name)
+          GEOSITE_TAG=$(fetch_with_retry curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/SagerNet/sing-geosite/releases/latest | jq -r .tag_name)
+          META_SHA=$(fetch_with_retry git ls-remote https://github.com/MetaCubeX/metacubexd.git refs/heads/gh-pages | awk '{print $1}')
+          YACD_SHA=$(fetch_with_retry git ls-remote https://github.com/haishanh/yacd.git refs/heads/gh-pages | awk '{print $1}')
 
           for var in SFA_SHA GEOIP_TAG GEOSITE_TAG META_SHA YACD_SHA; do
             if [ -z "${!var}" ] || [ "${!var}" = "null" ]; then
@@ -155,8 +168,10 @@ jobs:
 
             if [ "$ROLLING" = "false" ]; then 
               CHK_TAG="v${DISPLAY_VER}-${TIT}"
+              IS_ROLLING=false
             else 
               CHK_TAG="${TIT}"
+              IS_ROLLING=true
             fi
 
             OLD_META=$(gh release download "$CHK_TAG" --pattern metadata.json --repo "${{ github.repository }}" -O - 2>/dev/null || echo "{}")
@@ -194,7 +209,7 @@ jobs:
                 --arg repo "$REPO" \
                 --arg branch "$BR" \
                 --arg title "$TIT" \
-                --argjson rolling "$ROLLING" \
+                --argjson rolling "$IS_ROLLING" \
                 --arg sha "$SHA" \
                 --arg local_sha "$L_SHA" \
                 --arg short_sha "$SHORT_SHA" \
@@ -320,7 +335,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
-          cache: false # 避免 Checkout 路徑變更導致 Go 快取污染
+          cache: false
 
       - uses: actions/setup-java@v4
         with:
@@ -338,7 +353,6 @@ jobs:
             exit 1
           fi
 
-          # 自動從 SFA gradle 檔案提取正確的 NDK 版本
           NDK_VERSION="$(python - <<'PY'
 import re, sys
 from pathlib import Path
@@ -354,12 +368,26 @@ for p in Path("sfa").rglob("build.gradle*"):
 PY
           )"
 
-          if [ -n "${NDK_VERSION:-}" ] && [ -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
+          if [ -n "${NDK_VERSION:-}" ]; then
+            if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
+              echo "::notice::NDK $NDK_VERSION not found. Installing via sdkmanager..."
+              SDK_MGR="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+              [ ! -x "$SDK_MGR" ] && SDK_MGR=$(command -v sdkmanager || true)
+              
+              if [ -n "$SDK_MGR" ] && [ -x "$SDK_MGR" ]; then
+                yes | "$SDK_MGR" "ndk;$NDK_VERSION" >/dev/null 2>&1 || true
+              fi
+            fi
+            
+            if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
+              echo "::error::NDK install failed for version $NDK_VERSION."
+              exit 1
+            fi
             export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
           elif [ -n "${ANDROID_NDK_LATEST_HOME:-}" ] && [ -d "${ANDROID_NDK_LATEST_HOME:-}" ]; then
             export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           else
-            echo "::error::Android NDK not found. ANDROID_NDK_LATEST_HOME is empty or invalid."
+            echo "::error::Android NDK not found and cannot be determined. ANDROID_NDK_LATEST_HOME is empty."
             exit 1
           fi
 
@@ -427,7 +455,6 @@ EOF
             exit 1
           fi
 
-          # 定義執行函數以便重試
           run_gradle() {
             ./gradlew clean "$BUILD_CMD" \
               --no-daemon \
@@ -448,6 +475,7 @@ EOF
             rm -rf "$GRADLE_USER_HOME/caches" "$GRADLE_USER_HOME/daemon" "$GRADLE_USER_HOME/native"
             if ! run_gradle; then
               tail -n 200 gradle-build.log || true
+              cp gradle-build.log ../output/gradle-build-error.log || true
               echo "::error::SFA APK Compilation failed."
               exit 1
             fi
@@ -485,6 +513,18 @@ EOF
           repository: ${{ matrix.branch_info.repo }}
           ref: ${{ matrix.branch_info.sha }}
           fetch-depth: 0
+
+      - name: Pre-flight Artifact Check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          sleep 5 # 給予 API 短暫同步時間
+          COUNT=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" | jq '.total_count // 0')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::No artifacts found for this run. Halting release to prevent empty deployment."
+            exit 1
+          fi
 
       - name: Generate Smart Changelog
         env:
@@ -599,23 +639,72 @@ EOF
             echo "EOF"
           } >> "$GITHUB_ENV"
 
-          rm -f SUCCESS-* apk_meta.env
+          rm -f SUCCESS-* apk_meta.env gradle-build-error.log
 
           mkdir -p Essential-Assets/ui
           cat << 'EOF' > Essential-Assets/config.json
           { "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }
           EOF
 
-          curl -fL --retry 3 -o Essential-Assets/geoip.db "https://github.com/SagerNet/sing-geoip/releases/download/${GEOIP_TAG}/geoip.db"
-          curl -fL --retry 3 -o Essential-Assets/geosite.db "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite.db"
-          if ! curl -fL --retry 3 -o Essential-Assets/geosite-cn.srs "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite-cn.srs"; then
-            echo "::warning::geosite-cn.srs not found, skipping soft dependency."
-          fi
+          fetch_with_retry() {
+            local max_attempts=3
+            local attempt=1
+            while [ $attempt -le $max_attempts ]; do
+              if "$@"; then return 0; fi
+              echo "::warning::Command '$1' failed. Retrying ($attempt/$max_attempts)..."
+              sleep 3
+              attempt=$((attempt + 1))
+            done
+            return 1
+          }
 
-          curl -fL -sS -o metacubexd.zip "https://github.com/MetaCubeX/metacubexd/archive/${META_SHA}.zip"
-          unzip -q metacubexd.zip -d tmp_meta/ && mv $(find tmp_meta -mindepth 1 -maxdepth 1 -type d | head -n 1) Essential-Assets/ui/metacubexd
-          curl -fL -sS -o yacd.zip "https://github.com/haishanh/yacd/archive/${YACD_SHA}.zip"
-          unzip -q yacd.zip -d tmp_yacd/ && mv $(find tmp_yacd -mindepth 1 -maxdepth 1 -type d | head -n 1) Essential-Assets/ui/yacd
+          safe_download() {
+            local url="$1"
+            local dest="$2"
+            local tmpfile
+            tmpfile="$(mktemp)"
+            if fetch_with_retry curl -fL -sS -o "$tmpfile" "$url"; then
+              mv "$tmpfile" "$dest"
+            else
+              rm -f "$tmpfile"
+              echo "::warning::Download failed: $dest"
+            fi
+          }
+
+          safe_download "https://github.com/SagerNet/sing-geoip/releases/download/${GEOIP_TAG}/geoip.db" "Essential-Assets/geoip.db"
+          safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite.db" "Essential-Assets/geosite.db"
+          safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite-cn.srs" "Essential-Assets/geosite-cn.srs"
+
+          if fetch_with_retry curl -fL -sS -o metacubexd.zip "https://github.com/MetaCubeX/metacubexd/archive/${META_SHA}.zip"; then
+            if unzip -q metacubexd.zip -d tmp_meta/; then
+              META_DIR="$(find tmp_meta -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
+              if [ -n "$META_DIR" ] && [ -d "$META_DIR" ]; then
+                mv "$META_DIR" Essential-Assets/ui/metacubexd
+              else
+                echo "::warning::metacubexd directory not found after unzip."
+              fi
+            else
+              echo "::warning::metacubexd unzip failed."
+            fi
+          else
+            echo "::warning::metacubexd download failed."
+          fi
+          
+          if fetch_with_retry curl -fL -sS -o yacd.zip "https://github.com/haishanh/yacd/archive/${YACD_SHA}.zip"; then
+            if unzip -q yacd.zip -d tmp_yacd/; then
+              YACD_DIR="$(find tmp_yacd -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
+              if [ -n "$YACD_DIR" ] && [ -d "$YACD_DIR" ]; then
+                mv "$YACD_DIR" Essential-Assets/ui/yacd
+              else
+                echo "::warning::yacd directory not found after unzip."
+              fi
+            else
+              echo "::warning::yacd unzip failed."
+            fi
+          else
+            echo "::warning::yacd download failed."
+          fi
+          
           rm -rf tmp_* *.zip
 
           zip -9 -r "sing-box-${{ matrix.branch_info.title }}-Essential-Assets.zip" Essential-Assets/
@@ -624,7 +713,7 @@ EOF
           BUILD_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
           echo "BUILD_TIME=$BUILD_TIME" >> "$GITHUB_ENV"
 
-          find . -maxdepth 1 -type f \( ! -name 'sha256sums.txt' ! -name 'metadata.json' ! -name 'temp_hashes.txt' \) -print0 | xargs -0 sha256sum > temp_hashes.txt
+          find . -maxdepth 1 -type f \( ! -name 'sha256sums.txt' ! -name 'metadata.json' ! -name 'temp_hashes.txt' \) -print0 | xargs -0 -r sha256sum > temp_hashes.txt
           HASHES_JSON=$(awk '{printf "{\"file\":\"%s\",\"hash\":\"%s\"}\n", $2, $1}' temp_hashes.txt | jq -s -c '.')
 
           jq -n \
@@ -649,6 +738,7 @@ EOF
           rm temp_hashes.txt
 
       - name: Build Release Body
+        id: release_meta
         env:
           SFA_SHA: ${{ needs.check_updates.outputs.sfa_sha }}
           GEOIP_TAG: ${{ needs.check_updates.outputs.geoip_tag }}
@@ -696,15 +786,15 @@ EOF
           > 💡 **聲明**: 本倉庫採容錯策略運行，未列於成功清單的平台即代表本次構建失敗被跳過。請核對 \`sha256sums.txt\` 以確保下載檔案一致性。
           EOF
 
-          echo "REL_NAME=$REL_NAME" >> "$GITHUB_ENV"
+          echo "REL_NAME=$REL_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Publish Release
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ matrix.branch_info.tag }}
-          name: ${{ env.REL_NAME }}
-          prerelease: ${{ matrix.branch_info.rolling == 'true' }}
-          makeLatest: ${{ matrix.branch_info.rolling == 'false' }}
+          name: ${{ steps.release_meta.outputs.REL_NAME }}
+          prerelease: ${{ matrix.branch_info.rolling }}
+          makeLatest: ${{ !matrix.branch_info.rolling }}
           artifacts: "release_assets/*"
           bodyFile: release_body.md
           allowUpdates: true
