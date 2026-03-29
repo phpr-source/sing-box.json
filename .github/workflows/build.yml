@@ -13,9 +13,6 @@ on:
   repository_dispatch:
     types: [upstream_sync]
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -135,7 +132,7 @@ jobs:
               SHA=$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$search_br" | awk '{print $1}')
               if [ -n "$SHA" ]; then
                 if [ "$search_br" != "$BR_INPUT" ]; then
-                  echo "::warning::Branch '$BR_INPUT' not found in $REPO. Safely fell back to alternative branch: '$search_br'."
+                  echo "::notice::Branch '$BR_INPUT' not found in $REPO. Safely fell back to alternative branch: '$search_br'."
                   BR="$search_br"
                 fi
                 break
@@ -336,7 +333,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
       - name: Prepare Android Environment
         shell: bash
@@ -411,7 +408,7 @@ jobs:
           cd ../sfa
           chmod +x ./gradlew
 
-          printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
+          printf 'sdk.dir=%s\nndk.dir=%s\ngo.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" "$(go env GOROOT)" > local.properties
           
           {
             echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true"
@@ -425,7 +422,7 @@ jobs:
           mkdir -p ../output
 
           if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::warning::KEYSTORE_BASE64 is empty! Automatically generating a temporary keystore."
+            echo "::notice::KEYSTORE_BASE64 is empty! Automatically generating a temporary keystore."
             keytool -genkey -v -keystore ci-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias "$KEY_ALIAS" -storepass "$KEYSTORE_PASS" -keypass "$KEY_PASS" -dname "CN=sing-box,O=CI,C=US"
           else
             echo "$KEYSTORE_BASE64" | base64 --decode > ci-release.jks
