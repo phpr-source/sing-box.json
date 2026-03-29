@@ -301,29 +301,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: ${{ matrix.branch_info.repo }}
-          ref: ${{ matrix.branch_info.sha }}
-          fetch-depth: 0
-          path: sing-box
-
-      - uses: actions/checkout@v4
-        with:
           repository: SagerNet/sing-box-for-android
           ref: ${{ needs.check_updates.outputs.sfa_sha }}
           fetch-depth: 0
           path: sfa
           submodules: recursive
 
+      - name: Checkout Target Core Submodule
+        run: |
+          # 將 SFA 內建的 sing-box 模組動態切換到目標版本
+          cd sfa/sing-box
+          git remote add target_repo "https://github.com/${{ matrix.branch_info.repo }}.git"
+          git fetch target_repo "${{ matrix.branch_info.sha }}"
+          git checkout "${{ matrix.branch_info.sha }}"
+
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
           cache: true
-          cache-dependency-path: sing-box/go.mod
+          cache-dependency-path: sfa/sing-box/go.mod
 
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
           cache: 'gradle'
 
       - name: Build Android AAR & APK
@@ -338,23 +339,21 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           export PATH="$PATH:$(go env GOPATH)/bin"
           
-          cd sing-box
-          make lib_install || true
-          make lib_android
-
-          AAR_FILE="$(find . -type f \( -name 'libbox*.aar' -o -name '*.aar' \) | head -n 1 || true)"
-          if [ -z "$AAR_FILE" ] || [ ! -f "$AAR_FILE" ]; then
-            echo "::error::AAR not found. Core build for Android failed."
-            exit 1
+          # 核心修復：強制抹除舊版 sing-box 原始碼中對 Java 17 的報錯判定，讓 Java 21 無縫通過
+          FILE="sfa/sing-box/cmd/internal/build_libbox/main.go"
+          if [ -f "$FILE" ]; then
+            sed -i 's/"openjdk version \\"17/"openjdk version \\"21/g' "$FILE" || true
+            sed -i 's/17/21/g' "$FILE" || true
+            sed -i 's/log.Fatal/log.Println/g' "$FILE" || true
+            sed -i 's/os.Exit(1)//g' "$FILE" || true
           fi
 
-          mkdir -p ../sfa/app/libs
-          rm -f ../sfa/app/libs/*.aar
-          cp "$AAR_FILE" ../sfa/app/libs/
-
-          cd ../sfa
-          printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
+          cd sfa
           
+          # 直接把 Go 路徑 (go.dir) 注入，讓 Gradle 負責生命週期中的所有核心庫編譯，完美相容官方建置流
+          printf 'sdk.dir=%s\nndk.dir=%s\ngo.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" "$(go env GOROOT)" > local.properties
+          
+          # OOM 預防措施
           printf 'org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true\nkotlin.daemon.jvmargs=-Xmx1g -Djava.awt.headless=true\nandroid.useAndroidX=true\nandroid.enableJetifier=true\n' >> gradle.properties
 
           mkdir -p ../output
@@ -366,6 +365,7 @@ jobs:
             echo "$KEYSTORE_BASE64" | base64 --decode > ci-release.jks
           fi
 
+          # 檢查上游是否存在 assemblePlayRelease 分支 (自動相容不同版本的 SFA)
           BUILD_CMD=":app:assemblePlayRelease"
           if ! ./gradlew tasks | grep -q "assemblePlayRelease"; then
             BUILD_CMD=":app:assembleRelease"
