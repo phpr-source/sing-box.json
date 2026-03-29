@@ -44,8 +44,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          
-          # SFA 官方倉庫有時預設分支為 main，若報錯可替換為 master
           SFA_SHA=$(git ls-remote https://github.com/SagerNet/sing-box-for-android.git refs/heads/main | awk '{print $1}')
           GEOIP_TAG=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/SagerNet/sing-geoip/releases/latest | jq -r .tag_name)
           GEOSITE_TAG=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/SagerNet/sing-geosite/releases/latest | jq -r .tag_name)
@@ -80,13 +78,28 @@ jobs:
         run: |
           set -euo pipefail
 
-          CORE_TARGETS_JSON='[{"os":"linux","arch":"amd64","amd":"v3","flavor":"full","upx":false},{"os":"linux","arch":"amd64","flavor":"full","upx":false},{"os":"linux","arch":"arm64","flavor":"full","upx":false},{"os":"linux","arch":"arm","arm":"7","flavor":"full","upx":true},{"os":"linux","arch":"arm","arm":"7","flavor":"lite","upx":true},{"os":"linux","arch":"arm","arm":"5","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","mips":"softfloat","flavor":"lite","upx":true},{"os":"windows","arch":"amd64","amd":"v3","flavor":"full","upx":false},{"os":"darwin","arch":"amd64","flavor":"full","upx":false},{"os":"darwin","arch":"arm64","flavor":"full","upx":false}]'
+          CORE_TARGETS_JSON=$(cat << 'EOF' | jq -c .
+          [
+            {"os":"linux","arch":"amd64","amd":"v3","flavor":"full","upx":false},
+            {"os":"linux","arch":"amd64","flavor":"full","upx":false},
+            {"os":"linux","arch":"arm64","flavor":"full","upx":false},
+            {"os":"linux","arch":"arm","arm":"7","flavor":"full","upx":true},
+            {"os":"linux","arch":"arm","arm":"7","flavor":"lite","upx":true},
+            {"os":"linux","arch":"arm","arm":"5","flavor":"lite","upx":true},
+            {"os":"linux","arch":"mipsle","flavor":"lite","upx":true},
+            {"os":"linux","arch":"mipsle","mips":"softfloat","flavor":"lite","upx":true},
+            {"os":"windows","arch":"amd64","amd":"v3","flavor":"full","upx":false},
+            {"os":"darwin","arch":"amd64","flavor":"full","upx":false},
+            {"os":"darwin","arch":"arm64","flavor":"full","upx":false}
+          ]
+          EOF
+          )
           echo "core_targets=$CORE_TARGETS_JSON" >> "$GITHUB_OUTPUT"
 
           TARGETS=(
             "reF1nd/sing-box|reF1nd-testing|reF1nd-Testing|true"
             "reF1nd/sing-box|reF1nd-stable|reF1nd-Stable|false"
-            "SagerNet/sing-box|dev-next|Official-Alpha|true"
+            "SagerNet/sing-box|dev|Official-Alpha|true"
             "SagerNet/sing-box|testing|Official-Stable|false" 
           )
 
@@ -105,11 +118,29 @@ jobs:
               fi
             fi
 
-            SHA=$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$BR" | awk '{print $1}')
+            BR_INPUT="$BR"
+            SHA=""
+            for search_br in "$BR_INPUT" "dev" "testing" "main-next" "dev-next" "next" "main"; do
+              SHA=$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$search_br" | awk '{print $1}')
+              if [ -n "$SHA" ]; then
+                if [ "$search_br" != "$BR_INPUT" ]; then
+                  echo "::warning::Branch '$BR_INPUT' not found in $REPO. Safely fell back to alternative branch: '$search_br'."
+                  BR="$search_br"
+                fi
+                break
+              fi
+            done
+
             if [ -z "$SHA" ]; then
-              echo "::error::Branch $BR not found in $REPO. Upstream branch missing."
+              echo "::warning::No alternative branches found for $REPO. Attempting HEAD fallback."
+              SHA=$(git ls-remote "https://github.com/${REPO}.git" "HEAD" | awk '{print $1}')
+            fi
+
+            if [ -z "$SHA" ]; then
+              echo "::error::Critical failure: Could not resolve ANY valid branch or HEAD for $REPO. Upstream branch is missing."
               exit 1
             fi
+
             SHORT_SHA="${SHA:0:7}"
 
             TMPDIR="$(mktemp -d)"
@@ -273,7 +304,7 @@ jobs:
           repository: ${{ matrix.branch_info.repo }}
           ref: ${{ matrix.branch_info.sha }}
           fetch-depth: 0
-          path: core
+          path: sing-box
 
       - uses: actions/checkout@v4
         with:
@@ -281,11 +312,13 @@ jobs:
           ref: ${{ needs.check_updates.outputs.sfa_sha }}
           fetch-depth: 0
           path: sfa
+          submodules: recursive
 
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
           cache: true
+          cache-dependency-path: sing-box/go.mod
 
       - uses: actions/setup-java@v4
         with:
@@ -293,16 +326,22 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      - name: Build Android APK
+      - name: Build Android AAR & APK
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'password' }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'release' }}
+          KEY_PASS: ${{ secrets.KEY_PASS || 'password' }}
         run: |
           set -euo pipefail
           export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           export PATH="$PATH:$(go env GOPATH)/bin"
+          
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
 
-          cd core
+          cd sing-box
           make lib_install
           make lib_android
 
@@ -318,7 +357,7 @@ jobs:
 
           cd ../sfa
           printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
-          printf 'org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8 -Djava.awt.headless=true\nkotlin.daemon.jvmargs=-Xmx2g -Djava.awt.headless=true\n' >> gradle.properties
+          printf 'org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8 -Djava.awt.headless=true\nkotlin.daemon.jvmargs=-Xmx2g -Djava.awt.headless=true\nandroid.useAndroidX=true\nandroid.enableJetifier=true\n' >> gradle.properties
 
           mkdir -p ../output
 
@@ -331,10 +370,10 @@ jobs:
 
           if ! ./gradlew clean :app:assemblePlayRelease --no-daemon --stacktrace -x lint \
             -Pandroid.injected.signing.store.file=$(pwd)/ci-release.jks \
-            -Pandroid.injected.signing.store.password=password \
-            -Pandroid.injected.signing.key.alias=release \
-            -Pandroid.injected.signing.key.password=password; then
-            echo "::error::SFA Kotlin Compilation failed. Halting Android workflow."
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASS"; then
+            echo "::error::SFA APK Compilation failed. Halting Android workflow."
             exit 1
           fi
 
@@ -423,7 +462,7 @@ jobs:
           merge-multiple: true
           path: release_assets
 
-      - name: Prepare Assets & Explicit Tolerance Tracking
+      - name: Prepare Assets & Generate Traceability
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SFA_SHA: ${{ needs.check_updates.outputs.sfa_sha }}
