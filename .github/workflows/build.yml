@@ -294,11 +294,21 @@ jobs:
     needs: check_updates
     if: needs.check_updates.outputs.has_builds == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         branch_info: ${{ fromJson(needs.check_updates.outputs.matrix).include }}
+    env:
+      GRADLE_USER_HOME: ${{ runner.temp }}/gradle-home
     steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.branch_info.repo }}
+          ref: ${{ matrix.branch_info.sha }}
+          fetch-depth: 0
+          path: sing-box
+
       - uses: actions/checkout@v4
         with:
           repository: SagerNet/sing-box-for-android
@@ -307,25 +317,54 @@ jobs:
           path: sfa
           submodules: recursive
 
-      - name: Checkout Target Core Submodule
-        run: |
-          # 將 SFA 內建的 sing-box 模組動態切換到目標版本
-          cd sfa/sing-box
-          git remote add target_repo "https://github.com/${{ matrix.branch_info.repo }}.git"
-          git fetch target_repo "${{ matrix.branch_info.sha }}"
-          git checkout "${{ matrix.branch_info.sha }}"
-
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
-          cache: true
-          cache-dependency-path: sfa/sing-box/go.mod
+          cache: false # 避免 Checkout 路徑變更導致 Go 快取污染
 
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '21'
-          cache: 'gradle'
+          java-version: '17'
+
+      - name: Prepare Android Environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [ -z "$ANDROID_SDK_ROOT" ] || [ ! -d "$ANDROID_SDK_ROOT" ]; then
+            echo "::error::Android SDK not found on runner."
+            exit 1
+          fi
+
+          # 自動從 SFA gradle 檔案提取正確的 NDK 版本
+          NDK_VERSION="$(python - <<'PY'
+import re, sys
+from pathlib import Path
+for p in Path("sfa").rglob("build.gradle*"):
+    try:
+        text = p.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        continue
+    m = re.search(r'ndkVersion\s*(?:=)?\s*[\'"]([^\'"]+)[\'"]', text)
+    if m:
+        print(m.group(1))
+        sys.exit(0)
+PY
+          )"
+
+          if [ -n "${NDK_VERSION:-}" ] && [ -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
+            export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
+          elif [ -n "${ANDROID_NDK_LATEST_HOME:-}" ] && [ -d "${ANDROID_NDK_LATEST_HOME:-}" ]; then
+            export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          else
+            echo "::error::Android NDK not found. ANDROID_NDK_LATEST_HOME is empty or invalid."
+            exit 1
+          fi
+
+          printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\nANDROID_NDK_HOME=%s\n' \
+            "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" "$ANDROID_SDK_ROOT" "$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
 
       - name: Build Android AAR & APK
         env:
@@ -333,59 +372,93 @@ jobs:
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'password' }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'release' }}
           KEY_PASS: ${{ secrets.KEY_PASS || 'password' }}
+        shell: bash
         run: |
           set -euo pipefail
+
           export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
-          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           export PATH="$PATH:$(go env GOPATH)/bin"
-          
-          # 核心修復：強制抹除舊版 sing-box 原始碼中對 Java 17 的報錯判定，讓 Java 21 無縫通過
-          FILE="sfa/sing-box/cmd/internal/build_libbox/main.go"
-          if [ -f "$FILE" ]; then
-            sed -i 's/"openjdk version \\"17/"openjdk version \\"21/g' "$FILE" || true
-            sed -i 's/17/21/g' "$FILE" || true
-            sed -i 's/log.Fatal/log.Println/g' "$FILE" || true
-            sed -i 's/os.Exit(1)//g' "$FILE" || true
+
+          rm -rf "$GRADLE_USER_HOME"
+          mkdir -p "$GRADLE_USER_HOME"
+
+          cd sing-box
+          make lib_install
+          make lib_android
+
+          AAR_FILE="$(find . -type f \( -name 'libbox*.aar' -o -name '*.aar' \) | sort | head -n 1 || true)"
+          if [ -z "$AAR_FILE" ] || [ ! -f "$AAR_FILE" ]; then
+            echo "::error::AAR not found. Core build for Android failed."
+            exit 1
           fi
 
-          cd sfa
-          
-          # 直接把 Go 路徑 (go.dir) 注入，讓 Gradle 負責生命週期中的所有核心庫編譯，完美相容官方建置流
-          printf 'sdk.dir=%s\nndk.dir=%s\ngo.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" "$(go env GOROOT)" > local.properties
-          
-          # OOM 預防措施
-          printf 'org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true\nkotlin.daemon.jvmargs=-Xmx1g -Djava.awt.headless=true\nandroid.useAndroidX=true\nandroid.enableJetifier=true\n' >> gradle.properties
+          mkdir -p ../sfa/app/libs
+          rm -f ../sfa/app/libs/*.aar
+          cp "$AAR_FILE" ../sfa/app/libs/
+
+          cd ../sfa
+          chmod +x ./gradlew
+
+          printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
+          cat >> gradle.properties <<'EOF'
+org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true
+org.gradle.caching=false
+org.gradle.configuration-cache=false
+kotlin.daemon.jvmargs=-Xmx1g -Djava.awt.headless=true
+android.useAndroidX=true
+android.enableJetifier=true
+EOF
 
           mkdir -p ../output
 
           if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::warning::KEYSTORE_BASE64 is empty! Automatically generating a temporary keystore to allow build to pass."
+            echo "::warning::KEYSTORE_BASE64 is empty! Automatically generating a temporary keystore."
             keytool -genkey -v -keystore ci-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias "$KEY_ALIAS" -storepass "$KEYSTORE_PASS" -keypass "$KEY_PASS" -dname "CN=sing-box,O=CI,C=US"
           else
             echo "$KEYSTORE_BASE64" | base64 --decode > ci-release.jks
           fi
 
-          # 檢查上游是否存在 assemblePlayRelease 分支 (自動相容不同版本的 SFA)
-          BUILD_CMD=":app:assemblePlayRelease"
-          if ! ./gradlew tasks | grep -q "assemblePlayRelease"; then
+          if ./gradlew help --task assemblePlayRelease >/dev/null 2>&1; then
+            BUILD_CMD=":app:assemblePlayRelease"
+          elif ./gradlew help --task assembleRelease >/dev/null 2>&1; then
             BUILD_CMD=":app:assembleRelease"
-          fi
-
-          if ! ./gradlew clean $BUILD_CMD --no-daemon --stacktrace -x lint \
-            -Pandroid.injected.signing.store.file=$(pwd)/ci-release.jks \
-            -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
-            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
-            -Pandroid.injected.signing.key.password="$KEY_PASS"; then
-            echo "::error::SFA APK Compilation failed. Halting Android workflow."
+          else
+            echo "::error::No APK assemble task found."
             exit 1
           fi
 
-          APK_PATH="$(find app/build/outputs/apk -type f -name '*.apk' | head -n 1 || true)"
+          # 定義執行函數以便重試
+          run_gradle() {
+            ./gradlew clean "$BUILD_CMD" \
+              --no-daemon \
+              --stacktrace \
+              --info \
+              --no-build-cache \
+              --refresh-dependencies \
+              -x lint \
+              -Pandroid.injected.signing.store.file="$(pwd)/ci-release.jks" \
+              -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
+              -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+              -Pandroid.injected.signing.key.password="$KEY_PASS" 2>&1 | tee gradle-build.log
+          }
+
+          if ! run_gradle; then
+            echo "::warning::Gradle build failed. Purging cache and retrying once."
+            ./gradlew --stop || true
+            rm -rf "$GRADLE_USER_HOME/caches" "$GRADLE_USER_HOME/daemon" "$GRADLE_USER_HOME/native"
+            if ! run_gradle; then
+              tail -n 200 gradle-build.log || true
+              echo "::error::SFA APK Compilation failed."
+              exit 1
+            fi
+          fi
+
+          APK_PATH="$(find app/build/outputs/apk -type f -name '*.apk' | sort | head -n 1 || true)"
           if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
             echo "::error::APK generation failed."
             exit 1
           fi
-          
+
           APK_NAME="SFA-${{ matrix.branch_info.display_ver }}-${{ matrix.branch_info.title }}-universal.apk"
           cp "$APK_PATH" "../output/$APK_NAME"
           echo "APK_NAME=$APK_NAME" > ../output/apk_meta.env
