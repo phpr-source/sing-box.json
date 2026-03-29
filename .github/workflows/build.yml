@@ -13,6 +13,10 @@ on:
   repository_dispatch:
     types: [upstream_sync]
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CI: true
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -39,30 +43,43 @@ jobs:
         id: fetch_deps
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
           set -euo pipefail
-          
+
           fetch_with_retry() {
-            local max_attempts=3
-            local attempt=1
-            while [ $attempt -le $max_attempts ]; do
-              if "$@"; then return 0; fi
-              echo "::warning::Command '$1' failed. Retrying ($attempt/$max_attempts)..."
+            local attempt=1 max_attempts=3 out
+            while [ "$attempt" -le "$max_attempts" ]; do
+              if out="$("$@")"; then
+                printf '%s' "$out"
+                return 0
+              fi
+              echo "::warning::Command failed: $* . Retrying ($attempt/$max_attempts)..."
               sleep 3
               attempt=$((attempt + 1))
             done
             return 1
           }
 
-          SFA_SHA=$(fetch_with_retry git ls-remote https://github.com/SagerNet/sing-box-for-android.git refs/heads/main | awk '{print $1}')
-          GEOIP_TAG=$(fetch_with_retry curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/SagerNet/sing-geoip/releases/latest | jq -r .tag_name)
-          GEOSITE_TAG=$(fetch_with_retry curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/SagerNet/sing-geosite/releases/latest | jq -r .tag_name)
-          META_SHA=$(fetch_with_retry git ls-remote https://github.com/MetaCubeX/metacubexd.git refs/heads/gh-pages | awk '{print $1}')
-          YACD_SHA=$(fetch_with_retry git ls-remote https://github.com/haishanh/yacd.git refs/heads/gh-pages | awk '{print $1}')
+          git_head() {
+            git ls-remote "$1" "$2" | awk 'NR==1{print $1}'
+          }
+
+          latest_tag() {
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$1" | jq -r '.tag_name // empty'
+          }
+
+          SFA_SHA="$(fetch_with_retry git_head https://github.com/SagerNet/sing-box-for-android.git refs/heads/main)"
+          [ -z "$SFA_SHA" ] && SFA_SHA="$(fetch_with_retry git_head https://github.com/SagerNet/sing-box-for-android.git refs/heads/master)"
+
+          GEOIP_TAG="$(fetch_with_retry latest_tag https://api.github.com/repos/SagerNet/sing-geoip/releases/latest)"
+          GEOSITE_TAG="$(fetch_with_retry latest_tag https://api.github.com/repos/SagerNet/sing-geosite/releases/latest)"
+          META_SHA="$(fetch_with_retry git_head https://github.com/MetaCubeX/metacubexd.git refs/heads/gh-pages)"
+          YACD_SHA="$(fetch_with_retry git_head https://github.com/haishanh/yacd.git refs/heads/gh-pages)"
 
           for var in SFA_SHA GEOIP_TAG GEOSITE_TAG META_SHA YACD_SHA; do
             if [ -z "${!var}" ] || [ "${!var}" = "null" ]; then
-              echo "::error::Failed to fetch dependency $var."
+              echo "::error::Failed to fetch dependency: $var"
               exit 1
             fi
           done
@@ -76,7 +93,6 @@ jobs:
       - name: Determine Build Matrix & Targets
         id: set_matrix
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT: ${{ github.event_name }}
           IN_BRANCH: ${{ github.event.inputs.branch }}
           PAYLOAD_BRANCH: ${{ github.event.client_payload.branch || '' }}
@@ -85,10 +101,11 @@ jobs:
           GEOSITE_TAG: ${{ steps.fetch_deps.outputs.geosite_tag }}
           META_SHA: ${{ steps.fetch_deps.outputs.meta_sha }}
           YACD_SHA: ${{ steps.fetch_deps.outputs.yacd_sha }}
+        shell: bash
         run: |
           set -euo pipefail
 
-          CORE_TARGETS_JSON=$(echo '[
+          CORE_TARGETS_JSON='[
             {"os":"linux","arch":"amd64","amd":"v3","flavor":"full","upx":false},
             {"os":"linux","arch":"amd64","flavor":"full","upx":false},
             {"os":"linux","arch":"arm64","flavor":"full","upx":false},
@@ -100,15 +117,13 @@ jobs:
             {"os":"windows","arch":"amd64","amd":"v3","flavor":"full","upx":false},
             {"os":"darwin","arch":"amd64","flavor":"full","upx":false},
             {"os":"darwin","arch":"arm64","flavor":"full","upx":false}
-          ]' | jq -c .)
-          
-          echo "core_targets=$CORE_TARGETS_JSON" >> "$GITHUB_OUTPUT"
+          ]'
 
           TARGETS=(
             "reF1nd/sing-box|reF1nd-testing|reF1nd-Testing|true"
             "reF1nd/sing-box|reF1nd-stable|reF1nd-Stable|false"
             "SagerNet/sing-box|dev-next|Official-Alpha|true"
-            "SagerNet/sing-box|testing|Official-Stable|false" 
+            "SagerNet/sing-box|testing|Official-Stable|false"
           )
 
           JSON="[]"
@@ -120,62 +135,71 @@ jobs:
             if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ] && [ "$IN_BRANCH" != "$TIT" ]; then
               continue
             fi
+
             if [ "$EVENT" = "repository_dispatch" ] && [ -n "$PAYLOAD_BRANCH" ]; then
               if [ "$PAYLOAD_BRANCH" != "$BR" ] && [ "$PAYLOAD_BRANCH" != "$TIT" ]; then
                 continue
               fi
             fi
 
-            BR_INPUT="$BR"
+            RESOLVED_BR="$BR"
             SHA=""
-            for search_br in "$BR_INPUT" "dev-next" "testing" "main" "dev" "main-next" "next"; do
-              SHA=$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$search_br" | awk '{print $1}')
+
+            for search_br in "$BR" "dev-next" "testing" "main" "dev" "main-next" "next"; do
+              SHA="$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$search_br" | awk 'NR==1{print $1}')"
               if [ -n "$SHA" ]; then
-                if [ "$search_br" != "$BR_INPUT" ]; then
-                  echo "::notice::Branch '$BR_INPUT' not found in $REPO. Safely fell back to alternative branch: '$search_br'."
-                  BR="$search_br"
+                if [ "$search_br" != "$BR" ]; then
+                  echo "::warning::Branch '$BR' not found in $REPO. Fallback branch used: '$search_br'."
+                  RESOLVED_BR="$search_br"
                 fi
                 break
               fi
             done
 
             if [ -z "$SHA" ]; then
-              echo "::warning::No alternative branches found for $REPO. Attempting HEAD fallback."
-              SHA=$(git ls-remote "https://github.com/${REPO}.git" "HEAD" | awk '{print $1}')
+              SHA="$(git ls-remote "https://github.com/${REPO}.git" HEAD | awk 'NR==1{print $1}')"
             fi
 
             if [ -z "$SHA" ]; then
-              echo "::error::Critical failure: Could not resolve ANY valid branch or HEAD for $REPO."
+              echo "::error::Could not resolve a valid commit for $REPO"
               exit 1
             fi
 
             SHORT_SHA="${SHA:0:7}"
 
             TMPDIR="$(mktemp -d)"
-            git clone --bare --filter=blob:none "https://github.com/${REPO}.git" "$TMPDIR" >/dev/null 2>&1
-            APP_VER=$(git --git-dir="$TMPDIR" describe --tags --abbrev=0 "$SHA" 2>/dev/null | sed 's/^v//' || true)
+            git clone --bare --filter=blob:none "https://github.com/${REPO}.git" "$TMPDIR" >/dev/null 2>&1 || true
+            APP_VER="$(git --git-dir="$TMPDIR" describe --tags --abbrev=0 "$SHA" 2>/dev/null | sed 's/^v//' || true)"
             rm -rf "$TMPDIR"
 
             [ -z "$APP_VER" ] && APP_VER="$SHORT_SHA"
-            
+
             BUILD_VER="$SHA"
             DISPLAY_VER="$APP_VER"
 
-            if [ "$ROLLING" = "false" ]; then 
+            if [ "$ROLLING" = "false" ]; then
               CHK_TAG="v${DISPLAY_VER}-${TIT}"
               IS_ROLLING=false
-            else 
+            else
               CHK_TAG="${TIT}"
               IS_ROLLING=true
             fi
 
-            OLD_META=$(gh release download "$CHK_TAG" --pattern metadata.json --repo "${{ github.repository }}" -O - 2>/dev/null || echo "{}")
-            L_SHA=$(echo "$OLD_META" | jq -r '.sha // "none"')
-            L_SFA=$(echo "$OLD_META" | jq -r '.sfa_sha // "none"')
-            L_GEOIP=$(echo "$OLD_META" | jq -r '.geoip_tag // "none"')
-            L_GEOSITE=$(echo "$OLD_META" | jq -r '.geosite_tag // "none"')
-            L_META=$(echo "$OLD_META" | jq -r '.meta_sha // "none"')
-            L_YACD=$(echo "$OLD_META" | jq -r '.yacd_sha // "none"')
+            OLD_META_DIR="$(mktemp -d)"
+            OLD_META='{}'
+            if gh release download "$CHK_TAG" --pattern metadata.json --repo "${{ github.repository }}" --dir "$OLD_META_DIR" >/dev/null 2>&1; then
+              if [ -f "$OLD_META_DIR/metadata.json" ]; then
+                OLD_META="$(cat "$OLD_META_DIR/metadata.json")"
+              fi
+            fi
+            rm -rf "$OLD_META_DIR"
+
+            L_SHA="$(echo "$OLD_META" | jq -r '.sha // "none"')"
+            L_SFA="$(echo "$OLD_META" | jq -r '.sfa_sha // "none"')"
+            L_GEOIP="$(echo "$OLD_META" | jq -r '.geoip_tag // "none"')"
+            L_GEOSITE="$(echo "$OLD_META" | jq -r '.geosite_tag // "none"')"
+            L_META="$(echo "$OLD_META" | jq -r '.meta_sha // "none"')"
+            L_YACD="$(echo "$OLD_META" | jq -r '.yacd_sha // "none"')"
 
             NEEDS_UPDATE="false"
             UPDATE_REASON=""
@@ -193,16 +217,16 @@ jobs:
               NEEDS_UPDATE="true"
               UPDATE_REASON="Dependency Updates"
             fi
-            
+
             if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ]; then
               NEEDS_UPDATE="true"
               UPDATE_REASON="Manual Branch Sync"
             fi
 
             if [ "$NEEDS_UPDATE" = "true" ]; then
-              JSON=$(echo "$JSON" | jq -c \
+              JSON="$(echo "$JSON" | jq -c \
                 --arg repo "$REPO" \
-                --arg branch "$BR" \
+                --arg branch "$RESOLVED_BR" \
                 --arg title "$TIT" \
                 --argjson rolling "$IS_ROLLING" \
                 --arg sha "$SHA" \
@@ -212,13 +236,14 @@ jobs:
                 --arg display_ver "$DISPLAY_VER" \
                 --arg tag "$CHK_TAG" \
                 --arg reason "$UPDATE_REASON" \
-                '. += [{"repo": $repo, "branch": $branch, "title": $title, "rolling": $rolling, "sha": $sha, "local_sha": $local_sha, "short_sha": $short_sha, "build_ver": $build_ver, "display_ver": $display_ver, "tag": $tag, "reason": $reason}]')
+                '. += [{"repo": $repo, "branch": $branch, "title": $title, "rolling": $rolling, "sha": $sha, "local_sha": $local_sha, "short_sha": $short_sha, "build_ver": $build_ver, "display_ver": $display_ver, "tag": $tag, "reason": $reason}]')"
               HAS="true"
             fi
           done
 
           echo "matrix={\"include\":$JSON}" >> "$GITHUB_OUTPUT"
           echo "has_builds=$HAS" >> "$GITHUB_OUTPUT"
+          echo "core_targets=$CORE_TARGETS_JSON" >> "$GITHUB_OUTPUT"
 
   build_core:
     needs: check_updates
@@ -246,32 +271,46 @@ jobs:
         with:
           install-only: true
 
-      - name: Build Core
+      - name: Compute Artifact Name
+        id: meta
+        shell: bash
         run: |
           set -euo pipefail
-          export GOOS=${{ matrix.target.os }}
-          export GOARCH=${{ matrix.target.arch }}
+          suffix=""
+          [ -n "${{ matrix.target.amd || '' }}" ] && suffix="${suffix}${{ matrix.target.amd }}"
+          [ -n "${{ matrix.target.arm || '' }}" ] && suffix="${suffix}v${{ matrix.target.arm }}"
+          [ -n "${{ matrix.target.mips || '' }}" ] && suffix="${suffix}-${{ matrix.target.mips }}"
+          echo "artifact_name=bin-${{ matrix.branch_info.title }}-core-${{ matrix.target.os }}-${{ matrix.target.arch }}${suffix}-${{ matrix.target.flavor }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Core
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GOOS="${{ matrix.target.os }}"
+          export GOARCH="${{ matrix.target.arch }}"
           export CGO_ENABLED=0
 
-          SUF=""
-          if [ -n "${{ matrix.target.amd || '' }}" ]; then export GOAMD64="${{ matrix.target.amd }}"; SUF="${{ matrix.target.amd }}"; fi
-          if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; SUF="v${{ matrix.target.arm }}"; fi
-          if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; SUF="-${{ matrix.target.mips }}"; fi
+          if [ -n "${{ matrix.target.amd || '' }}" ]; then export GOAMD64="${{ matrix.target.amd }}"; fi
+          if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; fi
+          if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; fi
 
           TAGS="with_quic,with_utls,with_clash_api"
           [ "${{ matrix.target.flavor }}" != "lite" ] && TAGS="${TAGS},with_gvisor,with_acme,with_v2ray_api,with_wireguard"
 
-          IDENTIFIER="${{ matrix.target.os }}-${{ matrix.target.arch }}${SUF}-${{ matrix.target.flavor }}"
-          NAME="sing-box-${{ matrix.branch_info.display_ver }}-${{ matrix.branch_info.title }}-${IDENTIFIER}"
           BIN="sing-box"
           [ "${{ matrix.target.os }}" = "windows" ] && BIN="sing-box.exe"
+
+          if [ -z "${{ matrix.branch_info.display_ver }}" ] || [ -z "${{ matrix.branch_info.short_sha }}" ]; then
+            echo "::error::Missing version metadata."
+            exit 1
+          fi
 
           if [ "${{ matrix.branch_info.display_ver }}" = "${{ matrix.branch_info.short_sha }}" ]; then
             VERSION_LDFLAG="${{ matrix.branch_info.display_ver }}"
           else
             VERSION_LDFLAG="${{ matrix.branch_info.display_ver }}-${{ matrix.branch_info.short_sha }}"
           fi
-          
+
           LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=$VERSION_LDFLAG"
 
           go build -trimpath -ldflags "$LDFLAGS" -tags "$TAGS" -o "$BIN" ./cmd/sing-box
@@ -279,16 +318,17 @@ jobs:
 
           mkdir -p output
           if [ "${{ matrix.target.os }}" = "windows" ]; then
-            zip -9 -j -q "output/${NAME}.zip" "$BIN"
+            zip -9 -j -q "output/${{ steps.meta.outputs.artifact_name }}.zip" "$BIN"
           else
-            tar -czf "output/${NAME}.tar.gz" "$BIN"
+            tar -czf "output/${{ steps.meta.outputs.artifact_name }}.tar.gz" "$BIN"
           fi
 
-          if [ "${{ matrix.target.upx }}" = "true" ] && upx --lzma --best "$BIN"; then
-            cp "$BIN" "output/${NAME}-upx.upx"
+          if [ "${{ matrix.target.upx }}" = "true" ]; then
+            upx --lzma --best "$BIN" || true
+            cp "$BIN" "output/${{ steps.meta.outputs.artifact_name }}-upx"
           fi
 
-          touch "output/SUCCESS-${IDENTIFIER}"
+          touch "output/SUCCESS-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd || '' }}${{ matrix.target.arm != '' && format('v{0}', matrix.target.arm) || '' }}${{ matrix.target.mips != '' && format('-{0}', matrix.target.mips) || '' }}-${{ matrix.target.flavor }}"
 
       - name: Attest Build Provenance
         uses: actions/attest-build-provenance@v2
@@ -297,14 +337,15 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: bin-${{ matrix.branch_info.title }}-core-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd || '' }}${{ matrix.target.arm != '' && format('v{0}', matrix.target.arm) || '' }}${{ matrix.target.mips != '' && format('-{0}', matrix.target.mips) || '' }}-${{ matrix.target.flavor }}
+          name: ${{ steps.meta.outputs.artifact_name }}
           path: output/*
+          if-no-files-found: error
 
   build_android:
     needs: check_updates
     if: needs.check_updates.outputs.has_builds == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -332,42 +373,44 @@ jobs:
 
       - uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '21'
+          distribution: temurin
+          java-version: '17'
 
       - name: Prepare Android Environment
         shell: bash
         run: |
           set -euo pipefail
 
-          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
           if [ -z "$ANDROID_SDK_ROOT" ] || [ ! -d "$ANDROID_SDK_ROOT" ]; then
             echo "::error::Android SDK not found on runner."
             exit 1
           fi
 
-          NDK_VERSION=$(find sfa -type f -name "*build.gradle*" -exec awk -F"['\"]" '/ndkVersion/ {print $2}' {} + | head -n 1 || true)
+          NDK_VERSION="$(find sfa -type f \( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'libs.versions.toml' \) -print0 \
+            | xargs -0 grep -hE 'ndkVersion' 2>/dev/null \
+            | head -n 1 \
+            | sed -E "s/.*ndkVersion[[:space:]=:]*[\"']([^\"']+)[\"'].*/\1/" \
+            | tr -d '\r' || true)"
 
-          if [ -n "${NDK_VERSION:-}" ]; then
+          if [ -n "$NDK_VERSION" ]; then
             if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
-              echo "::notice::NDK $NDK_VERSION not found. Installing via sdkmanager..."
               SDK_MGR="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-              [ ! -x "$SDK_MGR" ] && SDK_MGR=$(command -v sdkmanager || true)
-              
-              if [ -n "$SDK_MGR" ] && [ -x "$SDK_MGR" ]; then
+              [ ! -x "$SDK_MGR" ] && SDK_MGR="$(command -v sdkmanager || true)"
+              if [ -n "${SDK_MGR:-}" ] && [ -x "$SDK_MGR" ]; then
                 yes | "$SDK_MGR" "ndk;$NDK_VERSION" >/dev/null 2>&1 || true
               fi
             fi
-            
+
             if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
               echo "::error::NDK install failed for version $NDK_VERSION."
               exit 1
             fi
-            export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
+            ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
           elif [ -n "${ANDROID_NDK_LATEST_HOME:-}" ] && [ -d "${ANDROID_NDK_LATEST_HOME:-}" ]; then
-            export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+            ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           else
-            echo "::error::Android NDK not found and cannot be determined. ANDROID_NDK_LATEST_HOME is empty."
+            echo "::error::Android NDK not found."
             exit 1
           fi
 
@@ -395,9 +438,9 @@ jobs:
           make lib_install
           make lib_android
 
-          AAR_FILE="$(find . -type f \( -name 'libbox*.aar' -o -name '*.aar' \) | sort | head -n 1 || true)"
+          AAR_FILE="$(find . -type f \( -name 'libbox*.aar' -o -name '*.aar' \) | sort -r | head -n 1 || true)"
           if [ -z "$AAR_FILE" ] || [ ! -f "$AAR_FILE" ]; then
-            echo "::error::AAR not found. Core build for Android failed."
+            echo "::error::AAR not found."
             exit 1
           fi
 
@@ -408,37 +451,51 @@ jobs:
           cd ../sfa
           chmod +x ./gradlew
 
-          printf 'sdk.dir=%s\nndk.dir=%s\ngo.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" "$(go env GOROOT)" > local.properties
-          
-          {
-            echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true"
-            echo "org.gradle.caching=false"
-            echo "org.gradle.configuration-cache=false"
-            echo "kotlin.daemon.jvmargs=-Xmx1g -Djava.awt.headless=true"
-            echo "android.useAndroidX=true"
-            echo "android.enableJetifier=true"
-          } >> gradle.properties
+          printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
+
+          cat >> gradle.properties <<'EOF'
+org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true
+org.gradle.caching=false
+org.gradle.configuration-cache=false
+kotlin.daemon.jvmargs=-Xmx1g -Djava.awt.headless=true
+android.useAndroidX=true
+android.enableJetifier=true
+EOF
 
           mkdir -p ../output
 
           if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::notice::KEYSTORE_BASE64 is empty! Automatically generating a temporary keystore."
-            keytool -genkey -v -keystore ci-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias "$KEY_ALIAS" -storepass "$KEYSTORE_PASS" -keypass "$KEY_PASS" -dname "CN=sing-box,O=CI,C=US"
+            echo "::warning::KEYSTORE_BASE64 is empty, generating a temporary keystore."
+            keytool -genkeypair -v \
+              -keystore ci-release.jks \
+              -storetype JKS \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -alias "$KEY_ALIAS" \
+              -storepass "$KEYSTORE_PASS" \
+              -keypass "$KEY_PASS" \
+              -dname "CN=sing-box,O=CI,C=US"
           else
-            echo "$KEYSTORE_BASE64" | base64 --decode > ci-release.jks
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > ci-release.jks
           fi
 
-          if ./gradlew help --task assemblePlayRelease >/dev/null 2>&1; then
-            BUILD_CMD=":app:assemblePlayRelease"
-          elif ./gradlew help --task assembleRelease >/dev/null 2>&1; then
-            BUILD_CMD=":app:assembleRelease"
-          else
-            echo "::error::No APK assemble task found."
+          BUILD_TASK=""
+          for task in assemblePlayRelease assembleRelease assembleFossRelease assembleFdroidRelease; do
+            if ./gradlew help --task "$task" >/dev/null 2>&1; then
+              BUILD_TASK=":app:$task"
+              break
+            fi
+          done
+
+          if [ -z "$BUILD_TASK" ]; then
+            echo "::error::No supported APK assemble task found."
+            ./gradlew tasks --all || true
             exit 1
           fi
 
           run_gradle() {
-            ./gradlew clean "$BUILD_CMD" \
+            ./gradlew clean "$BUILD_TASK" \
               --no-daemon \
               --stacktrace \
               --info \
@@ -499,45 +556,60 @@ jobs:
       - name: Pre-flight Artifact Check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
           set -euo pipefail
           sleep 5
-          COUNT=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" | jq '.total_count // 0')
+          COUNT="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" | jq '.total_count // 0')"
           if [ "$COUNT" -eq 0 ]; then
-            echo "::error::No artifacts found for this run. Halting release to prevent empty deployment."
+            echo "::error::No artifacts found for this run."
             exit 1
           fi
 
       - name: Generate Smart Changelog
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SFA_SHA: ${{ needs.check_updates.outputs.sfa_sha }}
           GEOIP_TAG: ${{ needs.check_updates.outputs.geoip_tag }}
           GEOSITE_TAG: ${{ needs.check_updates.outputs.geosite_tag }}
           META_SHA: ${{ needs.check_updates.outputs.meta_sha }}
           YACD_SHA: ${{ needs.check_updates.outputs.yacd_sha }}
+        shell: bash
         run: |
+          set -euo pipefail
+
           LOCAL_SHA="${{ matrix.branch_info.local_sha }}"
+          LOG_RAW=""
+
           if [ "$LOCAL_SHA" != "none" ] && [ -n "$LOCAL_SHA" ]; then
-            LOG_RAW=$(git log --pretty=format:"- %s (%h)" ${LOCAL_SHA}..${{ matrix.branch_info.sha }} 2>/dev/null || true)
-          fi
-          if [ -z "${LOG_RAW:-}" ]; then
-            LOG_RAW=$(git log --pretty=format:"- %s (%h)" -n 15 ${{ matrix.branch_info.sha }} 2>/dev/null || true)
+            LOG_RAW="$(git log --pretty=format:"- %s (%h)" "${LOCAL_SHA}..${{ matrix.branch_info.sha }}" 2>/dev/null || true)"
           fi
 
-          OLD_META=$(gh release download "${{ matrix.branch_info.tag }}" --pattern metadata.json --repo "${{ github.repository }}" -O - 2>/dev/null || echo "{}")
-          L_SFA=$(echo "$OLD_META" | jq -r '.sfa_sha // "none"')
-          L_GEOIP=$(echo "$OLD_META" | jq -r '.geoip_tag // "none"')
-          L_GEOSITE=$(echo "$OLD_META" | jq -r '.geosite_tag // "none"')
-          L_META=$(echo "$OLD_META" | jq -r '.meta_sha // "none"')
-          L_YACD=$(echo "$OLD_META" | jq -r '.yacd_sha // "none"')
+          if [ -z "$LOG_RAW" ]; then
+            LOG_RAW="$(git log --pretty=format:"- %s (%h)" -n 15 "${{ matrix.branch_info.sha }}" 2>/dev/null || true)"
+          fi
+
+          OLD_META_DIR="$(mktemp -d)"
+          OLD_META='{}'
+          if gh release download "${{ matrix.branch_info.tag }}" --pattern metadata.json --repo "${{ github.repository }}" --dir "$OLD_META_DIR" >/dev/null 2>&1; then
+            if [ -f "$OLD_META_DIR/metadata.json" ]; then
+              OLD_META="$(cat "$OLD_META_DIR/metadata.json")"
+            fi
+          fi
+          rm -rf "$OLD_META_DIR"
+
+          L_SFA="$(echo "$OLD_META" | jq -r '.sfa_sha // "none"')"
+          L_GEOIP="$(echo "$OLD_META" | jq -r '.geoip_tag // "none"')"
+          L_GEOSITE="$(echo "$OLD_META" | jq -r '.geosite_tag // "none"')"
+          L_META="$(echo "$OLD_META" | jq -r '.meta_sha // "none"')"
+          L_YACD="$(echo "$OLD_META" | jq -r '.yacd_sha // "none"')"
 
           DEP_CHANGES=""
-          [ "$L_SFA" != "none" ] && [ "$L_SFA" != "$SFA_SHA" ] && DEP_CHANGES="$DEP_CHANGES\n- ⬆️ **SFA Android**: \`$L_SFA\` -> \`${SFA_SHA:0:7}\`"
-          [ "$L_GEOIP" != "none" ] && [ "$L_GEOIP" != "$GEOIP_TAG" ] && DEP_CHANGES="$DEP_CHANGES\n- 🌍 **GeoIP**: \`$L_GEOIP\` -> \`$GEOIP_TAG\`"
-          [ "$L_GEOSITE" != "none" ] && [ "$L_GEOSITE" != "$GEOSITE_TAG" ] && DEP_CHANGES="$DEP_CHANGES\n- 🌍 **Geosite**: \`$L_GEOSITE\` -> \`$GEOSITE_TAG\`"
-          [ "$L_META" != "none" ] && [ "$L_META" != "$META_SHA" ] && DEP_CHANGES="$DEP_CHANGES\n- 🖥️ **Metacubexd**: \`${L_META:0:7}\` -> \`${META_SHA:0:7}\`"
-          [ "$L_YACD" != "none" ] && [ "$L_YACD" != "$YACD_SHA" ] && DEP_CHANGES="$DEP_CHANGES\n- 🖥️ **YACD**: \`${L_YACD:0:7}\` -> \`${YACD_SHA:0:7}\`"
+          [ "$L_SFA" != "none" ] && [ "$L_SFA" != "$SFA_SHA" ] && DEP_CHANGES="${DEP_CHANGES}\n- ⬆️ **SFA Android**: \`$L_SFA\` -> \`${SFA_SHA:0:7}\`"
+          [ "$L_GEOIP" != "none" ] && [ "$L_GEOIP" != "$GEOIP_TAG" ] && DEP_CHANGES="${DEP_CHANGES}\n- 🌍 **GeoIP**: \`$L_GEOIP\` -> \`$GEOIP_TAG\`"
+          [ "$L_GEOSITE" != "none" ] && [ "$L_GEOSITE" != "$GEOSITE_TAG" ] && DEP_CHANGES="${DEP_CHANGES}\n- 🌍 **Geosite**: \`$L_GEOSITE\` -> \`$GEOSITE_TAG\`"
+          [ "$L_META" != "none" ] && [ "$L_META" != "$META_SHA" ] && DEP_CHANGES="${DEP_CHANGES}\n- 🖥️ **Metacubexd**: \`${L_META:0:7}\` -> \`${META_SHA:0:7}\`"
+          [ "$L_YACD" != "none" ] && [ "$L_YACD" != "$YACD_SHA" ] && DEP_CHANGES="${DEP_CHANGES}\n- 🖥️ **YACD**: \`${L_YACD:0:7}\` -> \`${YACD_SHA:0:7}\`"
 
           {
             echo "CHANGELOG<<EOF"
@@ -546,11 +618,15 @@ jobs:
             echo ""
             if [ -n "$DEP_CHANGES" ]; then
               echo "### 📦 Dependency Updates"
-              echo -e "$DEP_CHANGES"
+              printf '%b\n' "$DEP_CHANGES"
               echo ""
             fi
             echo "### 🔄 Core Commits"
-            echo "$LOG_RAW" | grep -v "Merge pull request" || echo "- No new core commits."
+            if [ -n "$LOG_RAW" ]; then
+              printf '%s\n' "$LOG_RAW" | grep -v "Merge pull request" || true
+            else
+              echo "- No new core commits."
+            fi
             echo "EOF"
           } >> "$GITHUB_ENV"
 
@@ -562,7 +638,6 @@ jobs:
 
       - name: Prepare Assets & Generate Traceability
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SFA_SHA: ${{ needs.check_updates.outputs.sfa_sha }}
           GEOIP_TAG: ${{ needs.check_updates.outputs.geoip_tag }}
           GEOSITE_TAG: ${{ needs.check_updates.outputs.geosite_tag }}
@@ -570,6 +645,7 @@ jobs:
           YACD_SHA: ${{ needs.check_updates.outputs.yacd_sha }}
           EVENT_NAME: ${{ github.event_name }}
           CORE_TARGETS_JSON: ${{ needs.check_updates.outputs.core_targets }}
+        shell: bash
         run: |
           set -euo pipefail
           cd release_assets
@@ -586,52 +662,54 @@ jobs:
           FAILED_LIST=""
 
           while read -r target_encoded; do
-            OS=$(echo "$target_encoded" | base64 --decode | jq -r '.os')
-            ARCH=$(echo "$target_encoded" | base64 --decode | jq -r '.arch')
-            AMD=$(echo "$target_encoded" | base64 --decode | jq -r '.amd // empty')
-            ARM=$(echo "$target_encoded" | base64 --decode | jq -r '.arm // empty')
-            MIPS=$(echo "$target_encoded" | base64 --decode | jq -r '.mips // empty')
-            FLAVOR=$(echo "$target_encoded" | base64 --decode | jq -r '.flavor')
+            ITEM="$(echo "$target_encoded" | base64 --decode)"
+            OS="$(echo "$ITEM" | jq -r '.os')"
+            ARCH="$(echo "$ITEM" | jq -r '.arch')"
+            AMD="$(echo "$ITEM" | jq -r '.amd // empty')"
+            ARM="$(echo "$ITEM" | jq -r '.arm // empty')"
+            MIPS="$(echo "$ITEM" | jq -r '.mips // empty')"
+            FLAVOR="$(echo "$ITEM" | jq -r '.flavor')"
 
             SUF=""
-            [ -n "$AMD" ] && SUF="$AMD"
-            [ -n "$ARM" ] && SUF="v$ARM"
-            [ -n "$MIPS" ] && SUF="-$MIPS"
+            [ -n "$AMD" ] && SUF="$SUF$AMD"
+            [ -n "$ARM" ] && SUF="$SUFv$ARM"
+            [ -n "$MIPS" ] && SUF="$SUF-$MIPS"
 
             IDENTIFIER="${OS}-${ARCH}${SUF}-${FLAVOR}"
-            
+
             if [ -f "SUCCESS-$IDENTIFIER" ]; then
-              SUCCESS_LIST="$SUCCESS_LIST\n- ✅ \`$IDENTIFIER\`"
+              SUCCESS_LIST="${SUCCESS_LIST}\n- ✅ \`$IDENTIFIER\`"
             else
-              FAILED_LIST="$FAILED_LIST\n- ❌ \`$IDENTIFIER\` (Failed or Skipped)"
+              FAILED_LIST="${FAILED_LIST}\n- ❌ \`$IDENTIFIER\` (Failed or Skipped)"
             fi
           done <<< "$(echo "$CORE_TARGETS_JSON" | jq -r '.[] | @base64')"
 
-          if [ -z "$(echo -e "$SUCCESS_LIST" | tr -d '[:space:]')" ]; then
-            echo "::error::All core platform builds failed! Refusing to release empty artifacts."
+          if [ -z "$(printf '%b' "$SUCCESS_LIST" | tr -d '[:space:]')" ]; then
+            echo "::error::All core platform builds failed."
             exit 1
           fi
 
           {
             echo "EXPLICIT_SUCCESS<<EOF"
-            echo -e "$SUCCESS_LIST"
+            printf '%b\n' "$SUCCESS_LIST"
             echo "EOF"
             echo "EXPLICIT_FAILED<<EOF"
-            echo -e "$FAILED_LIST"
+            printf '%b\n' "$FAILED_LIST"
             echo "EOF"
           } >> "$GITHUB_ENV"
 
           rm -f SUCCESS-* apk_meta.env gradle-build-error.log
 
           mkdir -p Essential-Assets/ui
-          echo '{ "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }' > Essential-Assets/config.json
+          cat > Essential-Assets/config.json <<'EOF'
+          { "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }
+          EOF
 
           fetch_with_retry() {
-            local max_attempts=3
-            local attempt=1
-            while [ $attempt -le $max_attempts ]; do
+            local attempt=1 max_attempts=3
+            while [ "$attempt" -le "$max_attempts" ]; do
               if "$@"; then return 0; fi
-              echo "::warning::Command '$1' failed. Retrying ($attempt/$max_attempts)..."
+              echo "::warning::Command failed: $* . Retrying ($attempt/$max_attempts)..."
               sleep 3
               attempt=$((attempt + 1))
             done
@@ -653,48 +731,34 @@ jobs:
 
           safe_download "https://github.com/SagerNet/sing-geoip/releases/download/${GEOIP_TAG}/geoip.db" "Essential-Assets/geoip.db"
           safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite.db" "Essential-Assets/geosite.db"
-          safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite-cn.srs" "Essential-Assets/geosite-cn.srs"
+          safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite-cn.srs" "Essential-Assets/geosite-cn.srs" || true
+
+          rm -rf tmp_meta tmp_yacd metacubexd.zip yacd.zip
 
           if fetch_with_retry curl -fL -sS -o metacubexd.zip "https://github.com/MetaCubeX/metacubexd/archive/${META_SHA}.zip"; then
             if unzip -q metacubexd.zip -d tmp_meta/; then
               META_DIR="$(find tmp_meta -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
-              if [ -n "$META_DIR" ] && [ -d "$META_DIR" ]; then
-                mv "$META_DIR" Essential-Assets/ui/metacubexd
-              else
-                echo "::warning::metacubexd directory not found after unzip."
-              fi
-            else
-              echo "::warning::metacubexd unzip failed."
+              [ -n "$META_DIR" ] && mv "$META_DIR" Essential-Assets/ui/metacubexd || true
             fi
-          else
-            echo "::warning::metacubexd download failed."
           fi
-          
+
           if fetch_with_retry curl -fL -sS -o yacd.zip "https://github.com/haishanh/yacd/archive/${YACD_SHA}.zip"; then
             if unzip -q yacd.zip -d tmp_yacd/; then
               YACD_DIR="$(find tmp_yacd -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
-              if [ -n "$YACD_DIR" ] && [ -d "$YACD_DIR" ]; then
-                mv "$YACD_DIR" Essential-Assets/ui/yacd
-              else
-                echo "::warning::yacd directory not found after unzip."
-              fi
-            else
-              echo "::warning::yacd unzip failed."
+              [ -n "$YACD_DIR" ] && mv "$YACD_DIR" Essential-Assets/ui/yacd || true
             fi
-          else
-            echo "::warning::yacd download failed."
           fi
-          
+
           rm -rf tmp_* *.zip
 
           zip -9 -r "sing-box-${{ matrix.branch_info.title }}-Essential-Assets.zip" Essential-Assets/
           rm -rf Essential-Assets/
 
-          BUILD_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           echo "BUILD_TIME=$BUILD_TIME" >> "$GITHUB_ENV"
 
           find . -maxdepth 1 -type f \( ! -name 'sha256sums.txt' ! -name 'metadata.json' ! -name 'temp_hashes.txt' \) -print0 | xargs -0 -r sha256sum > temp_hashes.txt
-          HASHES_JSON=$(awk '{printf "{\"file\":\"%s\",\"hash\":\"%s\"}\n", $2, $1}' temp_hashes.txt | jq -s -c '.')
+          HASHES_JSON="$(awk '{printf "{\"file\":\"%s\",\"hash\":\"%s\"}\n", $2, $1}' temp_hashes.txt | jq -s -c '.')"
 
           jq -n \
             --arg repo "${{ matrix.branch_info.repo }}" \
@@ -715,7 +779,7 @@ jobs:
 
           cat temp_hashes.txt > sha256sums.txt
           sha256sum metadata.json >> sha256sums.txt
-          rm temp_hashes.txt
+          rm -f temp_hashes.txt
 
       - name: Build Release Body
         id: release_meta
@@ -725,7 +789,10 @@ jobs:
           GEOSITE_TAG: ${{ needs.check_updates.outputs.geosite_tag }}
           META_SHA: ${{ needs.check_updates.outputs.meta_sha }}
           YACD_SHA: ${{ needs.check_updates.outputs.yacd_sha }}
+        shell: bash
         run: |
+          set -euo pipefail
+
           TITLE="${{ matrix.branch_info.title }}"
           DISPLAY_VER="${{ matrix.branch_info.display_ver }}"
           REL_NAME="v$DISPLAY_VER | $TITLE"
@@ -734,17 +801,16 @@ jobs:
           {
             echo "## 🚀 sing-box Core ($TITLE)"
             echo "> ⏱️ **Build Time (UTC)**: \`${BUILD_TIME}\`"
-            echo "> 🤖 **Provenance**: 部分容錯發佈 (Partial Tolerance Release)，具備標準校驗鏈。"
             echo ""
-            echo -e "$CHANGELOG"
+            echo "$CHANGELOG"
             echo ""
             echo "### 📦 產物與容錯狀態清單"
           } > release_body.md
 
-          if [ "$APK_STATUS" = "success" ]; then
+          if [ "${APK_STATUS:-failed}" = "success" ]; then
             echo "- ✅ **Android GUI**: SFA Universal APK 構建成功 (SFA Commit: \`${SFA_SHA:0:7}\`)." >> release_body.md
           else
-            echo "- ❌ **Android GUI**: 構建失敗。本次發佈未包含 APK。" >> release_body.md
+            echo "- ❌ **Android GUI**: 構建失敗或未產出 APK。" >> release_body.md
           fi
 
           {
@@ -756,10 +822,10 @@ jobs:
             echo "<summary><b>🚦 Core 平台構建報告</b></summary>"
             echo ""
             echo "**Successful Targets:**"
-            echo -e "$EXPLICIT_SUCCESS"
+            printf '%b\n' "$EXPLICIT_SUCCESS"
             echo ""
             echo "**Failed or Skipped Targets:**"
-            echo -e "$EXPLICIT_FAILED"
+            printf '%b\n' "$EXPLICIT_FAILED"
             echo ""
             echo "</details>"
             echo ""
