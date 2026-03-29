@@ -453,14 +453,14 @@ jobs:
 
           printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
 
-          cat >> gradle.properties <<'EOF'
-org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true
-org.gradle.caching=false
-org.gradle.configuration-cache=false
-kotlin.daemon.jvmargs=-Xmx1g -Djava.awt.headless=true
-android.useAndroidX=true
-android.enableJetifier=true
-EOF
+          {
+            echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true"
+            echo "org.gradle.caching=false"
+            echo "org.gradle.configuration-cache=false"
+            echo "kotlin.daemon.jvmargs=-Xmx1g -Djava.awt.headless=true"
+            echo "android.useAndroidX=true"
+            echo "android.enableJetifier=true"
+          } >> gradle.properties
 
           mkdir -p ../output
 
@@ -701,9 +701,7 @@ EOF
           rm -f SUCCESS-* apk_meta.env gradle-build-error.log
 
           mkdir -p Essential-Assets/ui
-          cat > Essential-Assets/config.json <<'EOF'
-          { "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }
-          EOF
+          echo '{ "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }' > Essential-Assets/config.json
 
           fetch_with_retry() {
             local attempt=1 max_attempts=3
@@ -839,8 +837,8 @@ EOF
         with:
           tag: ${{ matrix.branch_info.tag }}
           name: ${{ steps.release_meta.outputs.REL_NAME }}
-          prerelease: ${{ matrix.branch_info.rolling }}
-          makeLatest: ${{ !matrix.branch_info.rolling }}
+          prerelease: ${{ matrix.branch_info.rolling == true }}
+          makeLatest: ${{ matrix.branch_info.rolling == false }}
           artifacts: "release_assets/*"
           bodyFile: release_body.md
           allowUpdates: true
