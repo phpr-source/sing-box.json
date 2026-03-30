@@ -315,7 +315,8 @@ jobs:
             cp "$BIN" "output/${{ steps.meta.outputs.artifact_name }}-upx"
           fi
 
-          touch "output/SUCCESS-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd || '' }}${{ matrix.target.arm != '' && format('v{0}', matrix.target.arm) || '' }}${{ matrix.target.mips != '' && format('-{0}', matrix.target.mips) || '' }}-${{ matrix.target.flavor }}"
+          # 🔴 修復致命 Bug: 使用嚴謹的安全判斷 && format(...) 來規避 null != '' 的 Actions 漏洞
+          touch "output/SUCCESS-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd || '' }}${{ matrix.target.arm && format('v{0}', matrix.target.arm) || '' }}${{ matrix.target.mips && format('-{0}', matrix.target.mips) || '' }}-${{ matrix.target.flavor }}"
 
       - name: Attest Build Provenance
         uses: actions/attest-build-provenance@v2
@@ -391,7 +392,6 @@ jobs:
           printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\nANDROID_NDK_HOME=%s\n' \
             "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" "$ANDROID_SDK_ROOT" "$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
 
-      # 階段一：強制使用 Java 17，專心編譯 Go 源碼產出 libbox.aar
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -418,20 +418,18 @@ jobs:
           cp "$AAR_FILE" ../sfa/app/libs/libbox.aar
           cd ..
 
-          # 🔥 物理隔離大法：徹底抹除源碼！防止稍後 Gradle 自作主張觸發重新編譯
           echo "::info::Purging sing-box source to isolate Gradle build..."
           rm -rf sing-box
 
-          # 🔥 依賴綁定大法：修改 SFA，強制它讀取剛剛生成的本地 AAR，而不是遠端舊包
           cd sfa
           sed -i 's/libs\.libbox/files("libs\/libbox.aar")/g' app/build.gradle.kts || true
 
-      # 階段二：強制切換為 Java 21，使用極度乾淨的內存環境專心打包 APK
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
+      # 🔴 修復重點: 加入容錯機制。遇到不相容的分支 API 導致 SFA 崩潰時，優雅記錄並跳過，不中斷 Core 二進制發布
       - name: Phase 2 - Build Android APK (SFA)
         env:
           GRADLE_USER_HOME: ${{ runner.temp }}/gradle-home
@@ -452,9 +450,8 @@ jobs:
 
           printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
 
-          # 優化 JVM 參數以防止 Daemon 內存崩潰
           {
-            echo "org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true"
+            echo "org.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true"
             echo "org.gradle.caching=false"
             echo "org.gradle.configuration-cache=false"
             echo "kotlin.daemon.jvmargs=-Xmx1g -Djava.awt.headless=true"
@@ -491,8 +488,8 @@ jobs:
 
           if [ -z "$BUILD_TASK" ]; then
             echo "::error::No supported APK assemble task found."
-            ./gradlew tasks --all || true
-            exit 1
+            echo "APK_STATUS=failed" > ../output/apk_meta.env
+            exit 0
           fi
 
           run_gradle() {
@@ -512,19 +509,23 @@ jobs:
           if ! run_gradle; then
             echo "::warning::Gradle build failed. Purging cache and retrying once."
             ./gradlew --stop || true
-            rm -rf "$GRADLE_USER_HOME/caches" "$GRADLE_USER_HOME/daemon" "$GRADLE_USER_HOME/native"
+            sleep 2
+            rm -rf "$GRADLE_USER_HOME/caches" "$GRADLE_USER_HOME/daemon" "$GRADLE_USER_HOME/native" || true
+            
             if ! run_gradle; then
               tail -n 200 gradle-build.log || true
               cp gradle-build.log ../output/gradle-build-error.log || true
-              echo "::error::SFA APK Compilation failed."
-              exit 1
+              echo "::error::SFA APK Compilation failed due to upstream incompatibility or OOM."
+              echo "APK_STATUS=failed" > ../output/apk_meta.env
+              exit 0 # 優雅退出: 允許 CI 發布 Core 文件
             fi
           fi
 
           APK_PATH="$(find app/build/outputs/apk -type f -name '*.apk' | sort | head -n 1 || true)"
           if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
             echo "::error::APK generation failed."
-            exit 1
+            echo "APK_STATUS=failed" > ../output/apk_meta.env
+            exit 0
           fi
 
           APK_NAME="SFA-${{ matrix.branch_info.display_ver }}-${{ matrix.branch_info.title }}-universal.apk"
@@ -810,7 +811,7 @@ jobs:
           if [ "${APK_STATUS:-failed}" = "success" ]; then
             echo "- ✅ **Android GUI**: SFA Universal APK 構建成功 (SFA Commit: \`${SFA_SHA:0:7}\`)." >> release_body.md
           else
-            echo "- ❌ **Android GUI**: 構建失敗或未產出 APK。" >> release_body.md
+            echo "- ❌ **Android GUI**: 構建失敗或未產出 APK (通常因 Core API 與最新版 SFA 不相容)." >> release_body.md
           fi
 
           {
