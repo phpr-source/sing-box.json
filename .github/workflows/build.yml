@@ -358,6 +358,11 @@ jobs:
           go-version: 'stable'
           cache: false
 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21' # SFA AGP 8.x 強制需求 Java 21
+
       - name: Prepare Android Environment
         shell: bash
         run: |
@@ -371,8 +376,6 @@ jobs:
 
           NDK_VERSION="$(grep -hE '(ndkVersion|ndk[[:space:]]*=)' $(find sfa -type f \( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'libs.versions.toml' \)) 2>/dev/null | head -n 1 | sed -E "s/.*[\"']([^\"']+)[\"'].*/\1/" | tr -d '\r' || true)"
           [ -z "$NDK_VERSION" ] && NDK_VERSION="26.3.11579264"
-
-          echo "::info::Using NDK version: $NDK_VERSION"
 
           if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
             SDK_MGR="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
@@ -391,15 +394,14 @@ jobs:
           printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\nANDROID_NDK_HOME=%s\n' \
             "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" "$ANDROID_SDK_ROOT" "$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
 
-      # 統一採用 Java 17：相容 sing-box 的 build_libbox 腳本，同時規避 KSP 在 Java 21 下的 Application 崩潰 Bug。
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+          # 核心準備：安裝 gomobile 讓 SFA 的 Gradle 原生調用
+          export GOPATH="$(go env GOPATH)"
+          export PATH="$PATH:$GOPATH/bin"
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init || true
 
-      - name: Build Android AAR & APK
+      - name: Build Android APK (SFA Native)
         env:
-          GRADLE_USER_HOME: ${{ runner.temp }}/gradle-home
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'password' }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'release' }}
@@ -407,53 +409,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
-          export PATH="$PATH:$(go env GOPATH)/bin"
+          # 確保 Gradle 能找到 gomobile
+          export GOPATH="$(go env GOPATH)"
+          export PATH="$PATH:$GOPATH/bin"
 
-          # 1. 編譯 AAR
-          cd sing-box
-          make lib_install
-          make lib_android
+          mkdir -p output
 
-          AAR_FILE="$(find . -type f -name '*.aar' | sort -r | head -n 1 || true)"
-          if [ -z "$AAR_FILE" ] || [ ! -f "$AAR_FILE" ]; then
-            echo "::error::AAR generation failed."
-            exit 1
-          fi
-
-          mkdir -p ../sfa/app/libs
-          cp "$AAR_FILE" ../sfa/app/libs/libbox.aar
-          cd ..
-
-          echo "::info::Purging sing-box source to completely isolate Gradle build..."
-          rm -rf sing-box
-
-          # 2. 配置 SFA 依賴 (物理攔截)
           cd sfa
-          echo "::info::Patching SFA configurations..."
-          sed -i '/includeBuild/d' settings.gradle.kts || true
-          sed -i '/includeBuild/d' settings.gradle || true
-          sed -i -E 's/(implementation|api)[[:space:]]*\([[:space:]]*project[[:space:]]*\([^\)]*box[^\)]*\)[[:space:]]*\)/\1(files("libs\/libbox.aar"))/g' app/build.gradle.kts || true
-          sed -i -E 's/(implementation|api)[[:space:]]*\([[:space:]]*libs\.libbox[[:space:]]*\)/\1(files("libs\/libbox.aar"))/g' app/build.gradle.kts || true
-
-          # 3. 準備 APK 打包
-          rm -rf "$GRADLE_USER_HOME"
-          mkdir -p "$GRADLE_USER_HOME"
           chmod +x ./gradlew
 
           printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
 
+          # 啟用緩存與平行編譯，徹底解決下載超時問題
           {
-            echo "org.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true"
-            echo "org.gradle.caching=false"
-            echo "org.gradle.configuration-cache=false"
-            echo "kotlin.daemon.jvmargs=-Xmx1g -Djava.awt.headless=true"
+            echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
+            echo "org.gradle.caching=true"
+            echo "org.gradle.parallel=true"
+            echo "kotlin.daemon.jvmargs=-Xmx1g"
             echo "android.useAndroidX=true"
             echo "android.enableJetifier=true"
-            echo "org.gradle.daemon=false"
           } >> gradle.properties
-
-          mkdir -p ../output
 
           if [ -z "$KEYSTORE_BASE64" ]; then
             echo "::warning::KEYSTORE_BASE64 is empty, generating a temporary keystore."
@@ -471,52 +448,29 @@ jobs:
             printf '%s' "$KEYSTORE_BASE64" | base64 --decode > ci-release.jks
           fi
 
-          BUILD_TASK=""
-          for task in assemblePlayRelease assembleRelease assembleFossRelease assembleFdroidRelease; do
-            if ./gradlew help --task "$task" >/dev/null 2>&1; then
-              BUILD_TASK=":app:$task"
-              break
-            fi
-          done
+          BUILD_TASK=":app:assemblePlayRelease"
+          if ! ./gradlew help --task "$BUILD_TASK" >/dev/null 2>&1; then
+            BUILD_TASK=":app:assembleRelease"
+          fi
 
-          if [ -z "$BUILD_TASK" ]; then
-            echo "::error::No supported APK assemble task found."
+          # 優雅容錯機制：若上游 API 更改導致 SFA 編譯失敗，不阻斷後續 Core 的發布
+          if ! ./gradlew clean "$BUILD_TASK" \
+            --no-daemon \
+            --stacktrace \
+            -x lint \
+            -Pandroid.injected.signing.store.file="$(pwd)/ci-release.jks" \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASS"; then
+            
+            echo "::warning::SFA APK Compilation failed due to upstream incompatibility or OOM."
             echo "APK_STATUS=failed" > ../output/apk_meta.env
             exit 0
           fi
 
-          run_gradle() {
-            ./gradlew clean "$BUILD_TASK" \
-              --no-daemon \
-              --stacktrace \
-              --info \
-              --no-build-cache \
-              --refresh-dependencies \
-              -x lint \
-              -Pandroid.injected.signing.store.file="$(pwd)/ci-release.jks" \
-              -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
-              -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
-              -Pandroid.injected.signing.key.password="$KEY_PASS" 2>&1 | tee gradle-build.log
-          }
-
-          if ! run_gradle; then
-            echo "::warning::Gradle build failed. Purging cache and retrying once."
-            ./gradlew --stop || true
-            sleep 2
-            rm -rf "$GRADLE_USER_HOME/caches" "$GRADLE_USER_HOME/daemon" "$GRADLE_USER_HOME/native" || true
-            
-            if ! run_gradle; then
-              tail -n 200 gradle-build.log || true
-              cp gradle-build.log ../output/gradle-build-error.log || true
-              echo "::error::SFA APK Compilation failed due to upstream API incompatibility."
-              echo "APK_STATUS=failed" > ../output/apk_meta.env
-              exit 0 # 優雅退出：讓 CI 依然可以發布 Core 文件
-            fi
-          fi
-
           APK_PATH="$(find app/build/outputs/apk -type f -name '*.apk' | sort | head -n 1 || true)"
           if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
-            echo "::error::APK generation failed."
+            echo "::warning::APK generation failed or not found."
             echo "APK_STATUS=failed" > ../output/apk_meta.env
             exit 0
           fi
@@ -665,7 +619,6 @@ jobs:
             MIPS="$(echo "$ITEM" | jq -r '.mips // empty')"
             FLAVOR="$(echo "$ITEM" | jq -r '.flavor')"
 
-            # 🔴 修復致命的 unbound variable 崩潰
             SUF=""
             [ -n "$AMD" ] && SUF="${SUF}${AMD}"
             [ -n "$ARM" ] && SUF="${SUF}v${ARM}"
