@@ -264,7 +264,7 @@ jobs:
         run: |
           set -euo pipefail
           suffix=""
-          # 完美修復：直接拼接 amd 的值 (如 v3)，避免變成 vv3
+          # 借鑑優化：修正了 amd64 v3 變量拼接導致的 'vv3' Bug，直接引用變量
           [ -n "${{ matrix.target.amd || '' }}" ] && suffix="${suffix}${{ matrix.target.amd }}"
           [ -n "${{ matrix.target.arm || '' }}" ] && suffix="${suffix}v${{ matrix.target.arm }}"
           [ -n "${{ matrix.target.mips || '' }}" ] && suffix="${suffix}-${{ matrix.target.mips }}"
@@ -290,7 +290,7 @@ jobs:
           if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; fi
           if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; fi
 
-          # 優化：補全 sing-box 完整版需要的常見 Tags (參考 DustinWin 等倉庫)
+          # 保留我的優化：補全核心 Tags
           TAGS="with_quic,with_grpc,with_ech,with_utls,with_reality_server,with_clash_api"
           [ "${{ matrix.target.flavor }}" != "lite" ] && TAGS="${TAGS},with_gvisor,with_acme,with_v2ray_api,with_wireguard"
 
@@ -359,7 +359,7 @@ jobs:
       matrix:
         branch_info: ${{ fromJson(needs.check_updates.outputs.matrix).include }}
     steps:
-      # 整合：釋放磁碟空間，防止 NDK/Gradle 緩存耗盡磁碟
+      # 借鑑優化：在構建 SFA 前清理 Runner 空間，防止磁碟寫滿導致編譯中斷
       - name: Maximize Build Space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -386,19 +386,14 @@ jobs:
           go-version: 'stable'
           cache: false
 
-      # 深度修復：降級至 Java 17，徹底消除圖中出現的 Deprecated 與兼容性警告
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      # 深度修復：不僅替換 sfa 根目錄，更重要的是替換 libbox 的依賴
+      # 保留我的優化：必須徹底替換 sfa 和 libbox 的依賴，否則只改根目錄無效！
       - name: Link Custom sing-box Core to SFA
         shell: bash
         run: |
           set -euo pipefail
           ABS_CORE="$(realpath sing-box)"
           cd sfa
+          
           rm -f go.work go.work.sum
           
           if [ -f "go.mod" ]; then
@@ -413,6 +408,12 @@ jobs:
             cd ..
           fi
           echo "::notice::Successfully linked custom sing-box core to SFA build context."
+
+      # 保留我的優化：堅守 Java 17，避免 Java 21 導致的 AGP 兼容性報錯
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
       - name: Prepare Android Environment
         shell: bash
@@ -470,7 +471,7 @@ jobs:
 
           printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
 
-          # 深度修復：防 OOM 策略。關閉並發編譯，限制 JVM 內存
+          # 保留我的優化：限制 JVM 內存並關閉並行，防 OOM
           {
             echo "org.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8"
             echo "org.gradle.caching=true"
@@ -510,7 +511,7 @@ jobs:
             -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
             -Pandroid.injected.signing.key.password="$KEY_PASS"; then
             
-            echo "::warning::SFA APK Compilation failed due to upstream incompatibility or OOM."
+            echo "::warning::SFA APK Compilation failed due to upstream API incompatibility."
             echo "APK_STATUS=failed" > ../output/apk_meta.env
             exit 0
           fi
@@ -722,11 +723,9 @@ jobs:
             fi
           }
 
-          # 下載常規的 geoip.db 和 geosite.db
           safe_download "https://github.com/SagerNet/sing-geoip/releases/download/${GEOIP_TAG}/geoip.db" "Essential-Assets/geoip.db" || true
           safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite.db" "Essential-Assets/geosite.db" || true
           
-          # 使用正確的分支結構下載 cn 專用的 srs 與 db 文件
           safe_download "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs" "Essential-Assets/geosite-cn.srs" || true
           safe_download "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs" "Essential-Assets/geoip-cn.srs" || true
           safe_download "https://raw.githubusercontent.com/SagerNet/sing-geosite/release/geosite-cn.db" "Essential-Assets/geosite-cn.db" || true
