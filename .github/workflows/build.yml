@@ -263,13 +263,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          
           suffix=""
-          [ -n "${{ matrix.target.amd || '' }}" ] && suffix="${suffix}v${{ matrix.target.amd }}"
-          [ -n "${{ matrix.target.arm || '' }}" ] && suffix="${suffix}v${{ matrix.target.arm }}"
-          [ -n "${{ matrix.target.mips || '' }}" ] && suffix="${suffix}-${{ matrix.target.mips }}"
+          if [ -n "${{ matrix.target.amd || '' }}" ]; then suffix="${suffix}${{ matrix.target.amd }}"; fi
+          if [ -n "${{ matrix.target.arm || '' }}" ]; then suffix="${suffix}v${{ matrix.target.arm }}"; fi
+          if [ -n "${{ matrix.target.mips || '' }}" ]; then suffix="${suffix}-${{ matrix.target.mips }}"; fi
           
           flavor_suffix=""
-          [ "${{ matrix.target.flavor }}" = "lite" ] && flavor_suffix="-lite"
+          if [ "${{ matrix.target.flavor }}" = "lite" ]; then flavor_suffix="-lite"; fi
           
           APP_VER="${{ matrix.branch_info.display_ver }}"
           FILE_NAME="sing-box-${APP_VER}-${{ matrix.target.os }}-${{ matrix.target.arch }}${suffix}${flavor_suffix}"
@@ -289,12 +290,11 @@ jobs:
           if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; fi
           if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; fi
 
-          # 修復：正確標準的 Go Tags 寫法
-          TAGS="with_quic,with_utls,with_clash_api"
+          TAGS="with_quic,with_utls,with_clash_api,with_ech"
           [ "${{ matrix.target.flavor }}" != "lite" ] && TAGS="${TAGS},with_gvisor,with_acme,with_v2ray_api,with_wireguard"
 
           BIN="sing-box"
-          [ "${{ matrix.target.os }}" = "windows" ] && BIN="sing-box.exe"
+          if [ "${{ matrix.target.os }}" = "windows" ]; then BIN="sing-box.exe"; fi
 
           if [ -z "${{ matrix.branch_info.display_ver }}" ] || [ -z "${{ matrix.branch_info.short_sha }}" ]; then
             echo "::error::Missing version metadata."
@@ -315,7 +315,6 @@ jobs:
           mkdir -p output
           FILE_NAME="${{ steps.meta.outputs.file_name }}"
           
-          # 修復產物命名：創建規範目錄結構再壓縮
           mkdir -p "archive/${FILE_NAME}"
           cp "$BIN" "archive/${FILE_NAME}/"
           
@@ -435,6 +434,7 @@ jobs:
           export PATH="$PATH:$GOPATH/bin"
 
           mkdir -p output
+
           cd sfa
           chmod +x ./gradlew
 
@@ -691,12 +691,15 @@ jobs:
             fi
           }
 
-          # 修復：正確獲取沒有 404 問題的 .db 和 .srs 規則庫
+          # 下載標準版 .db
           safe_download "https://github.com/SagerNet/sing-geoip/releases/download/${GEOIP_TAG}/geoip.db" "Essential-Assets/geoip.db" || true
           safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite.db" "Essential-Assets/geosite.db" || true
-          # 新的 .srs 位置在 sing-box-rules 的分支上
-          safe_download "https://raw.githubusercontent.com/SagerNet/sing-box-rules/rule-set-geosite/geosite-cn.srs" "Essential-Assets/geosite-cn.srs" || true
-          safe_download "https://raw.githubusercontent.com/SagerNet/sing-box-rules/rule-set-geoip/geoip-cn.srs" "Essential-Assets/geoip-cn.srs" || true
+          
+          # 從提供的原生網址精準下載 .srs 與 cn 特供 .db
+          safe_download "https://github.com/SagerNet/sing-geosite/raw/refs/heads/rule-set/geosite-cn.srs" "Essential-Assets/geosite-cn.srs" || true
+          safe_download "https://github.com/SagerNet/sing-geosite/raw/refs/heads/release/geosite-cn.db" "Essential-Assets/geosite-cn.db" || true
+          safe_download "https://github.com/SagerNet/sing-geoip/raw/refs/heads/rule-set/geoip-cn.srs" "Essential-Assets/geoip-cn.srs" || true
+          safe_download "https://github.com/SagerNet/sing-geoip/raw/refs/heads/release/geoip-cn.db" "Essential-Assets/geoip-cn.db" || true
 
           rm -rf tmp_meta tmp_yacd metacubexd.zip yacd.zip
 
@@ -800,7 +803,6 @@ jobs:
 
           echo "REL_NAME=$REL_NAME" >> "$GITHUB_OUTPUT"
 
-      # 修復：替換發布模塊，徹底消除 Node.js 20 棄用警告
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
