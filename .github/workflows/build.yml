@@ -263,14 +263,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          
           suffix=""
-          if [ -n "${{ matrix.target.amd || '' }}" ]; then suffix="${suffix}${{ matrix.target.amd }}"; fi
-          if [ -n "${{ matrix.target.arm || '' }}" ]; then suffix="${suffix}v${{ matrix.target.arm }}"; fi
-          if [ -n "${{ matrix.target.mips || '' }}" ]; then suffix="${suffix}-${{ matrix.target.mips }}"; fi
+          [ -n "${{ matrix.target.amd || '' }}" ] && suffix="${suffix}v${{ matrix.target.amd }}"
+          [ -n "${{ matrix.target.arm || '' }}" ] && suffix="${suffix}v${{ matrix.target.arm }}"
+          [ -n "${{ matrix.target.mips || '' }}" ] && suffix="${suffix}-${{ matrix.target.mips }}"
           
           flavor_suffix=""
-          if [ "${{ matrix.target.flavor }}" = "lite" ]; then flavor_suffix="-lite"; fi
+          [ "${{ matrix.target.flavor }}" = "lite" ] && flavor_suffix="-lite"
           
           APP_VER="${{ matrix.branch_info.display_ver }}"
           FILE_NAME="sing-box-${APP_VER}-${{ matrix.target.os }}-${{ matrix.target.arch }}${suffix}${flavor_suffix}"
@@ -290,11 +289,11 @@ jobs:
           if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; fi
           if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; fi
 
-          TAGS="with_quic,with_utls,with_clash_api,with_ech"
+          TAGS="with_quic,with_utls,with_clash_api"
           [ "${{ matrix.target.flavor }}" != "lite" ] && TAGS="${TAGS},with_gvisor,with_acme,with_v2ray_api,with_wireguard"
 
           BIN="sing-box"
-          if [ "${{ matrix.target.os }}" = "windows" ]; then BIN="sing-box.exe"; fi
+          [ "${{ matrix.target.os }}" = "windows" ] && BIN="sing-box.exe"
 
           if [ -z "${{ matrix.branch_info.display_ver }}" ] || [ -z "${{ matrix.branch_info.short_sha }}" ]; then
             echo "::error::Missing version metadata."
@@ -434,7 +433,6 @@ jobs:
           export PATH="$PATH:$GOPATH/bin"
 
           mkdir -p output
-
           cd sfa
           chmod +x ./gradlew
 
@@ -691,15 +689,15 @@ jobs:
             fi
           }
 
-          # 下載標準版 .db
+          # 下載常規的 geoip.db 和 geosite.db
           safe_download "https://github.com/SagerNet/sing-geoip/releases/download/${GEOIP_TAG}/geoip.db" "Essential-Assets/geoip.db" || true
           safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite.db" "Essential-Assets/geosite.db" || true
           
-          # 從提供的原生網址精準下載 .srs 與 cn 特供 .db
-          safe_download "https://github.com/SagerNet/sing-geosite/raw/refs/heads/rule-set/geosite-cn.srs" "Essential-Assets/geosite-cn.srs" || true
-          safe_download "https://github.com/SagerNet/sing-geosite/raw/refs/heads/release/geosite-cn.db" "Essential-Assets/geosite-cn.db" || true
-          safe_download "https://github.com/SagerNet/sing-geoip/raw/refs/heads/rule-set/geoip-cn.srs" "Essential-Assets/geoip-cn.srs" || true
-          safe_download "https://github.com/SagerNet/sing-geoip/raw/refs/heads/release/geoip-cn.db" "Essential-Assets/geoip-cn.db" || true
+          # 使用正確的分支結構下載 cn 專用的 srs 與 db 文件
+          safe_download "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs" "Essential-Assets/geosite-cn.srs" || true
+          safe_download "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs" "Essential-Assets/geoip-cn.srs" || true
+          safe_download "https://raw.githubusercontent.com/SagerNet/sing-geosite/release/geosite-cn.db" "Essential-Assets/geosite-cn.db" || true
+          safe_download "https://raw.githubusercontent.com/SagerNet/sing-geoip/release/geoip-cn.db" "Essential-Assets/geoip-cn.db" || true
 
           rm -rf tmp_meta tmp_yacd metacubexd.zip yacd.zip
 
