@@ -14,7 +14,6 @@ on:
     types: [upstream_sync]
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   CI: true
 
 concurrency:
@@ -195,7 +194,7 @@ jobs:
             if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" = "all" ]; then
               NEEDS_UPDATE="true"
               UPDATE_REASON="Forced Full Sync"
-            elif [ "$L_SHA" = "none" ]; then
+            elif [ "$L_SHA" = "none" ] || [ -z "$L_SHA" ]; then
               NEEDS_UPDATE="true"
               UPDATE_REASON="Initial Release"
             elif [ "$SHA" != "$L_SHA" ]; then
@@ -362,7 +361,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Prepare Android Environment
         shell: bash
@@ -417,7 +416,8 @@ jobs:
           set -euo pipefail
 
           export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
-          export PATH="$PATH:$(go env GOPATH)/bin"
+          export GOPATH="$(go env GOPATH)"
+          export PATH="$PATH:$GOPATH/bin"
 
           rm -rf "$GRADLE_USER_HOME"
           mkdir -p "$GRADLE_USER_HOME"
@@ -434,7 +434,7 @@ jobs:
 
           mkdir -p ../sfa/app/libs
           rm -f ../sfa/app/libs/*.aar
-          cp "$AAR_FILE" ../sfa/app/libs/
+          cp "$AAR_FILE" ../sfa/app/libs/libbox.aar
 
           cd ../sfa
           chmod +x ./gradlew
@@ -715,8 +715,8 @@ jobs:
             fi
           }
 
-          safe_download "https://github.com/SagerNet/sing-geoip/releases/download/${GEOIP_TAG}/geoip.db" "Essential-Assets/geoip.db"
-          safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite.db" "Essential-Assets/geosite.db"
+          safe_download "https://github.com/SagerNet/sing-geoip/releases/download/${GEOIP_TAG}/geoip.db" "Essential-Assets/geoip.db" || true
+          safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite.db" "Essential-Assets/geosite.db" || true
           safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite-cn.srs" "Essential-Assets/geosite-cn.srs" || true
 
           rm -rf tmp_meta tmp_yacd metacubexd.zip yacd.zip
@@ -725,26 +725,27 @@ jobs:
             if unzip -q metacubexd.zip -d tmp_meta/; then
               META_DIR="$(find tmp_meta -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
               [ -n "$META_DIR" ] && mv "$META_DIR" Essential-Assets/ui/metacubexd || true
-            fi
-          fi
+            fi || true
+          fi || true
 
           if fetch_with_retry curl -fL -sS -o yacd.zip "https://github.com/haishanh/yacd/archive/${YACD_SHA}.zip"; then
             if unzip -q yacd.zip -d tmp_yacd/; then
               YACD_DIR="$(find tmp_yacd -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
               [ -n "$YACD_DIR" ] && mv "$YACD_DIR" Essential-Assets/ui/yacd || true
-            fi
-          fi
+            fi || true
+          fi || true
 
           rm -rf tmp_* *.zip
 
-          zip -9 -r "sing-box-${{ matrix.branch_info.title }}-Essential-Assets.zip" Essential-Assets/
+          zip -9 -r "sing-box-${{ matrix.branch_info.title }}-Essential-Assets.zip" Essential-Assets/ || echo "::warning::Failed to zip Essential-Assets"
           rm -rf Essential-Assets/
 
           BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           echo "BUILD_TIME=$BUILD_TIME" >> "$GITHUB_ENV"
 
-          find . -maxdepth 1 -type f \( ! -name 'sha256sums.txt' ! -name 'metadata.json' ! -name 'temp_hashes.txt' \) -print0 | xargs -0 -r sha256sum > temp_hashes.txt
-          HASHES_JSON="$(awk '{printf "{\"file\":\"%s\",\"hash\":\"%s\"}\n", $2, $1}' temp_hashes.txt | jq -s -c '.')"
+          find . -maxdepth 1 -type f \( ! -name 'sha256sums.txt' ! -name 'metadata.json' ! -name 'temp_hashes.txt' \) -print0 | xargs -0 -r sha256sum | sed 's| \./|  |' > temp_hashes.txt
+          HASHES_JSON="$(awk '{printf "{\"file\":\"%s\",\"hash\":\"%s\"}\n", $2, $1}' temp_hashes.txt | jq -s -c '.' || echo "[]")"
+          [ -z "$HASHES_JSON" ] && HASHES_JSON="[]"
 
           jq -n \
             --arg repo "${{ matrix.branch_info.repo }}" \
