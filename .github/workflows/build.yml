@@ -105,19 +105,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          CORE_TARGETS_JSON='[
-            {"os":"linux","arch":"amd64","amd":"v3","flavor":"full","upx":false},
-            {"os":"linux","arch":"amd64","flavor":"full","upx":false},
-            {"os":"linux","arch":"arm64","flavor":"full","upx":false},
-            {"os":"linux","arch":"arm","arm":"7","flavor":"full","upx":true},
-            {"os":"linux","arch":"arm","arm":"7","flavor":"lite","upx":true},
-            {"os":"linux","arch":"arm","arm":"5","flavor":"lite","upx":true},
-            {"os":"linux","arch":"mipsle","flavor":"lite","upx":true},
-            {"os":"linux","arch":"mipsle","mips":"softfloat","flavor":"lite","upx":true},
-            {"os":"windows","arch":"amd64","amd":"v3","flavor":"full","upx":false},
-            {"os":"darwin","arch":"amd64","flavor":"full","upx":false},
-            {"os":"darwin","arch":"arm64","flavor":"full","upx":false}
-          ]'
+          CORE_TARGETS_JSON='[{"os":"linux","arch":"amd64","amd":"v3","flavor":"full","upx":false},{"os":"linux","arch":"amd64","flavor":"full","upx":false},{"os":"linux","arch":"arm64","flavor":"full","upx":false},{"os":"linux","arch":"arm","arm":"7","flavor":"full","upx":true},{"os":"linux","arch":"arm","arm":"7","flavor":"lite","upx":true},{"os":"linux","arch":"arm","arm":"5","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","mips":"softfloat","flavor":"lite","upx":true},{"os":"windows","arch":"amd64","amd":"v3","flavor":"full","upx":false},{"os":"darwin","arch":"amd64","flavor":"full","upx":false},{"os":"darwin","arch":"arm64","flavor":"full","upx":false}]'
 
           TARGETS=(
             "reF1nd/sing-box|reF1nd-testing|reF1nd-Testing|true"
