@@ -106,11 +106,12 @@ jobs:
 
           CORE_TARGETS_JSON='[{"os":"linux","arch":"amd64","amd":"v3","flavor":"full","upx":false},{"os":"linux","arch":"amd64","flavor":"full","upx":false},{"os":"linux","arch":"arm64","flavor":"full","upx":false},{"os":"linux","arch":"arm","arm":"7","flavor":"full","upx":true},{"os":"linux","arch":"arm","arm":"7","flavor":"lite","upx":true},{"os":"linux","arch":"arm","arm":"5","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","mips":"softfloat","flavor":"lite","upx":true},{"os":"windows","arch":"amd64","amd":"v3","flavor":"full","upx":false},{"os":"darwin","arch":"amd64","flavor":"full","upx":false},{"os":"darwin","arch":"arm64","flavor":"full","upx":false}]'
 
+          # 精準定位上游目前的分支結構：testing 為開發版，main 為穩定版
           TARGETS=(
             "reF1nd/sing-box|reF1nd-testing|reF1nd-Testing|true"
             "reF1nd/sing-box|reF1nd-stable|reF1nd-Stable|false"
-            "SagerNet/sing-box|dev-next|Official-Alpha|true"
-            "SagerNet/sing-box|testing|Official-Stable|false"
+            "SagerNet/sing-box|testing|Official-Alpha|true"
+            "SagerNet/sing-box|main|Official-Stable|false"
           )
 
           JSON="[]"
@@ -132,7 +133,7 @@ jobs:
             RESOLVED_BR="$BR"
             SHA=""
 
-            for search_br in "$BR" "dev-next" "testing" "main" "dev" "main-next" "next"; do
+            for search_br in "$BR" "testing" "main" "dev-next" "dev" "next"; do
               SHA="$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$search_br" | awk 'NR==1{print $1}')"
               if [ -n "$SHA" ]; then
                 if [ "$search_br" != "$BR" ]; then
@@ -194,7 +195,7 @@ jobs:
             if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" = "all" ]; then
               NEEDS_UPDATE="true"
               UPDATE_REASON="Forced Full Sync"
-            elif [ "$L_SHA" = "none" ] || [ -z "$L_SHA" ]; then
+            elif [ "$L_SHA" = "none" ]; then
               NEEDS_UPDATE="true"
               UPDATE_REASON="Initial Release"
             elif [ "$SHA" != "$L_SHA" ]; then
@@ -361,7 +362,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '21' # AGP 8.4+ 與最新 KSP 強制需要 Java 21
 
       - name: Prepare Android Environment
         shell: bash
@@ -374,32 +375,32 @@ jobs:
             exit 1
           fi
 
+          # 增強正則以適配最新的 libs.versions.toml (如 ndk = "...")
           NDK_VERSION="$(find sfa -type f \( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'libs.versions.toml' \) -print0 \
-            | xargs -0 grep -hE 'ndkVersion' 2>/dev/null \
+            | xargs -0 grep -hE '(ndkVersion|ndk[[:space:]]*=)' 2>/dev/null \
             | head -n 1 \
-            | sed -E "s/.*ndkVersion[[:space:]=:]*[\"']([^\"']+)[\"'].*/\1/" \
+            | sed -E "s/.*(ndkVersion|ndk)[[:space:]=:]*[\"']([^\"']+)[\"'].*/\2/" \
             | tr -d '\r' || true)"
 
-          if [ -n "$NDK_VERSION" ]; then
-            if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
-              SDK_MGR="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-              [ ! -x "$SDK_MGR" ] && SDK_MGR="$(command -v sdkmanager || true)"
-              if [ -n "${SDK_MGR:-}" ] && [ -x "$SDK_MGR" ]; then
-                yes | "$SDK_MGR" "ndk;$NDK_VERSION" >/dev/null 2>&1 || true
-              fi
-            fi
+          # Gomobile 在 NDK 27 存在鏈接器崩潰問題，此處寫入安全回退機制
+          if [ -z "$NDK_VERSION" ]; then
+            NDK_VERSION="26.3.11579264" 
+            echo "::warning::Falling back to safe NDK version: $NDK_VERSION"
+          fi
 
-            if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
-              echo "::error::NDK install failed for version $NDK_VERSION."
-              exit 1
+          if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
+            SDK_MGR="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+            [ ! -x "$SDK_MGR" ] && SDK_MGR="$(command -v sdkmanager || true)"
+            if [ -n "${SDK_MGR:-}" ] && [ -x "$SDK_MGR" ]; then
+              yes | "$SDK_MGR" "ndk;$NDK_VERSION" >/dev/null 2>&1 || true
             fi
-            ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
-          elif [ -n "${ANDROID_NDK_LATEST_HOME:-}" ] && [ -d "${ANDROID_NDK_LATEST_HOME:-}" ]; then
-            ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
-          else
-            echo "::error::Android NDK not found."
+          fi
+
+          if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
+            echo "::error::NDK install failed for version $NDK_VERSION."
             exit 1
           fi
+          ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
 
           printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\nANDROID_NDK_HOME=%s\n' \
             "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" "$ANDROID_SDK_ROOT" "$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
@@ -423,7 +424,8 @@ jobs:
           mkdir -p "$GRADLE_USER_HOME"
 
           cd sing-box
-          make lib_install
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init || true
           make lib_android
 
           AAR_FILE="$(find . -type f \( -name 'libbox*.aar' -o -name '*.aar' \) | sort -r | head -n 1 || true)"
@@ -432,6 +434,7 @@ jobs:
             exit 1
           fi
 
+          # 強制命名為 libbox.aar 避免 SFA 讀取失敗
           mkdir -p ../sfa/app/libs
           rm -f ../sfa/app/libs/*.aar
           cp "$AAR_FILE" ../sfa/app/libs/libbox.aar
