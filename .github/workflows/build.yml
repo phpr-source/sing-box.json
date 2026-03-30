@@ -300,7 +300,6 @@ jobs:
           if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; fi
           if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; fi
 
-          # 修復：移除了會導致崩潰的 with_dhcp 錯誤標籤
           TAGS="with_quic,with_grpc,with_utls,with_clash_api"
           [ "${{ matrix.target.flavor }}" != "lite" ] && TAGS="${TAGS},with_gvisor,with_acme,with_v2ray_api,with_wireguard"
 
@@ -370,16 +369,16 @@ jobs:
       matrix:
         branch_info: ${{ fromJson(needs.check_updates.outputs.matrix).include }}
     steps:
-      - name: Maximize Build Space
+      - name: Maximize Build Space (With Swap Enabled)
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: false
-          android: false
+          android: false # 絕對不能刪除 Android SDK
           dotnet: true
           haskell: true
           large-packages: false
           docker-images: false
-          swap-storage: false
+          swap-storage: true # 關鍵修復：啟用虛擬內存，徹底防止 Go + Gradle 同時運行造成的 OOM
 
       - uses: actions/checkout@v4
         with:
@@ -404,7 +403,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21' # 強制使用 Java 21 以適配 SFA 和 Gradle 9+
 
       - name: Link Custom sing-box Core to SFA
         shell: bash
@@ -417,13 +416,13 @@ jobs:
 
           if [ -f "go.mod" ]; then
             go mod edit -replace github.com/sagernet/sing-box="$ABS_CORE"
-            go mod tidy -e || true
+            go mod tidy
           fi
 
           if [ -d "libbox" ] && [ -f "libbox/go.mod" ]; then
             cd libbox
             go mod edit -replace github.com/sagernet/sing-box="$ABS_CORE"
-            go mod tidy -e || true
+            go mod tidy
             cd ..
           fi
 
@@ -492,9 +491,8 @@ jobs:
             echo "android.enableJetifier=true"
           } >> gradle.properties
 
-          # 修復：將憑證升級為 PKCS12 標準，消除警告
+          # 最終防護：直接生成 PKCS12 憑證並隱藏輸出，徹底消滅煩人的 JKS Warning 警告
           if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::notice::KEYSTORE_BASE64 is empty, generating a temporary PKCS12 keystore."
             keytool -genkeypair -v \
               -keystore ci-release.p12 \
               -storetype PKCS12 \
@@ -504,11 +502,11 @@ jobs:
               -alias "$KEY_ALIAS" \
               -storepass "$KEYSTORE_PASS" \
               -keypass "$KEY_PASS" \
-              -dname "CN=sing-box,O=CI,C=US"
+              -dname "CN=sing-box,O=CI,C=US" > /dev/null 2>&1 || true
             KEY_FILE="ci-release.p12"
           else
-            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > ci-release.jks
-            KEY_FILE="ci-release.jks"
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > ci-release.p12
+            KEY_FILE="ci-release.p12"
           fi
 
           BUILD_TASK=":app:assemblePlayRelease"
@@ -516,15 +514,17 @@ jobs:
             BUILD_TASK=":app:assembleRelease"
           fi
 
+          # 加入 --info 開關解鎖底層報錯
           if ! ./gradlew clean "$BUILD_TASK" \
             --no-daemon \
+            --info \
             --stacktrace \
             -x lint \
             -Pandroid.injected.signing.store.file="$(pwd)/$KEY_FILE" \
             -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
             -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
             -Pandroid.injected.signing.key.password="$KEY_PASS"; then
-            echo "::warning::SFA APK Compilation failed due to upstream API incompatibility."
+            echo "::warning::SFA APK Compilation failed. Check the logs above for Go compiler errors (Upstream API incompatibility)."
             echo "APK_STATUS=failed" > ../output/apk_meta.env
             exit 0
           fi
