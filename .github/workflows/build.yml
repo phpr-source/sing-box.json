@@ -264,7 +264,8 @@ jobs:
         run: |
           set -euo pipefail
           suffix=""
-          [ -n "${{ matrix.target.amd || '' }}" ] && suffix="${suffix}v${{ matrix.target.amd }}"
+          # 完美修復：直接拼接 amd 的值 (如 v3)，避免變成 vv3
+          [ -n "${{ matrix.target.amd || '' }}" ] && suffix="${suffix}${{ matrix.target.amd }}"
           [ -n "${{ matrix.target.arm || '' }}" ] && suffix="${suffix}v${{ matrix.target.arm }}"
           [ -n "${{ matrix.target.mips || '' }}" ] && suffix="${suffix}-${{ matrix.target.mips }}"
           
@@ -289,7 +290,8 @@ jobs:
           if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; fi
           if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; fi
 
-          TAGS="with_quic,with_utls,with_clash_api"
+          # 優化：補全 sing-box 完整版需要的常見 Tags (參考 DustinWin 等倉庫)
+          TAGS="with_quic,with_grpc,with_ech,with_utls,with_reality_server,with_clash_api"
           [ "${{ matrix.target.flavor }}" != "lite" ] && TAGS="${TAGS},with_gvisor,with_acme,with_v2ray_api,with_wireguard"
 
           BIN="sing-box"
@@ -357,6 +359,13 @@ jobs:
       matrix:
         branch_info: ${{ fromJson(needs.check_updates.outputs.matrix).include }}
     steps:
+      # 整合：釋放磁碟空間，防止 NDK/Gradle 緩存耗盡磁碟
+      - name: Maximize Build Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          large-packages: false
+
       - uses: actions/checkout@v4
         with:
           repository: ${{ matrix.branch_info.repo }}
@@ -377,10 +386,33 @@ jobs:
           go-version: 'stable'
           cache: false
 
+      # 深度修復：降級至 Java 17，徹底消除圖中出現的 Deprecated 與兼容性警告
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '17'
+
+      # 深度修復：不僅替換 sfa 根目錄，更重要的是替換 libbox 的依賴
+      - name: Link Custom sing-box Core to SFA
+        shell: bash
+        run: |
+          set -euo pipefail
+          ABS_CORE="$(realpath sing-box)"
+          cd sfa
+          rm -f go.work go.work.sum
+          
+          if [ -f "go.mod" ]; then
+            go mod edit -replace github.com/sagernet/sing-box="$ABS_CORE"
+            go mod tidy -e || true
+          fi
+          
+          if [ -d "libbox" ] && [ -f "libbox/go.mod" ]; then
+            cd libbox
+            go mod edit -replace github.com/sagernet/sing-box="$ABS_CORE"
+            go mod tidy -e || true
+            cd ..
+          fi
+          echo "::notice::Successfully linked custom sing-box core to SFA build context."
 
       - name: Prepare Android Environment
         shell: bash
@@ -438,10 +470,11 @@ jobs:
 
           printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
 
+          # 深度修復：防 OOM 策略。關閉並發編譯，限制 JVM 內存
           {
-            echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
+            echo "org.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8"
             echo "org.gradle.caching=true"
-            echo "org.gradle.parallel=true"
+            echo "org.gradle.parallel=false"
             echo "kotlin.daemon.jvmargs=-Xmx1g"
             echo "android.useAndroidX=true"
             echo "android.enableJetifier=true"
