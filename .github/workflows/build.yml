@@ -106,7 +106,6 @@ jobs:
 
           CORE_TARGETS_JSON='[{"os":"linux","arch":"amd64","amd":"v3","flavor":"full","upx":false},{"os":"linux","arch":"amd64","flavor":"full","upx":false},{"os":"linux","arch":"arm64","flavor":"full","upx":false},{"os":"linux","arch":"arm","arm":"7","flavor":"full","upx":true},{"os":"linux","arch":"arm","arm":"7","flavor":"lite","upx":true},{"os":"linux","arch":"arm","arm":"5","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","mips":"softfloat","flavor":"lite","upx":true},{"os":"windows","arch":"amd64","amd":"v3","flavor":"full","upx":false},{"os":"darwin","arch":"amd64","flavor":"full","upx":false},{"os":"darwin","arch":"arm64","flavor":"full","upx":false}]'
 
-          # 已嚴格修正為最新的 SagerNet 上游分支結構：testing (開發版) 與 stable (穩定版)
           TARGETS=(
             "reF1nd/sing-box|reF1nd-testing|reF1nd-Testing|true"
             "reF1nd/sing-box|reF1nd-stable|reF1nd-Stable|false"
@@ -133,7 +132,7 @@ jobs:
             RESOLVED_BR="$BR"
             SHA=""
 
-            for search_br in "$BR" "testing" "stable" "main" "dev"; do
+            for search_br in "$BR" "testing" "stable" "oldstable" "main"; do
               SHA="$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$search_br" | awk 'NR==1{print $1}')"
               if [ -n "$SHA" ]; then
                 if [ "$search_br" != "$BR" ]; then
@@ -359,11 +358,6 @@ jobs:
           go-version: 'stable'
           cache: false
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21' # 強制升級：SFA 已完全過渡至 AGP 8.x 與 JDK 21
-
       - name: Prepare Android Environment
         shell: bash
         run: |
@@ -375,7 +369,6 @@ jobs:
             exit 1
           fi
 
-          # 提取並設定穩定的 NDK 版本，防範 NDK 27 下 Gomobile 鏈接崩潰
           NDK_VERSION="$(grep -hE '(ndkVersion|ndk[[:space:]]*=)' $(find sfa -type f \( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'libs.versions.toml' \)) 2>/dev/null | head -n 1 | sed -E "s/.*[\"']([^\"']+)[\"'].*/\1/" | tr -d '\r' || true)"
           [ -z "$NDK_VERSION" ] && NDK_VERSION="26.3.11579264"
 
@@ -398,22 +391,19 @@ jobs:
           printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\nANDROID_NDK_HOME=%s\n' \
             "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" "$ANDROID_SDK_ROOT" "$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
 
-      - name: Build Android AAR & APK
-        env:
-          GRADLE_USER_HOME: ${{ runner.temp }}/gradle-home
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'password' }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'release' }}
-          KEY_PASS: ${{ secrets.KEY_PASS || 'password' }}
+      # 第一步：配置 JDK 17 (專供 sing-box 構建 AAR 使用)
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Build Android AAR (libbox)
         shell: bash
         run: |
           set -euo pipefail
 
           export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
           export PATH="$PATH:$(go env GOPATH)/bin"
-
-          rm -rf "$GRADLE_USER_HOME"
-          mkdir -p "$GRADLE_USER_HOME"
 
           cd sing-box
           make lib_install
@@ -425,12 +415,32 @@ jobs:
             exit 1
           fi
 
-          # 強制命名匹配 SFA 期望的依賴名稱
           mkdir -p ../sfa/app/libs
           rm -f ../sfa/app/libs/*.aar
           cp "$AAR_FILE" ../sfa/app/libs/libbox.aar
 
-          cd ../sfa
+      # 第二步：動態切換至 JDK 21 (專供 SFA Gradle 編譯 APK 使用)
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build Android APK (SFA)
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/gradle-home
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'password' }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'release' }}
+          KEY_PASS: ${{ secrets.KEY_PASS || 'password' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
+          rm -rf "$GRADLE_USER_HOME"
+          mkdir -p "$GRADLE_USER_HOME"
+
+          cd sfa
           chmod +x ./gradlew
 
           printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
