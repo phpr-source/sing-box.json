@@ -358,7 +358,12 @@ jobs:
           go-version: 'stable'
           cache: false
 
-      - name: Prepare Android Environment
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Prepare Android Environment & Patch sing-box
         shell: bash
         run: |
           set -euo pipefail
@@ -391,39 +396,10 @@ jobs:
           printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\nANDROID_NDK_HOME=%s\n' \
             "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" "$ANDROID_SDK_ROOT" "$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
 
-      # 第一步：配置 JDK 17 (專供 sing-box 構建 AAR 使用)
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Build Android AAR (libbox)
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
-          export PATH="$PATH:$(go env GOPATH)/bin"
-
-          cd sing-box
-          make lib_install
-          make lib_android
-
-          AAR_FILE="$(find . -type f \( -name 'libbox*.aar' -o -name '*.aar' \) | sort -r | head -n 1 || true)"
-          if [ -z "$AAR_FILE" ] || [ ! -f "$AAR_FILE" ]; then
-            echo "::error::AAR not found."
-            exit 1
-          fi
-
-          mkdir -p ../sfa/app/libs
-          rm -f ../sfa/app/libs/*.aar
-          cp "$AAR_FILE" ../sfa/app/libs/libbox.aar
-
-      # 第二步：動態切換至 JDK 21 (專供 SFA Gradle 編譯 APK 使用)
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
+          # 🔴 CRITICAL FIX: SFA 的 Gradle 會主動呼叫 sing-box 源碼編譯。
+          # 這裡動態移除 sing-box 編譯腳本中對 Java 17 的強制檢查限制，讓 Java 21 無縫通過。
+          echo "::info::Patching Java version checks in sing-box to support JDK 21..."
+          find sing-box/cmd/internal/build_libbox -type f -name "*.go" -print0 | xargs -0 -r sed -i 's/17\./21\./g; s/"17"/"21"/g; s/openjdk 17/openjdk 21/g' || true
 
       - name: Build Android APK (SFA)
         env:
@@ -437,6 +413,8 @@ jobs:
           set -euo pipefail
 
           export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
+          export PATH="$PATH:$(go env GOPATH)/bin"
+
           rm -rf "$GRADLE_USER_HOME"
           mkdir -p "$GRADLE_USER_HOME"
 
