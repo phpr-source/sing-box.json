@@ -300,7 +300,8 @@ jobs:
           if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; fi
           if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; fi
 
-          TAGS="with_quic,with_grpc,with_dhcp,with_utls,with_clash_api"
+          # 修復：移除了會導致崩潰的 with_dhcp 錯誤標籤
+          TAGS="with_quic,with_grpc,with_utls,with_clash_api"
           [ "${{ matrix.target.flavor }}" != "lite" ] && TAGS="${TAGS},with_gvisor,with_acme,with_v2ray_api,with_wireguard"
 
           BIN="sing-box"
@@ -373,7 +374,7 @@ jobs:
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: false
-          android: false # 關鍵修復：絕對不能刪除 Android SDK
+          android: false
           dotnet: true
           haskell: true
           large-packages: false
@@ -491,10 +492,12 @@ jobs:
             echo "android.enableJetifier=true"
           } >> gradle.properties
 
+          # 修復：將憑證升級為 PKCS12 標準，消除警告
           if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::notice::KEYSTORE_BASE64 is empty, generating a temporary PKCS12 keystore."
             keytool -genkeypair -v \
-              -keystore ci-release.jks \
-              -storetype JKS \
+              -keystore ci-release.p12 \
+              -storetype PKCS12 \
               -keyalg RSA \
               -keysize 2048 \
               -validity 10000 \
@@ -502,8 +505,10 @@ jobs:
               -storepass "$KEYSTORE_PASS" \
               -keypass "$KEY_PASS" \
               -dname "CN=sing-box,O=CI,C=US"
+            KEY_FILE="ci-release.p12"
           else
             printf '%s' "$KEYSTORE_BASE64" | base64 --decode > ci-release.jks
+            KEY_FILE="ci-release.jks"
           fi
 
           BUILD_TASK=":app:assemblePlayRelease"
@@ -515,7 +520,7 @@ jobs:
             --no-daemon \
             --stacktrace \
             -x lint \
-            -Pandroid.injected.signing.store.file="$(pwd)/ci-release.jks" \
+            -Pandroid.injected.signing.store.file="$(pwd)/$KEY_FILE" \
             -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
             -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
             -Pandroid.injected.signing.key.password="$KEY_PASS"; then
