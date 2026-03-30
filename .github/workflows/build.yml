@@ -104,36 +104,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          CORE_TARGETS_JSON='[
-            {"os":"linux","arch":"amd64","goamd64":"v3","suffix":"-v3","flavor":"full","upx":false},
-            {"os":"linux","arch":"amd64","suffix":"","flavor":"full","upx":false},
-            {"os":"linux","arch":"arm64","suffix":"","flavor":"full","upx":false},
-            {"os":"linux","arch":"arm","goarm":"7","suffix":"v7","flavor":"full","upx":true},
-            {"os":"linux","arch":"arm","goarm":"7","suffix":"v7","flavor":"lite","upx":true},
-            {"os":"linux","arch":"arm","goarm":"5","suffix":"v5","flavor":"lite","upx":true},
-            {"os":"linux","arch":"mipsle","gomips":"softfloat","suffix":"-softfloat","flavor":"lite","upx":true},
-            {"os":"windows","arch":"amd64","goamd64":"v3","suffix":"-v3","flavor":"full","upx":false},
-            {"os":"darwin","arch":"amd64","suffix":"","flavor":"full","upx":false},
-            {"os":"darwin","arch":"arm64","suffix":"","flavor":"full","upx":false}
-          ]'
+          CORE_TARGETS_JSON='[{"os":"linux","arch":"amd64","amd":"v3","flavor":"full","upx":false},{"os":"linux","arch":"amd64","flavor":"full","upx":false},{"os":"linux","arch":"arm64","flavor":"full","upx":false},{"os":"linux","arch":"arm","arm":"7","flavor":"full","upx":true},{"os":"linux","arch":"arm","arm":"7","flavor":"lite","upx":true},{"os":"linux","arch":"arm","arm":"5","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","mips":"softfloat","flavor":"lite","upx":true},{"os":"windows","arch":"amd64","amd":"v3","flavor":"full","upx":false},{"os":"darwin","arch":"amd64","flavor":"full","upx":false},{"os":"darwin","arch":"arm64","flavor":"full","upx":false}]'
 
-          TARGETS_JSON='[
-            {"repo":"reF1nd/sing-box","branch":"reF1nd-testing","title":"reF1nd-Testing","tag":"reF1nd-Testing","rolling":true,"asset_prefix":"sing-box-ref1nd-test"},
-            {"repo":"reF1nd/sing-box","branch":"reF1nd-stable","title":"reF1nd-Stable","tag":"reF1nd-Stable","rolling":false,"asset_prefix":"sing-box-ref1nd-stable"},
-            {"repo":"SagerNet/sing-box","branch":"testing","title":"Official-Alpha","tag":"Official-Alpha","rolling":true,"asset_prefix":"sing-box-test"},
-            {"repo":"SagerNet/sing-box","branch":"stable","title":"Official-Stable","tag":"Official-Stable","rolling":false,"asset_prefix":"sing-box-stable"}
-          ]'
+          TARGETS=(
+            "reF1nd/sing-box|testing|reF1nd-Testing|true"
+            "reF1nd/sing-box|stable|reF1nd-Stable|false"
+            "SagerNet/sing-box|testing|Official-Alpha|true"
+            "SagerNet/sing-box|stable|Official-Stable|false"
+          )
 
           JSON="[]"
           HAS="false"
 
-          while IFS= read -r row; do
-            REPO="$(jq -r '.repo' <<<"$row")"
-            BR="$(jq -r '.branch' <<<"$row")"
-            TIT="$(jq -r '.title' <<<"$row")"
-            TAG="$(jq -r '.tag' <<<"$row")"
-            ROLLING="$(jq -r '.rolling' <<<"$row")"
-            ASSET_PREFIX="$(jq -r '.asset_prefix' <<<"$row")"
+          for e in "${TARGETS[@]}"; do
+            IFS='|' read -r REPO BR TIT ROLLING <<< "$e"
 
             if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ] && [ "$IN_BRANCH" != "$TIT" ]; then
               continue
@@ -147,6 +131,7 @@ jobs:
 
             RESOLVED_BR="$BR"
             SHA=""
+
             for search_br in "$BR" "testing" "stable" "oldstable" "main"; do
               SHA="$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$search_br" | awk 'NR==1{print $1}')"
               if [ -n "$SHA" ]; then
@@ -230,19 +215,18 @@ jobs:
                 --arg repo "$REPO" \
                 --arg branch "$RESOLVED_BR" \
                 --arg title "$TIT" \
-                --arg tag "$CHK_TAG" \
-                --arg asset_prefix "$ASSET_PREFIX" \
                 --argjson rolling "$IS_ROLLING" \
                 --arg sha "$SHA" \
                 --arg local_sha "$L_SHA" \
                 --arg short_sha "$SHORT_SHA" \
                 --arg build_ver "$BUILD_VER" \
                 --arg display_ver "$DISPLAY_VER" \
+                --arg tag "$CHK_TAG" \
                 --arg reason "$UPDATE_REASON" \
-                '. += [{"repo": $repo, "branch": $branch, "title": $title, "tag": $tag, "asset_prefix": $asset_prefix, "rolling": $rolling, "sha": $sha, "local_sha": $local_sha, "short_sha": $short_sha, "build_ver": $build_ver, "display_ver": $display_ver, "reason": $reason}]')"
+                '. += [{"repo": $repo, "branch": $branch, "title": $title, "rolling": $rolling, "sha": $sha, "local_sha": $local_sha, "short_sha": $short_sha, "build_ver": $build_ver, "display_ver": $display_ver, "tag": $tag, "reason": $reason}]')"
               HAS="true"
             fi
-          done < <(jq -c '.[]' <<<"$TARGETS_JSON")
+          done
 
           echo "matrix={\"include\":$JSON}" >> "$GITHUB_OUTPUT"
           echo "has_builds=$HAS" >> "$GITHUB_OUTPUT"
@@ -276,45 +260,41 @@ jobs:
 
       - name: Compute Artifact Name
         id: meta
-        env:
-          ASSET_PREFIX: ${{ matrix.branch_info.asset_prefix }}
-          TARGET_OS: ${{ matrix.target.os }}
-          TARGET_ARCH: ${{ matrix.target.arch }}
-          TARGET_SUFFIX: ${{ matrix.target.suffix }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "artifact_name=${ASSET_PREFIX}-${TARGET_OS}-${TARGET_ARCH}${TARGET_SUFFIX}" >> "$GITHUB_OUTPUT"
+          suffix=""
+          [ -n "${{ matrix.target.amd || '' }}" ] && suffix="${suffix}v${{ matrix.target.amd }}"
+          [ -n "${{ matrix.target.arm || '' }}" ] && suffix="${suffix}v${{ matrix.target.arm }}"
+          [ -n "${{ matrix.target.mips || '' }}" ] && suffix="${suffix}-${{ matrix.target.mips }}"
+          
+          flavor_suffix=""
+          [ "${{ matrix.target.flavor }}" = "lite" ] && flavor_suffix="-lite"
+          
+          APP_VER="${{ matrix.branch_info.display_ver }}"
+          FILE_NAME="sing-box-${APP_VER}-${{ matrix.target.os }}-${{ matrix.target.arch }}${suffix}${flavor_suffix}"
+          
+          echo "file_name=$FILE_NAME" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=art-${{ matrix.branch_info.title }}-${FILE_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Build Core
-        env:
-          TARGET_OS: ${{ matrix.target.os }}
-          TARGET_ARCH: ${{ matrix.target.arch }}
-          GOAMD64: ${{ matrix.target.goamd64 || '' }}
-          GOARM: ${{ matrix.target.goarm || '' }}
-          GOMIPS: ${{ matrix.target.gomips || '' }}
-          TARGET_FLAVOR: ${{ matrix.target.flavor }}
-          TARGET_UPX: ${{ matrix.target.upx }}
-          ARTIFACT_NAME: ${{ steps.meta.outputs.artifact_name }}
         shell: bash
         run: |
           set -euo pipefail
-
-          export GOOS="$TARGET_OS"
-          export GOARCH="$TARGET_ARCH"
+          export GOOS="${{ matrix.target.os }}"
+          export GOARCH="${{ matrix.target.arch }}"
           export CGO_ENABLED=0
 
-          if [ -n "$GOAMD64" ]; then export GOAMD64="$GOAMD64"; fi
-          if [ -n "$GOARM" ]; then export GOARM="$GOARM"; fi
-          if [ -n "$GOMIPS" ]; then export GOMIPS="$GOMIPS"; fi
+          if [ -n "${{ matrix.target.amd || '' }}" ]; then export GOAMD64="${{ matrix.target.amd }}"; fi
+          if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; fi
+          if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; fi
 
-          TAGS="with_quic with_utls with_clash_api"
-          if [ "$TARGET_FLAVOR" != "lite" ]; then
-            TAGS="$TAGS with_gvisor with_acme with_v2ray_api with_wireguard"
-          fi
+          # 修復：正確標準的 Go Tags 寫法
+          TAGS="with_quic,with_utls,with_clash_api"
+          [ "${{ matrix.target.flavor }}" != "lite" ] && TAGS="${TAGS},with_gvisor,with_acme,with_v2ray_api,with_wireguard"
 
           BIN="sing-box"
-          [ "$TARGET_OS" = "windows" ] && BIN="sing-box.exe"
+          [ "${{ matrix.target.os }}" = "windows" ] && BIN="sing-box.exe"
 
           if [ -z "${{ matrix.branch_info.display_ver }}" ] || [ -z "${{ matrix.branch_info.short_sha }}" ]; then
             echo "::error::Missing version metadata."
@@ -333,18 +313,30 @@ jobs:
           chmod +x "$BIN"
 
           mkdir -p output
-          if [ "$TARGET_OS" = "windows" ]; then
-            zip -9 -j -q "output/${ARTIFACT_NAME}.zip" "$BIN"
+          FILE_NAME="${{ steps.meta.outputs.file_name }}"
+          
+          # 修復產物命名：創建規範目錄結構再壓縮
+          mkdir -p "archive/${FILE_NAME}"
+          cp "$BIN" "archive/${FILE_NAME}/"
+          
+          if [ "${{ matrix.target.os }}" = "windows" ]; then
+            cd archive && zip -9 -r -q "../output/${FILE_NAME}.zip" "${FILE_NAME}" && cd ..
           else
-            tar -czf "output/${ARTIFACT_NAME}.tar.gz" "$BIN"
+            cd archive && tar -czf "../output/${FILE_NAME}.tar.gz" "${FILE_NAME}" && cd ..
           fi
 
-          if [ "$TARGET_UPX" = "true" ]; then
+          if [ "${{ matrix.target.upx }}" = "true" ]; then
             upx --lzma --best "$BIN" || true
-            cp "$BIN" "output/${ARTIFACT_NAME}.upx"
+            mkdir -p "archive_upx/${FILE_NAME}-upx"
+            cp "$BIN" "archive_upx/${FILE_NAME}-upx/"
+            if [ "${{ matrix.target.os }}" = "windows" ]; then
+              cd archive_upx && zip -9 -r -q "../output/${FILE_NAME}-upx.zip" "${FILE_NAME}-upx" && cd ..
+            else
+              cd archive_upx && tar -czf "../output/${FILE_NAME}-upx.tar.gz" "${FILE_NAME}-upx" && cd ..
+            fi
           fi
 
-          touch "output/SUCCESS-${TARGET_OS}-${TARGET_ARCH}${{ matrix.target.suffix }}-${TARGET_FLAVOR}"
+          touch "output/SUCCESS-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd || '' }}${{ matrix.target.arm && format('v{0}', matrix.target.arm) || '' }}${{ matrix.target.mips && format('-{0}', matrix.target.mips) || '' }}-${{ matrix.target.flavor }}"
 
       - name: Attest Build Provenance
         uses: actions/attest-build-provenance@v2
@@ -403,13 +395,7 @@ jobs:
             exit 1
           fi
 
-          NDK_VERSION="$(
-            find sfa -type f \( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'libs.versions.toml' \) -print0 \
-              | xargs -0 grep -hE '(ndkVersion|ndk[[:space:]]*=)' 2>/dev/null \
-              | head -n 1 \
-              | sed -E "s/.*[\"']([^\"']+)[\"'].*/\1/" \
-              | tr -d '\r' || true
-          )"
+          NDK_VERSION="$(grep -hE '(ndkVersion|ndk[[:space:]]*=)' $(find sfa -type f \( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'libs.versions.toml' \)) 2>/dev/null | head -n 1 | sed -E "s/.*[\"']([^\"']+)[\"'].*/\1/" | tr -d '\r' || true)"
           [ -z "$NDK_VERSION" ] && NDK_VERSION="26.3.11579264"
 
           if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
@@ -449,7 +435,6 @@ jobs:
           export PATH="$PATH:$GOPATH/bin"
 
           mkdir -p output
-
           cd sfa
           chmod +x ./gradlew
 
@@ -493,7 +478,8 @@ jobs:
             -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
             -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
             -Pandroid.injected.signing.key.password="$KEY_PASS"; then
-            echo "::warning::SFA APK Compilation failed."
+            
+            echo "::warning::SFA APK Compilation failed due to upstream incompatibility or OOM."
             echo "APK_STATUS=failed" > ../output/apk_meta.env
             exit 0
           fi
@@ -505,7 +491,7 @@ jobs:
             exit 0
           fi
 
-          APK_NAME="sing-box-${{ matrix.branch_info.asset_prefix }}-android-universal.apk"
+          APK_NAME="SFA-${{ matrix.branch_info.display_ver }}-${{ matrix.branch_info.title }}-universal.apk"
           cp "$APK_PATH" "../output/$APK_NAME"
           echo "APK_NAME=$APK_NAME" > ../output/apk_meta.env
           echo "APK_STATUS=success" >> ../output/apk_meta.env
@@ -513,7 +499,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: sing-box-${{ matrix.branch_info.title }}-android
+          name: art-${{ matrix.branch_info.title }}-android-apk
           path: output/*
           if-no-files-found: ignore
 
@@ -611,7 +597,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          pattern: sing-box-${{ matrix.branch_info.title }}-*
+          pattern: art-${{ matrix.branch_info.title }}-*
           merge-multiple: true
           path: release_assets
 
@@ -623,6 +609,7 @@ jobs:
           META_SHA: ${{ needs.check_updates.outputs.meta_sha }}
           YACD_SHA: ${{ needs.check_updates.outputs.yacd_sha }}
           EVENT_NAME: ${{ github.event_name }}
+          CORE_TARGETS_JSON: ${{ needs.check_updates.outputs.core_targets }}
         shell: bash
         run: |
           set -euo pipefail
@@ -632,22 +619,8 @@ jobs:
             source apk_meta.env
           else
             APK_STATUS="failed"
-            echo "::warning::apk_meta.env missing. Android build failed or was skipped."
           fi
           echo "APK_STATUS=$APK_STATUS" >> "$GITHUB_ENV"
-
-          mkdir -p publish_assets
-
-          while IFS= read -r -d '' file; do
-            cp "$file" publish_assets/
-          done < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.upx' -o -name '*.apk' \) -print0)
-
-          if [ -f "metadata.json" ]; then
-            cp metadata.json publish_assets/
-          fi
-          if [ -f "sha256sums.txt" ]; then
-            cp sha256sums.txt publish_assets/
-          fi
 
           SUCCESS_LIST=""
           FAILED_LIST=""
@@ -656,15 +629,15 @@ jobs:
             ITEM="$(echo "$target_encoded" | base64 --decode)"
             OS="$(echo "$ITEM" | jq -r '.os')"
             ARCH="$(echo "$ITEM" | jq -r '.arch')"
-            GOAMD64="$(echo "$ITEM" | jq -r '.goamd64 // empty')"
-            GOARM="$(echo "$ITEM" | jq -r '.goarm // empty')"
-            GOMIPS="$(echo "$ITEM" | jq -r '.gomips // empty')"
+            AMD="$(echo "$ITEM" | jq -r '.amd // empty')"
+            ARM="$(echo "$ITEM" | jq -r '.arm // empty')"
+            MIPS="$(echo "$ITEM" | jq -r '.mips // empty')"
             FLAVOR="$(echo "$ITEM" | jq -r '.flavor')"
 
             SUF=""
-            [ -n "$GOAMD64" ] && SUF="${SUF}-${GOAMD64}"
-            [ -n "$GOARM" ] && SUF="${SUF}v${GOARM}"
-            [ -n "$GOMIPS" ] && SUF="${SUF}-${GOMIPS}"
+            [ -n "$AMD" ] && SUF="${SUF}${AMD}"
+            [ -n "$ARM" ] && SUF="${SUF}v${ARM}"
+            [ -n "$MIPS" ] && SUF="${SUF}-${MIPS}"
 
             IDENTIFIER="${OS}-${ARCH}${SUF}-${FLAVOR}"
 
@@ -673,7 +646,7 @@ jobs:
             else
               FAILED_LIST="${FAILED_LIST}\n- ❌ \`$IDENTIFIER\` (Failed or Skipped)"
             fi
-          done <<< "$(echo '${{ needs.check_updates.outputs.core_targets }}' | jq -r '.[] | @base64')"
+          done <<< "$(echo "$CORE_TARGETS_JSON" | jq -r '.[] | @base64')"
 
           if [ -z "$(printf '%b' "$SUCCESS_LIST" | tr -d '[:space:]')" ]; then
             echo "::error::All core platform builds failed."
@@ -690,31 +663,6 @@ jobs:
           } >> "$GITHUB_ENV"
 
           rm -f SUCCESS-* apk_meta.env gradle-build-error.log
-
-          BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          echo "BUILD_TIME=$BUILD_TIME" >> "$GITHUB_ENV"
-
-          HASHES_JSON="$(cd publish_assets && find . -maxdepth 1 -type f ! -name 'sha256sums.txt' -print0 | xargs -0 -r sha256sum | awk '{printf "{\"file\":\"%s\",\"hash\":\"%s\"}\n", $2, $1}' | jq -s -c '.' || echo '[]')"
-          [ -z "$HASHES_JSON" ] && HASHES_JSON="[]"
-
-          jq -n \
-            --arg repo "${{ matrix.branch_info.repo }}" \
-            --arg branch "${{ matrix.branch_info.branch }}" \
-            --arg sha "${{ matrix.branch_info.sha }}" \
-            --arg build_ver "${{ matrix.branch_info.build_ver }}" \
-            --arg display_ver "${{ matrix.branch_info.display_ver }}" \
-            --arg build_time "$BUILD_TIME" \
-            --arg sfa_sha "$SFA_SHA" \
-            --arg geoip_tag "$GEOIP_TAG" \
-            --arg geosite_tag "$GEOSITE_TAG" \
-            --arg meta_sha "$META_SHA" \
-            --arg yacd_sha "$YACD_SHA" \
-            --arg trigger "$EVENT_NAME" \
-            --arg apk_status "$APK_STATUS" \
-            --argjson hashes "$HASHES_JSON" \
-            '{repo: $repo, branch: $branch, sha: $sha, build_ver: $build_ver, display_ver: $display_ver, build_time: $build_time, sfa_sha: $sfa_sha, geoip_tag: $geoip_tag, geosite_tag: $geosite_tag, meta_sha: $meta_sha, yacd_sha: $yacd_sha, trigger_event: $trigger, apk_status: $apk_status, artifacts: $hashes}' > publish_assets/metadata.json
-
-          (cd publish_assets && find . -maxdepth 1 -type f ! -name 'sha256sums.txt' -print0 | xargs -0 sha256sum > sha256sums.txt)
 
           mkdir -p Essential-Assets/ui
           echo '{ "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }' > Essential-Assets/config.json
@@ -743,8 +691,12 @@ jobs:
             fi
           }
 
-          safe_download "https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db" "Essential-Assets/geoip.db" || true
-          safe_download "https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db" "Essential-Assets/geosite.db" || true
+          # 修復：正確獲取沒有 404 問題的 .db 和 .srs 規則庫
+          safe_download "https://github.com/SagerNet/sing-geoip/releases/download/${GEOIP_TAG}/geoip.db" "Essential-Assets/geoip.db" || true
+          safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite.db" "Essential-Assets/geosite.db" || true
+          # 新的 .srs 位置在 sing-box-rules 的分支上
+          safe_download "https://raw.githubusercontent.com/SagerNet/sing-box-rules/rule-set-geosite/geosite-cn.srs" "Essential-Assets/geosite-cn.srs" || true
+          safe_download "https://raw.githubusercontent.com/SagerNet/sing-box-rules/rule-set-geoip/geoip-cn.srs" "Essential-Assets/geoip-cn.srs" || true
 
           rm -rf tmp_meta tmp_yacd metacubexd.zip yacd.zip
 
@@ -764,8 +716,36 @@ jobs:
 
           rm -rf tmp_* *.zip
 
-          zip -9 -r "publish_assets/sing-box-${{ matrix.branch_info.asset_prefix }}-Essential-Assets.zip" Essential-Assets/ || echo "::warning::Failed to zip Essential-Assets"
+          zip -9 -r "sing-box-${{ matrix.branch_info.title }}-Essential-Assets.zip" Essential-Assets/ || echo "::warning::Failed to zip Essential-Assets"
           rm -rf Essential-Assets/
+
+          BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "BUILD_TIME=$BUILD_TIME" >> "$GITHUB_ENV"
+
+          find . -maxdepth 1 -type f \( ! -name 'sha256sums.txt' ! -name 'metadata.json' ! -name 'temp_hashes.txt' \) -print0 | xargs -0 -r sha256sum | sed 's| \./|  |' > temp_hashes.txt
+          HASHES_JSON="$(awk '{printf "{\"file\":\"%s\",\"hash\":\"%s\"}\n", $2, $1}' temp_hashes.txt | jq -s -c '.' || echo "[]")"
+          [ -z "$HASHES_JSON" ] && HASHES_JSON="[]"
+
+          jq -n \
+            --arg repo "${{ matrix.branch_info.repo }}" \
+            --arg branch "${{ matrix.branch_info.branch }}" \
+            --arg sha "${{ matrix.branch_info.sha }}" \
+            --arg build_ver "${{ matrix.branch_info.build_ver }}" \
+            --arg display_ver "${{ matrix.branch_info.display_ver }}" \
+            --arg build_time "$BUILD_TIME" \
+            --arg sfa_sha "$SFA_SHA" \
+            --arg geoip_tag "$GEOIP_TAG" \
+            --arg geosite_tag "$GEOSITE_TAG" \
+            --arg meta_sha "$META_SHA" \
+            --arg yacd_sha "$YACD_SHA" \
+            --arg trigger "$EVENT_NAME" \
+            --arg apk_status "$APK_STATUS" \
+            --argjson hashes "$HASHES_JSON" \
+            '{repo: $repo, branch: $branch, sha: $sha, build_ver: $build_ver, display_ver: $display_ver, build_time: $build_time, sfa_sha: $sfa_sha, geoip_tag: $geoip_tag, geosite_tag: $geosite_tag, meta_sha: $meta_sha, yacd_sha: $yacd_sha, trigger_event: $trigger, apk_status: $apk_status, artifacts: $hashes}' > metadata.json
+
+          cat temp_hashes.txt > sha256sums.txt
+          sha256sum metadata.json >> sha256sums.txt
+          rm -f temp_hashes.txt
 
       - name: Build Release Body
         id: release_meta
@@ -786,7 +766,7 @@ jobs:
 
           {
             echo "## 🚀 sing-box Core ($TITLE)"
-            echo "> ⏱️ **Build Time (UTC)**: \`$BUILD_TIME\`"
+            echo "> ⏱️ **Build Time (UTC)**: \`${BUILD_TIME}\`"
             echo ""
             echo "$CHANGELOG"
             echo ""
@@ -796,7 +776,7 @@ jobs:
           if [ "${APK_STATUS:-failed}" = "success" ]; then
             echo "- ✅ **Android GUI**: SFA Universal APK 構建成功 (SFA Commit: \`${SFA_SHA:0:7}\`)." >> release_body.md
           else
-            echo "- ❌ **Android GUI**: 構建失敗或未產出 APK." >> release_body.md
+            echo "- ❌ **Android GUI**: 構建失敗或未產出 APK (通常因 Core API 與最新版 SFA 不相容)." >> release_body.md
           fi
 
           {
@@ -820,15 +800,13 @@ jobs:
 
           echo "REL_NAME=$REL_NAME" >> "$GITHUB_OUTPUT"
 
+      # 修復：替換發布模塊，徹底消除 Node.js 20 棄用警告
       - name: Publish Release
-        uses: ncipollo/release-action@v1
+        uses: softprops/action-gh-release@v2
         with:
-          tag: ${{ matrix.branch_info.tag }}
+          tag_name: ${{ matrix.branch_info.tag }}
           name: ${{ steps.release_meta.outputs.REL_NAME }}
           prerelease: ${{ matrix.branch_info.rolling == true }}
-          makeLatest: ${{ matrix.branch_info.rolling == false }}
-          artifacts: "release_assets/publish_assets/*"
-          bodyFile: release_body.md
-          allowUpdates: true
-          replacesArtifacts: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+          make_latest: ${{ matrix.branch_info.rolling == false && 'true' || 'false' }}
+          files: release_assets/*
+          body_path: release_body.md
