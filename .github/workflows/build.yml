@@ -154,7 +154,6 @@ jobs:
 
             SHORT_SHA="${SHA:0:7}"
 
-            # 更安全的源碼擷取方式，避免報錯
             TMPDIR="$(mktemp -d)"
             APP_VER=""
             if git clone --bare --filter=blob:none "https://github.com/${REPO}.git" "$TMPDIR" >/dev/null 2>&1; then
@@ -251,7 +250,6 @@ jobs:
           ref: ${{ matrix.branch_info.sha }}
           fetch-depth: 0
 
-      # 優化：直接讀取官方核心設定的 go 版本，防止環境漂移
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -268,7 +266,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 乾淨完美的後綴處理邏輯
           AMD="${{ matrix.target.amd || '' }}"
           ARM="${{ matrix.target.arm || '' }}"
           MIPS="${{ matrix.target.mips || '' }}"
@@ -282,7 +279,6 @@ jobs:
           FLAVOR_SUF=""
           [ "$FLAVOR" = "lite" ] && FLAVOR_SUF="-lite"
           
-          # 確保產物名稱與官方完全一致，只有 lite 才會加後綴，full 不會加！
           IDENTIFIER="${{ matrix.target.os }}-${{ matrix.target.arch }}${SUF}${FLAVOR_SUF}"
           APP_VER="${{ matrix.branch_info.display_ver }}"
           FILE_NAME="sing-box-${APP_VER}-${IDENTIFIER}"
@@ -304,7 +300,6 @@ jobs:
           if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; fi
           if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; fi
 
-          # 修復核心：移除被官方廢棄的 with_ech 與 with_reality_server，並加入 with_dhcp
           TAGS="with_quic,with_grpc,with_dhcp,with_utls,with_clash_api"
           [ "${{ matrix.target.flavor }}" != "lite" ] && TAGS="${TAGS},with_gvisor,with_acme,with_v2ray_api,with_wireguard"
 
@@ -378,7 +373,12 @@ jobs:
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: false
+          android: false # 關鍵修復：絕對不能刪除 Android SDK
+          dotnet: true
+          haskell: true
           large-packages: false
+          docker-images: false
+          swap-storage: false
 
       - uses: actions/checkout@v4
         with:
