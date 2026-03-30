@@ -358,12 +358,7 @@ jobs:
           go-version: 'stable'
           cache: false
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Prepare Android Environment & Patch sing-box
+      - name: Prepare Android Environment
         shell: bash
         run: |
           set -euo pipefail
@@ -396,12 +391,48 @@ jobs:
           printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\nANDROID_NDK_HOME=%s\n' \
             "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" "$ANDROID_SDK_ROOT" "$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
 
-          # 🔴 CRITICAL FIX: SFA 的 Gradle 會主動呼叫 sing-box 源碼編譯。
-          # 這裡動態移除 sing-box 編譯腳本中對 Java 17 的強制檢查限制，讓 Java 21 無縫通過。
-          echo "::info::Patching Java version checks in sing-box to support JDK 21..."
-          find sing-box/cmd/internal/build_libbox -type f -name "*.go" -print0 | xargs -0 -r sed -i 's/17\./21\./g; s/"17"/"21"/g; s/openjdk 17/openjdk 21/g' || true
+      # 階段一：強制使用 Java 17，專心編譯 Go 源碼產出 libbox.aar
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-      - name: Build Android APK (SFA)
+      - name: Phase 1 - Build Android AAR (libbox)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
+          export PATH="$PATH:$(go env GOPATH)/bin"
+
+          cd sing-box
+          make lib_install
+          make lib_android
+
+          AAR_FILE="$(find . -type f -name '*.aar' | sort -r | head -n 1 || true)"
+          if [ -z "$AAR_FILE" ] || [ ! -f "$AAR_FILE" ]; then
+            echo "::error::AAR generation failed."
+            exit 1
+          fi
+
+          mkdir -p ../sfa/app/libs
+          cp "$AAR_FILE" ../sfa/app/libs/libbox.aar
+          cd ..
+
+          # 🔥 物理隔離大法：徹底抹除源碼！防止稍後 Gradle 自作主張觸發重新編譯
+          echo "::info::Purging sing-box source to isolate Gradle build..."
+          rm -rf sing-box
+
+          # 🔥 依賴綁定大法：修改 SFA，強制它讀取剛剛生成的本地 AAR，而不是遠端舊包
+          cd sfa
+          sed -i 's/libs\.libbox/files("libs\/libbox.aar")/g' app/build.gradle.kts || true
+
+      # 階段二：強制切換為 Java 21，使用極度乾淨的內存環境專心打包 APK
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Phase 2 - Build Android APK (SFA)
         env:
           GRADLE_USER_HOME: ${{ runner.temp }}/gradle-home
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -413,8 +444,6 @@ jobs:
           set -euo pipefail
 
           export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
-          export PATH="$PATH:$(go env GOPATH)/bin"
-
           rm -rf "$GRADLE_USER_HOME"
           mkdir -p "$GRADLE_USER_HOME"
 
@@ -423,13 +452,15 @@ jobs:
 
           printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
 
+          # 優化 JVM 參數以防止 Daemon 內存崩潰
           {
-            echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true"
+            echo "org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true"
             echo "org.gradle.caching=false"
             echo "org.gradle.configuration-cache=false"
             echo "kotlin.daemon.jvmargs=-Xmx1g -Djava.awt.headless=true"
             echo "android.useAndroidX=true"
             echo "android.enableJetifier=true"
+            echo "org.gradle.daemon=false"
           } >> gradle.properties
 
           mkdir -p ../output
