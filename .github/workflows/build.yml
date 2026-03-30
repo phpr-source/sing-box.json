@@ -315,7 +315,6 @@ jobs:
             cp "$BIN" "output/${{ steps.meta.outputs.artifact_name }}-upx"
           fi
 
-          # 🔴 修復致命 Bug: 使用嚴謹的安全判斷 && format(...) 來規避 null != '' 的 Actions 漏洞
           touch "output/SUCCESS-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd || '' }}${{ matrix.target.arm && format('v{0}', matrix.target.arm) || '' }}${{ matrix.target.mips && format('-{0}', matrix.target.mips) || '' }}-${{ matrix.target.flavor }}"
 
       - name: Attest Build Provenance
@@ -392,18 +391,26 @@ jobs:
           printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\nANDROID_NDK_HOME=%s\n' \
             "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" "$ANDROID_SDK_ROOT" "$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
 
+      # 統一採用 Java 17：相容 sing-box 的 build_libbox 腳本，同時規避 KSP 在 Java 21 下的 Application 崩潰 Bug。
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Phase 1 - Build Android AAR (libbox)
+      - name: Build Android AAR & APK
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/gradle-home
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'password' }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'release' }}
+          KEY_PASS: ${{ secrets.KEY_PASS || 'password' }}
         shell: bash
         run: |
           set -euo pipefail
           export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
           export PATH="$PATH:$(go env GOPATH)/bin"
 
+          # 1. 編譯 AAR
           cd sing-box
           make lib_install
           make lib_android
@@ -418,34 +425,20 @@ jobs:
           cp "$AAR_FILE" ../sfa/app/libs/libbox.aar
           cd ..
 
-          echo "::info::Purging sing-box source to isolate Gradle build..."
+          echo "::info::Purging sing-box source to completely isolate Gradle build..."
           rm -rf sing-box
 
+          # 2. 配置 SFA 依賴 (物理攔截)
           cd sfa
-          sed -i 's/libs\.libbox/files("libs\/libbox.aar")/g' app/build.gradle.kts || true
+          echo "::info::Patching SFA configurations..."
+          sed -i '/includeBuild/d' settings.gradle.kts || true
+          sed -i '/includeBuild/d' settings.gradle || true
+          sed -i -E 's/(implementation|api)[[:space:]]*\([[:space:]]*project[[:space:]]*\([^\)]*box[^\)]*\)[[:space:]]*\)/\1(files("libs\/libbox.aar"))/g' app/build.gradle.kts || true
+          sed -i -E 's/(implementation|api)[[:space:]]*\([[:space:]]*libs\.libbox[[:space:]]*\)/\1(files("libs\/libbox.aar"))/g' app/build.gradle.kts || true
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      # 🔴 修復重點: 加入容錯機制。遇到不相容的分支 API 導致 SFA 崩潰時，優雅記錄並跳過，不中斷 Core 二進制發布
-      - name: Phase 2 - Build Android APK (SFA)
-        env:
-          GRADLE_USER_HOME: ${{ runner.temp }}/gradle-home
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'password' }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'release' }}
-          KEY_PASS: ${{ secrets.KEY_PASS || 'password' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
+          # 3. 準備 APK 打包
           rm -rf "$GRADLE_USER_HOME"
           mkdir -p "$GRADLE_USER_HOME"
-
-          cd sfa
           chmod +x ./gradlew
 
           printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
@@ -515,9 +508,9 @@ jobs:
             if ! run_gradle; then
               tail -n 200 gradle-build.log || true
               cp gradle-build.log ../output/gradle-build-error.log || true
-              echo "::error::SFA APK Compilation failed due to upstream incompatibility or OOM."
+              echo "::error::SFA APK Compilation failed due to upstream API incompatibility."
               echo "APK_STATUS=failed" > ../output/apk_meta.env
-              exit 0 # 優雅退出: 允許 CI 發布 Core 文件
+              exit 0 # 優雅退出：讓 CI 依然可以發布 Core 文件
             fi
           fi
 
@@ -672,10 +665,11 @@ jobs:
             MIPS="$(echo "$ITEM" | jq -r '.mips // empty')"
             FLAVOR="$(echo "$ITEM" | jq -r '.flavor')"
 
+            # 🔴 修復致命的 unbound variable 崩潰
             SUF=""
-            [ -n "$AMD" ] && SUF="$SUF$AMD"
-            [ -n "$ARM" ] && SUF="$SUFv$ARM"
-            [ -n "$MIPS" ] && SUF="$SUF-$MIPS"
+            [ -n "$AMD" ] && SUF="${SUF}${AMD}"
+            [ -n "$ARM" ] && SUF="${SUF}v${ARM}"
+            [ -n "$MIPS" ] && SUF="${SUF}-${MIPS}"
 
             IDENTIFIER="${OS}-${ARCH}${SUF}-${FLAVOR}"
 
