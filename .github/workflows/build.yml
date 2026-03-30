@@ -258,6 +258,17 @@ jobs:
         with:
           install-only: true
 
+      - name: Compute Artifact Name
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          suffix=""
+          [ -n "${{ matrix.target.amd || '' }}" ] && suffix="${suffix}${{ matrix.target.amd }}"
+          [ -n "${{ matrix.target.arm || '' }}" ] && suffix="${suffix}v${{ matrix.target.arm }}"
+          [ -n "${{ matrix.target.mips || '' }}" ] && suffix="${suffix}-${{ matrix.target.mips }}"
+          echo "artifact_name=bin-${{ matrix.branch_info.title }}-core-${{ matrix.target.os }}-${{ matrix.target.arch }}${suffix}-${{ matrix.target.flavor }}" >> "$GITHUB_OUTPUT"
+
       - name: Build Core
         shell: bash
         run: |
@@ -274,7 +285,7 @@ jobs:
           [ "${{ matrix.target.flavor }}" != "lite" ] && TAGS="${TAGS},with_gvisor,with_acme,with_v2ray_api,with_wireguard"
 
           BIN="sing-box"
-          [ "$GOOS" = "windows" ] && BIN="sing-box.exe"
+          [ "${{ matrix.target.os }}" = "windows" ] && BIN="sing-box.exe"
 
           if [ -z "${{ matrix.branch_info.display_ver }}" ] || [ -z "${{ matrix.branch_info.short_sha }}" ]; then
             echo "::error::Missing version metadata."
@@ -292,38 +303,29 @@ jobs:
           go build -trimpath -ldflags "$LDFLAGS" -tags "$TAGS" -o "$BIN" ./cmd/sing-box
           chmod +x "$BIN"
 
-          # 標準化命名邏輯 (sing-box-版本號-系統-架構)
-          PREFIX="sing-box-${{ matrix.branch_info.display_ver }}-${GOOS}-${GOARCH}"
-          [ -n "${{ matrix.target.amd || '' }}" ] && PREFIX="${PREFIX}-${{ matrix.target.amd }}"
-          [ -n "${{ matrix.target.arm || '' }}" ] && PREFIX="${PREFIX}v${{ matrix.target.arm }}"
-          [ -n "${{ matrix.target.mips || '' }}" ] && PREFIX="${PREFIX}-${{ matrix.target.mips }}"
-          [ "${{ matrix.target.flavor }}" = "lite" ] && PREFIX="${PREFIX}-lite"
-
-          mkdir -p "$PREFIX"
-          cp "$BIN" "$PREFIX/"
-
-          mkdir -p upload_artifacts
-          if [ "$GOOS" = "windows" ]; then
-            zip -9 -r "upload_artifacts/${PREFIX}.zip" "$PREFIX"
+          mkdir -p output
+          if [ "${{ matrix.target.os }}" = "windows" ]; then
+            zip -9 -j -q "output/${{ steps.meta.outputs.artifact_name }}.zip" "$BIN"
           else
-            tar -czf "upload_artifacts/${PREFIX}.tar.gz" "$PREFIX"
+            tar -czf "output/${{ steps.meta.outputs.artifact_name }}.tar.gz" "$BIN"
           fi
 
           if [ "${{ matrix.target.upx }}" = "true" ]; then
             upx --lzma --best "$BIN" || true
-            mkdir -p "${PREFIX}-upx"
-            cp "$BIN" "${PREFIX}-upx/"
-            if [ "$GOOS" = "windows" ]; then
-              zip -9 -r "upload_artifacts/${PREFIX}-upx.zip" "${PREFIX}-upx"
-            else
-              tar -czf "upload_artifacts/${PREFIX}-upx.tar.gz" "${PREFIX}-upx"
-            fi
+            cp "$BIN" "output/${{ steps.meta.outputs.artifact_name }}-upx"
           fi
+
+          touch "output/SUCCESS-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd || '' }}${{ matrix.target.arm && format('v{0}', matrix.target.arm) || '' }}${{ matrix.target.mips && format('-{0}', matrix.target.mips) || '' }}-${{ matrix.target.flavor }}"
+
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'output/*'
 
       - uses: actions/upload-artifact@v4
         with:
-          name: core-${{ matrix.branch_info.title }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd || '' }}${{ matrix.target.arm || '' }}${{ matrix.target.mips || '' }}-${{ matrix.target.flavor }}
-          path: upload_artifacts/*
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: output/*
           if-no-files-found: error
 
   build_android:
@@ -359,11 +361,47 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21' # 統一使用 SFA 官方要求的 Java 21
+          java-version: '21' # SFA AGP 8.x 強制需求 Java 21
 
-      - name: Build Android APK (Native includeBuild)
+      - name: Prepare Android Environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [ -z "$ANDROID_SDK_ROOT" ] || [ ! -d "$ANDROID_SDK_ROOT" ]; then
+            echo "::error::Android SDK not found on runner."
+            exit 1
+          fi
+
+          NDK_VERSION="$(grep -hE '(ndkVersion|ndk[[:space:]]*=)' $(find sfa -type f \( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'libs.versions.toml' \)) 2>/dev/null | head -n 1 | sed -E "s/.*[\"']([^\"']+)[\"'].*/\1/" | tr -d '\r' || true)"
+          [ -z "$NDK_VERSION" ] && NDK_VERSION="26.3.11579264"
+
+          if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
+            SDK_MGR="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+            [ ! -x "$SDK_MGR" ] && SDK_MGR="$(command -v sdkmanager || true)"
+            if [ -n "${SDK_MGR:-}" ] && [ -x "$SDK_MGR" ]; then
+              yes | "$SDK_MGR" "ndk;$NDK_VERSION" >/dev/null 2>&1 || true
+            fi
+          fi
+
+          if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
+            echo "::error::NDK install failed for version $NDK_VERSION."
+            exit 1
+          fi
+
+          ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
+          printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\nANDROID_NDK_HOME=%s\n' \
+            "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" "$ANDROID_SDK_ROOT" "$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
+
+          # 核心準備：安裝 gomobile 讓 SFA 的 Gradle 原生調用
+          export GOPATH="$(go env GOPATH)"
+          export PATH="$PATH:$GOPATH/bin"
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init || true
+
+      - name: Build Android APK (SFA Native)
         env:
-          GRADLE_USER_HOME: ${{ runner.temp }}/gradle-home
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'password' }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'release' }}
@@ -373,34 +411,26 @@ jobs:
           set -euo pipefail
 
           export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
-          export PATH="$PATH:$(go env GOPATH)/bin"
+          # 確保 Gradle 能找到 gomobile
+          export GOPATH="$(go env GOPATH)"
+          export PATH="$PATH:$GOPATH/bin"
 
-          # 1. 攔截並解除 sing-box 腳本中對 Java 17 的強制限制
-          echo "::info::Patching java version check in sing-box..."
-          find sing-box/cmd/internal/build_libbox -type f -name "*.go" -exec sed -i 's/log.Fatal("java version/log.Println("Bypassed java version/g' {} + || true
-
-          # 2. 初始化 gomobile (供 Gradle 原生調用)
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          gomobile init || true
-
-          rm -rf "$GRADLE_USER_HOME"
-          mkdir -p "$GRADLE_USER_HOME"
+          mkdir -p output
 
           cd sfa
           chmod +x ./gradlew
 
-          # 暴力禁用 Daemon，徹底消滅 Github Actions 內存耗盡問題
+          printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
+
+          # 啟用緩存與平行編譯，徹底解決下載超時問題
           {
-            echo "org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Djava.awt.headless=true"
-            echo "org.gradle.daemon=false"
-            echo "org.gradle.parallel=true"
+            echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
             echo "org.gradle.caching=true"
-            echo "kotlin.daemon.jvmargs=-Xmx1g -Djava.awt.headless=true"
+            echo "org.gradle.parallel=true"
+            echo "kotlin.daemon.jvmargs=-Xmx1g"
             echo "android.useAndroidX=true"
             echo "android.enableJetifier=true"
           } >> gradle.properties
-
-          mkdir -p ../upload_artifacts
 
           if [ -z "$KEYSTORE_BASE64" ]; then
             echo "::warning::KEYSTORE_BASE64 is empty, generating a temporary keystore."
@@ -418,50 +448,43 @@ jobs:
             printf '%s' "$KEYSTORE_BASE64" | base64 --decode > ci-release.jks
           fi
 
-          BUILD_TASK=""
-          for task in assemblePlayRelease assembleRelease assembleFossRelease assembleFdroidRelease; do
-            if ./gradlew help --task "$task" >/dev/null 2>&1; then
-              BUILD_TASK=":app:$task"
-              break
-            fi
-          done
+          BUILD_TASK=":app:assemblePlayRelease"
+          if ! ./gradlew help --task "$BUILD_TASK" >/dev/null 2>&1; then
+            BUILD_TASK=":app:assembleRelease"
+          fi
 
-          if [ -z "$BUILD_TASK" ]; then
-            echo "::error::No supported APK assemble task found."
-            echo "APK_STATUS=failed" > ../upload_artifacts/apk_meta.env
+          # 優雅容錯機制：若上游 API 更改導致 SFA 編譯失敗，不阻斷後續 Core 的發布
+          if ! ./gradlew clean "$BUILD_TASK" \
+            --no-daemon \
+            --stacktrace \
+            -x lint \
+            -Pandroid.injected.signing.store.file="$(pwd)/ci-release.jks" \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASS"; then
+            
+            echo "::warning::SFA APK Compilation failed due to upstream incompatibility or OOM."
+            echo "APK_STATUS=failed" > ../output/apk_meta.env
             exit 0
           fi
 
-          # 原生編譯：讓 SFA Gradle 透過 includeBuild 自行編譯 sing-box，保證依賴拓撲完美一致
-          if ! ./gradlew clean "$BUILD_TASK" \
-              --stacktrace \
-              --info \
-              -x lint \
-              -Pandroid.injected.signing.store.file="$(pwd)/ci-release.jks" \
-              -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
-              -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
-              -Pandroid.injected.signing.key.password="$KEY_PASS"; then
-            
-            echo "::error::SFA APK Compilation failed natively."
-            echo "APK_STATUS=failed" > ../upload_artifacts/apk_meta.env
-            exit 0 # 優雅退出，不阻塞 Core 二進制檔案發布
+          APK_PATH="$(find app/build/outputs/apk -type f -name '*.apk' | sort | head -n 1 || true)"
+          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
+            echo "::warning::APK generation failed or not found."
+            echo "APK_STATUS=failed" > ../output/apk_meta.env
+            exit 0
           fi
 
-          APK_PATH="$(find app/build/outputs/apk -type f -name '*.apk' | sort | head -n 1 || true)"
-          if [ -n "$APK_PATH" ] && [ -f "$APK_PATH" ]; then
-            APK_NAME="SFA-${{ matrix.branch_info.display_ver }}-${{ matrix.branch_info.title }}-universal.apk"
-            cp "$APK_PATH" "../upload_artifacts/$APK_NAME"
-            echo "APK_NAME=$APK_NAME" > ../upload_artifacts/apk_meta.env
-            echo "APK_STATUS=success" >> ../upload_artifacts/apk_meta.env
-          else
-            echo "APK_STATUS=failed" > ../upload_artifacts/apk_meta.env
-          fi
+          APK_NAME="SFA-${{ matrix.branch_info.display_ver }}-${{ matrix.branch_info.title }}-universal.apk"
+          cp "$APK_PATH" "../output/$APK_NAME"
+          echo "APK_NAME=$APK_NAME" > ../output/apk_meta.env
+          echo "APK_STATUS=success" >> ../output/apk_meta.env
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: apk-${{ matrix.branch_info.title }}
-          path: upload_artifacts/*
+          name: bin-${{ matrix.branch_info.title }}-android-apk
+          path: output/*
           if-no-files-found: ignore
 
   release:
@@ -478,6 +501,20 @@ jobs:
           repository: ${{ matrix.branch_info.repo }}
           ref: ${{ matrix.branch_info.sha }}
           fetch-depth: 0
+
+      - name: Pre-flight Artifact Check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 5
+          COUNT="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" | jq '.total_count // 0')"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::No artifacts found for this run."
+            exit 1
+          fi
 
       - name: Generate Smart Changelog
         env:
@@ -501,10 +538,27 @@ jobs:
             LOG_RAW="$(git log --pretty=format:"- %s (%h)" -n 15 "${{ matrix.branch_info.sha }}" 2>/dev/null || true)"
           fi
 
+          OLD_META_DIR="$(mktemp -d)"
+          OLD_META='{}'
+          if gh release download "${{ matrix.branch_info.tag }}" --pattern metadata.json --repo "${{ github.repository }}" --dir "$OLD_META_DIR" >/dev/null 2>&1; then
+            if [ -f "$OLD_META_DIR/metadata.json" ]; then
+              OLD_META="$(cat "$OLD_META_DIR/metadata.json")"
+            fi
+          fi
+          rm -rf "$OLD_META_DIR"
+
+          L_SFA="$(echo "$OLD_META" | jq -r '.sfa_sha // "none"')"
+          L_GEOIP="$(echo "$OLD_META" | jq -r '.geoip_tag // "none"')"
+          L_GEOSITE="$(echo "$OLD_META" | jq -r '.geosite_tag // "none"')"
+          L_META="$(echo "$OLD_META" | jq -r '.meta_sha // "none"')"
+          L_YACD="$(echo "$OLD_META" | jq -r '.yacd_sha // "none"')"
+
           DEP_CHANGES=""
-          [ "${{ needs.check_updates.outputs.sfa_sha }}" != "none" ] && DEP_CHANGES="${DEP_CHANGES}\n- ⬆️ **SFA Android**: \`${SFA_SHA:0:7}\`"
-          [ "${{ needs.check_updates.outputs.geoip_tag }}" != "none" ] && DEP_CHANGES="${DEP_CHANGES}\n- 🌍 **GeoIP**: \`$GEOIP_TAG\`"
-          [ "${{ needs.check_updates.outputs.geosite_tag }}" != "none" ] && DEP_CHANGES="${DEP_CHANGES}\n- 🌍 **Geosite**: \`$GEOSITE_TAG\`"
+          [ "$L_SFA" != "none" ] && [ "$L_SFA" != "$SFA_SHA" ] && DEP_CHANGES="${DEP_CHANGES}\n- ⬆️ **SFA Android**: \`$L_SFA\` -> \`${SFA_SHA:0:7}\`"
+          [ "$L_GEOIP" != "none" ] && [ "$L_GEOIP" != "$GEOIP_TAG" ] && DEP_CHANGES="${DEP_CHANGES}\n- 🌍 **GeoIP**: \`$L_GEOIP\` -> \`$GEOIP_TAG\`"
+          [ "$L_GEOSITE" != "none" ] && [ "$L_GEOSITE" != "$GEOSITE_TAG" ] && DEP_CHANGES="${DEP_CHANGES}\n- 🌍 **Geosite**: \`$L_GEOSITE\` -> \`$GEOSITE_TAG\`"
+          [ "$L_META" != "none" ] && [ "$L_META" != "$META_SHA" ] && DEP_CHANGES="${DEP_CHANGES}\n- 🖥️ **Metacubexd**: \`${L_META:0:7}\` -> \`${META_SHA:0:7}\`"
+          [ "$L_YACD" != "none" ] && [ "$L_YACD" != "$YACD_SHA" ] && DEP_CHANGES="${DEP_CHANGES}\n- 🖥️ **YACD**: \`${L_YACD:0:7}\` -> \`${YACD_SHA:0:7}\`"
 
           {
             echo "CHANGELOG<<EOF"
@@ -512,7 +566,7 @@ jobs:
             echo "- **Triggered by**: ${{ matrix.branch_info.reason }}"
             echo ""
             if [ -n "$DEP_CHANGES" ]; then
-              echo "### 📦 Dependencies"
+              echo "### 📦 Dependency Updates"
               printf '%b\n' "$DEP_CHANGES"
               echo ""
             fi
@@ -525,14 +579,21 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_ENV"
 
-      - name: Download all constructed artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          pattern: '*'
+          pattern: bin-${{ matrix.branch_info.title }}-*
           merge-multiple: true
           path: release_assets
 
       - name: Prepare Assets & Generate Traceability
+        env:
+          SFA_SHA: ${{ needs.check_updates.outputs.sfa_sha }}
+          GEOIP_TAG: ${{ needs.check_updates.outputs.geoip_tag }}
+          GEOSITE_TAG: ${{ needs.check_updates.outputs.geosite_tag }}
+          META_SHA: ${{ needs.check_updates.outputs.meta_sha }}
+          YACD_SHA: ${{ needs.check_updates.outputs.yacd_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          CORE_TARGETS_JSON: ${{ needs.check_updates.outputs.core_targets }}
         shell: bash
         run: |
           set -euo pipefail
@@ -542,35 +603,140 @@ jobs:
             source apk_meta.env
           else
             APK_STATUS="failed"
+            echo "::warning::apk_meta.env missing. Android build failed or was skipped."
           fi
           echo "APK_STATUS=$APK_STATUS" >> "$GITHUB_ENV"
-          rm -f apk_meta.env gradle-build-error.log
+
+          SUCCESS_LIST=""
+          FAILED_LIST=""
+
+          while read -r target_encoded; do
+            ITEM="$(echo "$target_encoded" | base64 --decode)"
+            OS="$(echo "$ITEM" | jq -r '.os')"
+            ARCH="$(echo "$ITEM" | jq -r '.arch')"
+            AMD="$(echo "$ITEM" | jq -r '.amd // empty')"
+            ARM="$(echo "$ITEM" | jq -r '.arm // empty')"
+            MIPS="$(echo "$ITEM" | jq -r '.mips // empty')"
+            FLAVOR="$(echo "$ITEM" | jq -r '.flavor')"
+
+            SUF=""
+            [ -n "$AMD" ] && SUF="${SUF}${AMD}"
+            [ -n "$ARM" ] && SUF="${SUF}v${ARM}"
+            [ -n "$MIPS" ] && SUF="${SUF}-${MIPS}"
+
+            IDENTIFIER="${OS}-${ARCH}${SUF}-${FLAVOR}"
+
+            if [ -f "SUCCESS-$IDENTIFIER" ]; then
+              SUCCESS_LIST="${SUCCESS_LIST}\n- ✅ \`$IDENTIFIER\`"
+            else
+              FAILED_LIST="${FAILED_LIST}\n- ❌ \`$IDENTIFIER\` (Failed or Skipped)"
+            fi
+          done <<< "$(echo "$CORE_TARGETS_JSON" | jq -r '.[] | @base64')"
+
+          if [ -z "$(printf '%b' "$SUCCESS_LIST" | tr -d '[:space:]')" ]; then
+            echo "::error::All core platform builds failed."
+            exit 1
+          fi
+
+          {
+            echo "EXPLICIT_SUCCESS<<EOF"
+            printf '%b\n' "$SUCCESS_LIST"
+            echo "EOF"
+            echo "EXPLICIT_FAILED<<EOF"
+            printf '%b\n' "$FAILED_LIST"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+          rm -f SUCCESS-* apk_meta.env gradle-build-error.log
 
           mkdir -p Essential-Assets/ui
           echo '{ "log": { "level": "info" }, "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": 2080 }], "outbounds": [{ "type": "selector", "tag": "proxy", "outbounds": ["direct"] }, { "type": "direct", "tag": "direct" }] }' > Essential-Assets/config.json
 
-          curl -fL -sS -o Essential-Assets/geoip.db "https://github.com/SagerNet/sing-geoip/releases/download/${{ needs.check_updates.outputs.geoip_tag }}/geoip.db" || true
-          curl -fL -sS -o Essential-Assets/geosite.db "https://github.com/SagerNet/sing-geosite/releases/download/${{ needs.check_updates.outputs.geosite_tag }}/geosite.db" || true
-          
-          curl -fL -sS -o metacubexd.zip "https://github.com/MetaCubeX/metacubexd/archive/${{ needs.check_updates.outputs.meta_sha }}.zip" || true
-          unzip -q metacubexd.zip -d tmp_meta/ || true
-          mv tmp_meta/*/ Essential-Assets/ui/metacubexd || true
-          
-          curl -fL -sS -o yacd.zip "https://github.com/haishanh/yacd/archive/${{ needs.check_updates.outputs.yacd_sha }}.zip" || true
-          unzip -q yacd.zip -d tmp_yacd/ || true
-          mv tmp_yacd/*/ Essential-Assets/ui/yacd || true
-          
+          fetch_with_retry() {
+            local attempt=1 max_attempts=3
+            while [ "$attempt" -le "$max_attempts" ]; do
+              if "$@"; then return 0; fi
+              echo "::warning::Command failed: $* . Retrying ($attempt/$max_attempts)..."
+              sleep 3
+              attempt=$((attempt + 1))
+            done
+            return 1
+          }
+
+          safe_download() {
+            local url="$1"
+            local dest="$2"
+            local tmpfile
+            tmpfile="$(mktemp)"
+            if fetch_with_retry curl -fL -sS -o "$tmpfile" "$url"; then
+              mv "$tmpfile" "$dest"
+            else
+              rm -f "$tmpfile"
+              echo "::warning::Download failed: $dest"
+            fi
+          }
+
+          safe_download "https://github.com/SagerNet/sing-geoip/releases/download/${GEOIP_TAG}/geoip.db" "Essential-Assets/geoip.db" || true
+          safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite.db" "Essential-Assets/geosite.db" || true
+          safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite-cn.srs" "Essential-Assets/geosite-cn.srs" || true
+
+          rm -rf tmp_meta tmp_yacd metacubexd.zip yacd.zip
+
+          if fetch_with_retry curl -fL -sS -o metacubexd.zip "https://github.com/MetaCubeX/metacubexd/archive/${META_SHA}.zip"; then
+            if unzip -q metacubexd.zip -d tmp_meta/; then
+              META_DIR="$(find tmp_meta -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
+              [ -n "$META_DIR" ] && mv "$META_DIR" Essential-Assets/ui/metacubexd || true
+            fi || true
+          fi || true
+
+          if fetch_with_retry curl -fL -sS -o yacd.zip "https://github.com/haishanh/yacd/archive/${YACD_SHA}.zip"; then
+            if unzip -q yacd.zip -d tmp_yacd/; then
+              YACD_DIR="$(find tmp_yacd -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
+              [ -n "$YACD_DIR" ] && mv "$YACD_DIR" Essential-Assets/ui/yacd || true
+            fi || true
+          fi || true
+
           rm -rf tmp_* *.zip
-          zip -9 -r "sing-box-${{ matrix.branch_info.title }}-Essential-Assets.zip" Essential-Assets/
+
+          zip -9 -r "sing-box-${{ matrix.branch_info.title }}-Essential-Assets.zip" Essential-Assets/ || echo "::warning::Failed to zip Essential-Assets"
           rm -rf Essential-Assets/
 
           BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           echo "BUILD_TIME=$BUILD_TIME" >> "$GITHUB_ENV"
 
-          find . -maxdepth 1 -type f ! -name 'sha256sums.txt' -print0 | xargs -0 -r sha256sum | sed 's| \./|  |' > sha256sums.txt
+          find . -maxdepth 1 -type f \( ! -name 'sha256sums.txt' ! -name 'metadata.json' ! -name 'temp_hashes.txt' \) -print0 | xargs -0 -r sha256sum | sed 's| \./|  |' > temp_hashes.txt
+          HASHES_JSON="$(awk '{printf "{\"file\":\"%s\",\"hash\":\"%s\"}\n", $2, $1}' temp_hashes.txt | jq -s -c '.' || echo "[]")"
+          [ -z "$HASHES_JSON" ] && HASHES_JSON="[]"
+
+          jq -n \
+            --arg repo "${{ matrix.branch_info.repo }}" \
+            --arg branch "${{ matrix.branch_info.branch }}" \
+            --arg sha "${{ matrix.branch_info.sha }}" \
+            --arg build_ver "${{ matrix.branch_info.build_ver }}" \
+            --arg display_ver "${{ matrix.branch_info.display_ver }}" \
+            --arg build_time "$BUILD_TIME" \
+            --arg sfa_sha "$SFA_SHA" \
+            --arg geoip_tag "$GEOIP_TAG" \
+            --arg geosite_tag "$GEOSITE_TAG" \
+            --arg meta_sha "$META_SHA" \
+            --arg yacd_sha "$YACD_SHA" \
+            --arg trigger "$EVENT_NAME" \
+            --arg apk_status "$APK_STATUS" \
+            --argjson hashes "$HASHES_JSON" \
+            '{repo: $repo, branch: $branch, sha: $sha, build_ver: $build_ver, display_ver: $display_ver, build_time: $build_time, sfa_sha: $sfa_sha, geoip_tag: $geoip_tag, geosite_tag: $geosite_tag, meta_sha: $meta_sha, yacd_sha: $yacd_sha, trigger_event: $trigger, apk_status: $apk_status, artifacts: $hashes}' > metadata.json
+
+          cat temp_hashes.txt > sha256sums.txt
+          sha256sum metadata.json >> sha256sums.txt
+          rm -f temp_hashes.txt
 
       - name: Build Release Body
         id: release_meta
+        env:
+          SFA_SHA: ${{ needs.check_updates.outputs.sfa_sha }}
+          GEOIP_TAG: ${{ needs.check_updates.outputs.geoip_tag }}
+          GEOSITE_TAG: ${{ needs.check_updates.outputs.geosite_tag }}
+          META_SHA: ${{ needs.check_updates.outputs.meta_sha }}
+          YACD_SHA: ${{ needs.check_updates.outputs.yacd_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -587,16 +753,32 @@ jobs:
             echo "$CHANGELOG"
             echo ""
             echo "### 📦 產物與容錯狀態清單"
-            
-            if [ "${APK_STATUS:-failed}" = "success" ]; then
-              echo "- ✅ **Android GUI**: SFA Universal APK 構建成功。"
-            else
-              echo "- ❌ **Android GUI**: 構建被跳過 (通常因 Core API 與最新版 SFA 代碼不相容)。"
-            fi
-            
-            echo "- ✅ **Core 二進制檔案與一體化資源包** 均已發布。"
-            echo "> 💡 **提示**: 請核對 \`sha256sums.txt\` 以確保下載檔案的一致性。"
           } > release_body.md
+
+          if [ "${APK_STATUS:-failed}" = "success" ]; then
+            echo "- ✅ **Android GUI**: SFA Universal APK 構建成功 (SFA Commit: \`${SFA_SHA:0:7}\`)." >> release_body.md
+          else
+            echo "- ❌ **Android GUI**: 構建失敗或未產出 APK (通常因 Core API 與最新版 SFA 不相容)." >> release_body.md
+          fi
+
+          {
+            echo "- ✅ **一體化資源包**:"
+            echo "  - *GeoIP*: \`${GEOIP_TAG}\` | *Geosite*: \`${GEOSITE_TAG}\`"
+            echo "  - *Metacubexd*: \`${META_SHA:0:7}\` | *YACD*: \`${YACD_SHA:0:7}\`"
+            echo ""
+            echo "<details open>"
+            echo "<summary><b>🚦 Core 平台構建報告</b></summary>"
+            echo ""
+            echo "**Successful Targets:**"
+            printf '%b\n' "$EXPLICIT_SUCCESS"
+            echo ""
+            echo "**Failed or Skipped Targets:**"
+            printf '%b\n' "$EXPLICIT_FAILED"
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "> 💡 **聲明**: 本倉庫採容錯策略運行，未列於成功清單的平台即代表本次構建失敗被跳過。請核對 \`sha256sums.txt\` 以確保下載檔案一致性。"
+          } >> release_body.md
 
           echo "REL_NAME=$REL_NAME" >> "$GITHUB_OUTPUT"
 
