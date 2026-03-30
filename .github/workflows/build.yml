@@ -154,9 +154,12 @@ jobs:
 
             SHORT_SHA="${SHA:0:7}"
 
+            # 更安全的源碼擷取方式，避免報錯
             TMPDIR="$(mktemp -d)"
-            git clone --bare --filter=blob:none "https://github.com/${REPO}.git" "$TMPDIR" >/dev/null 2>&1 || true
-            APP_VER="$(git --git-dir="$TMPDIR" describe --tags --abbrev=0 "$SHA" 2>/dev/null | sed 's/^v//' || true)"
+            APP_VER=""
+            if git clone --bare --filter=blob:none "https://github.com/${REPO}.git" "$TMPDIR" >/dev/null 2>&1; then
+              APP_VER="$(git --git-dir="$TMPDIR" describe --tags --abbrev=0 "$SHA" 2>/dev/null | sed 's/^v//' || true)"
+            fi
             rm -rf "$TMPDIR"
 
             [ -z "$APP_VER" ] && APP_VER="$SHORT_SHA"
@@ -248,9 +251,10 @@ jobs:
           ref: ${{ matrix.branch_info.sha }}
           fetch-depth: 0
 
+      # 優化：直接讀取官方核心設定的 go 版本，防止環境漂移
       - uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
+          go-version-file: go.mod
           cache: true
 
       - uses: crazy-max/ghaction-upx@v3
@@ -263,25 +267,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          suffix=""
-          # 借鑑優化：修正了 amd64 v3 變量拼接導致的 'vv3' Bug，直接引用變量
-          [ -n "${{ matrix.target.amd || '' }}" ] && suffix="${suffix}${{ matrix.target.amd }}"
-          [ -n "${{ matrix.target.arm || '' }}" ] && suffix="${suffix}v${{ matrix.target.arm }}"
-          [ -n "${{ matrix.target.mips || '' }}" ] && suffix="${suffix}-${{ matrix.target.mips }}"
+
+          # 乾淨完美的後綴處理邏輯
+          AMD="${{ matrix.target.amd || '' }}"
+          ARM="${{ matrix.target.arm || '' }}"
+          MIPS="${{ matrix.target.mips || '' }}"
+          FLAVOR="${{ matrix.target.flavor }}"
+
+          SUF=""
+          [ -n "$AMD" ] && SUF="-${AMD}"
+          [ -n "$ARM" ] && SUF="v${ARM}"
+          [ -n "$MIPS" ] && SUF="-${MIPS}"
           
-          flavor_suffix=""
-          [ "${{ matrix.target.flavor }}" = "lite" ] && flavor_suffix="-lite"
+          FLAVOR_SUF=""
+          [ "$FLAVOR" = "lite" ] && FLAVOR_SUF="-lite"
           
+          # 確保產物名稱與官方完全一致，只有 lite 才會加後綴，full 不會加！
+          IDENTIFIER="${{ matrix.target.os }}-${{ matrix.target.arch }}${SUF}${FLAVOR_SUF}"
           APP_VER="${{ matrix.branch_info.display_ver }}"
-          FILE_NAME="sing-box-${APP_VER}-${{ matrix.target.os }}-${{ matrix.target.arch }}${suffix}${flavor_suffix}"
+          FILE_NAME="sing-box-${APP_VER}-${IDENTIFIER}"
           
           echo "file_name=$FILE_NAME" >> "$GITHUB_OUTPUT"
+          echo "identifier=$IDENTIFIER" >> "$GITHUB_OUTPUT"
           echo "artifact_name=art-${{ matrix.branch_info.title }}-${FILE_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Build Core
         shell: bash
         run: |
           set -euo pipefail
+
           export GOOS="${{ matrix.target.os }}"
           export GOARCH="${{ matrix.target.arch }}"
           export CGO_ENABLED=0
@@ -290,8 +304,8 @@ jobs:
           if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; fi
           if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; fi
 
-          # 保留我的優化：補全核心 Tags
-          TAGS="with_quic,with_grpc,with_ech,with_utls,with_reality_server,with_clash_api"
+          # 修復核心：移除被官方廢棄的 with_ech 與 with_reality_server，並加入 with_dhcp
+          TAGS="with_quic,with_grpc,with_dhcp,with_utls,with_clash_api"
           [ "${{ matrix.target.flavor }}" != "lite" ] && TAGS="${TAGS},with_gvisor,with_acme,with_v2ray_api,with_wireguard"
 
           BIN="sing-box"
@@ -315,10 +329,11 @@ jobs:
 
           mkdir -p output
           FILE_NAME="${{ steps.meta.outputs.file_name }}"
-          
+          IDENTIFIER="${{ steps.meta.outputs.identifier }}"
+
           mkdir -p "archive/${FILE_NAME}"
           cp "$BIN" "archive/${FILE_NAME}/"
-          
+
           if [ "${{ matrix.target.os }}" = "windows" ]; then
             cd archive && zip -9 -r -q "../output/${FILE_NAME}.zip" "${FILE_NAME}" && cd ..
           else
@@ -336,7 +351,7 @@ jobs:
             fi
           fi
 
-          touch "output/SUCCESS-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.amd || '' }}${{ matrix.target.arm && format('v{0}', matrix.target.arm) || '' }}${{ matrix.target.mips && format('-{0}', matrix.target.mips) || '' }}-${{ matrix.target.flavor }}"
+          touch "output/SUCCESS-${IDENTIFIER}"
 
       - name: Attest Build Provenance
         uses: actions/attest-build-provenance@v2
@@ -359,7 +374,6 @@ jobs:
       matrix:
         branch_info: ${{ fromJson(needs.check_updates.outputs.matrix).include }}
     steps:
-      # 借鑑優化：在構建 SFA 前清理 Runner 空間，防止磁碟寫滿導致編譯中斷
       - name: Maximize Build Space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -383,37 +397,34 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
+          go-version-file: sing-box/go.mod
           cache: false
 
-      # 保留我的優化：必須徹底替換 sfa 和 libbox 的依賴，否則只改根目錄無效！
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - name: Link Custom sing-box Core to SFA
         shell: bash
         run: |
           set -euo pipefail
           ABS_CORE="$(realpath sing-box)"
           cd sfa
-          
+
           rm -f go.work go.work.sum
-          
+
           if [ -f "go.mod" ]; then
             go mod edit -replace github.com/sagernet/sing-box="$ABS_CORE"
             go mod tidy -e || true
           fi
-          
+
           if [ -d "libbox" ] && [ -f "libbox/go.mod" ]; then
             cd libbox
             go mod edit -replace github.com/sagernet/sing-box="$ABS_CORE"
             go mod tidy -e || true
             cd ..
           fi
-          echo "::notice::Successfully linked custom sing-box core to SFA build context."
-
-      # 保留我的優化：堅守 Java 17，避免 Java 21 導致的 AGP 兼容性報錯
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
 
       - name: Prepare Android Environment
         shell: bash
@@ -471,7 +482,6 @@ jobs:
 
           printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
 
-          # 保留我的優化：限制 JVM 內存並關閉並行，防 OOM
           {
             echo "org.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8"
             echo "org.gradle.caching=true"
@@ -482,7 +492,6 @@ jobs:
           } >> gradle.properties
 
           if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::warning::KEYSTORE_BASE64 is empty, generating a temporary keystore."
             keytool -genkeypair -v \
               -keystore ci-release.jks \
               -storetype JKS \
@@ -510,7 +519,6 @@ jobs:
             -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
             -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
             -Pandroid.injected.signing.key.password="$KEY_PASS"; then
-            
             echo "::warning::SFA APK Compilation failed due to upstream API incompatibility."
             echo "APK_STATUS=failed" > ../output/apk_meta.env
             exit 0
@@ -667,11 +675,14 @@ jobs:
             FLAVOR="$(echo "$ITEM" | jq -r '.flavor')"
 
             SUF=""
-            [ -n "$AMD" ] && SUF="${SUF}${AMD}"
-            [ -n "$ARM" ] && SUF="${SUF}v${ARM}"
-            [ -n "$MIPS" ] && SUF="${SUF}-${MIPS}"
+            [ -n "$AMD" ] && SUF="-${AMD}"
+            [ -n "$ARM" ] && SUF="v${ARM}"
+            [ -n "$MIPS" ] && SUF="-${MIPS}"
 
-            IDENTIFIER="${OS}-${ARCH}${SUF}-${FLAVOR}"
+            FLAVOR_SUF=""
+            [ "$FLAVOR" = "lite" ] && FLAVOR_SUF="-lite"
+
+            IDENTIFIER="${OS}-${ARCH}${SUF}${FLAVOR_SUF}"
 
             if [ -f "SUCCESS-$IDENTIFIER" ]; then
               SUCCESS_LIST="${SUCCESS_LIST}\n- ✅ \`$IDENTIFIER\`"
@@ -725,7 +736,6 @@ jobs:
 
           safe_download "https://github.com/SagerNet/sing-geoip/releases/download/${GEOIP_TAG}/geoip.db" "Essential-Assets/geoip.db" || true
           safe_download "https://github.com/SagerNet/sing-geosite/releases/download/${GEOSITE_TAG}/geosite.db" "Essential-Assets/geosite.db" || true
-          
           safe_download "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs" "Essential-Assets/geosite-cn.srs" || true
           safe_download "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs" "Essential-Assets/geoip-cn.srs" || true
           safe_download "https://raw.githubusercontent.com/SagerNet/sing-geosite/release/geosite-cn.db" "Essential-Assets/geosite-cn.db" || true
@@ -809,7 +819,7 @@ jobs:
           if [ "${APK_STATUS:-failed}" = "success" ]; then
             echo "- ✅ **Android GUI**: SFA Universal APK 構建成功 (SFA Commit: \`${SFA_SHA:0:7}\`)." >> release_body.md
           else
-            echo "- ❌ **Android GUI**: 構建失敗或未產出 APK (通常因 Core API 與最新版 SFA 不相容)." >> release_body.md
+            echo "- ❌ **Android GUI**: 構建失敗或未產出 APK." >> release_body.md
           fi
 
           {
@@ -838,7 +848,7 @@ jobs:
         with:
           tag_name: ${{ matrix.branch_info.tag }}
           name: ${{ steps.release_meta.outputs.REL_NAME }}
-          prerelease: ${{ matrix.branch_info.rolling == true }}
+          prerelease: ${{ matrix.branch_info.rolling }}
           make_latest: ${{ matrix.branch_info.rolling == false && 'true' || 'false' }}
           files: release_assets/*
           body_path: release_body.md
