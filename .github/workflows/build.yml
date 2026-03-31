@@ -60,17 +60,17 @@ jobs:
             return 1
           }
           
-          git_head() { git ls-remote "$1" "$2" | awk 'NR==1{print $1}'; }
+          git_head() { git ls-remote "$1" "$2" 2>/dev/null | awk 'NR==1{print $1}'; }
           latest_tag() { curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$1" | jq -r '.tag_name // empty'; }
 
-          SFA_SHA="$(fetch_with_retry git_head https://github.com/SagerNet/sing-box-for-android.git refs/heads/dev)"
-          [ -z "$SFA_SHA" ] && SFA_SHA="$(fetch_with_retry git_head https://github.com/SagerNet/sing-box-for-android.git refs/heads/main)"
-          [ -z "$SFA_SHA" ] && SFA_SHA="$(fetch_with_retry git_head https://github.com/SagerNet/sing-box-for-android.git refs/heads/master)"
+          SFA_SHA="$(fetch_with_retry git_head https://github.com/SagerNet/sing-box-for-android.git refs/heads/dev || true)"
+          if [ -z "$SFA_SHA" ]; then SFA_SHA="$(fetch_with_retry git_head https://github.com/SagerNet/sing-box-for-android.git refs/heads/main || true)"; fi
+          if [ -z "$SFA_SHA" ]; then SFA_SHA="$(fetch_with_retry git_head https://github.com/SagerNet/sing-box-for-android.git refs/heads/master || true)"; fi
 
-          GEOIP_TAG="$(fetch_with_retry latest_tag https://api.github.com/repos/SagerNet/sing-geoip/releases/latest)"
-          GEOSITE_TAG="$(fetch_with_retry latest_tag https://api.github.com/repos/SagerNet/sing-geosite/releases/latest)"
-          META_SHA="$(fetch_with_retry git_head https://github.com/MetaCubeX/metacubexd.git refs/heads/gh-pages)"
-          YACD_SHA="$(fetch_with_retry git_head https://github.com/haishanh/yacd.git refs/heads/gh-pages)"
+          GEOIP_TAG="$(fetch_with_retry latest_tag https://api.github.com/repos/SagerNet/sing-geoip/releases/latest || true)"
+          GEOSITE_TAG="$(fetch_with_retry latest_tag https://api.github.com/repos/SagerNet/sing-geosite/releases/latest || true)"
+          META_SHA="$(fetch_with_retry git_head https://github.com/MetaCubeX/metacubexd.git refs/heads/gh-pages || true)"
+          YACD_SHA="$(fetch_with_retry git_head https://github.com/haishanh/yacd.git refs/heads/gh-pages || true)"
 
           for var in SFA_SHA GEOIP_TAG GEOSITE_TAG META_SHA YACD_SHA; do
             if [ -z "${!var}" ] || [ "${!var}" = "null" ]; then
@@ -103,7 +103,6 @@ jobs:
           
           CORE_TARGETS_JSON='[{"os":"linux","arch":"amd64","amd":"v3","arm":"","mips":"","flavor":"full","upx":false},{"os":"linux","arch":"amd64","amd":"","arm":"","mips":"","flavor":"full","upx":false},{"os":"linux","arch":"arm64","amd":"","arm":"","mips":"","flavor":"full","upx":false},{"os":"linux","arch":"arm","amd":"","arm":"7","mips":"","flavor":"full","upx":true},{"os":"linux","arch":"arm","amd":"","arm":"7","mips":"","flavor":"lite","upx":true},{"os":"linux","arch":"arm","amd":"","arm":"5","mips":"","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","amd":"","arm":"","mips":"","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","amd":"","arm":"","mips":"softfloat","flavor":"lite","upx":true},{"os":"windows","arch":"amd64","amd":"v3","arm":"","mips":"","flavor":"full","upx":false},{"os":"darwin","arch":"amd64","amd":"","arm":"","mips":"","flavor":"full","upx":false},{"os":"darwin","arch":"arm64","amd":"","arm":"","mips":"","flavor":"full","upx":false}]'
 
-          # 修復：將 reF1nd 的分支名從 testing/stable 改為與其遠端一致的 reF1nd-testing/reF1nd-stable 等
           TARGETS=(
             "reF1nd/sing-box|reF1nd-testing|reF1nd-Testing|true"
             "reF1nd/sing-box|reF1nd-stable|reF1nd-Stable|false"
@@ -129,16 +128,16 @@ jobs:
             RESOLVED_BR="$BR"
             SHA=""
             for search_br in "$BR" "main-next" "dev" "main" "master"; do
-              SHA="$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$search_br" | awk 'NR==1{print $1}')"
+              SHA="$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$search_br" 2>/dev/null | awk 'NR==1{print $1}' || true)"
               if [ -n "$SHA" ]; then
-                [ "$search_br" != "$BR" ] && RESOLVED_BR="$search_br"
+                if [ "$search_br" != "$BR" ]; then RESOLVED_BR="$search_br"; fi
                 break
               fi
             done
 
             if [ -z "$SHA" ]; then
-              SHA="$(git ls-remote "https://github.com/${REPO}.git" HEAD | awk 'NR==1{print $1}')"
-              [ -n "$SHA" ] && RESOLVED_BR="HEAD"
+              SHA="$(git ls-remote "https://github.com/${REPO}.git" HEAD 2>/dev/null | awk 'NR==1{print $1}' || true)"
+              if [ -n "$SHA" ]; then RESOLVED_BR="HEAD"; fi
             fi
 
             if [ -z "$SHA" ]; then
@@ -154,7 +153,7 @@ jobs:
             fi
             rm -rf "$TMPDIR"
 
-            [ -z "$APP_VER" ] && APP_VER="$SHORT_SHA"
+            if [ -z "$APP_VER" ]; then APP_VER="$SHORT_SHA"; fi
             BUILD_VER="$SHA"
             DISPLAY_VER="$APP_VER"
 
@@ -168,7 +167,6 @@ jobs:
 
             OLD_META_DIR="$(mktemp -d)"
             OLD_META='{}'
-            # GH_TOKEN 確保即使在受限環境也能下載歷史 release 以比對更新
             if gh release download "$CHK_TAG" --pattern metadata.json --repo "${{ github.repository }}" --dir "$OLD_META_DIR" >/dev/null 2>&1; then
               if [ -f "$OLD_META_DIR/metadata.json" ]; then
                 OLD_META="$(cat "$OLD_META_DIR/metadata.json")"
@@ -272,7 +270,7 @@ jobs:
           fi
           
           FLAVOR_SUF=""
-          [ "$FLAVOR" = "lite" ] && FLAVOR_SUF="-lite"
+          if [ "$FLAVOR" = "lite" ]; then FLAVOR_SUF="-lite"; fi
           
           IDENTIFIER="${{ matrix.target.os }}-${{ matrix.target.arch }}${SUF}${FLAVOR_SUF}"
           FILE_NAME="sing-box-${{ matrix.branch_info.display_ver }}-${IDENTIFIER}"
@@ -282,6 +280,9 @@ jobs:
           echo "artifact_name=art-${{ matrix.branch_info.title }}-${FILE_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Build Core
+        env:
+          FILE_NAME: ${{ steps.meta.outputs.file_name }}
+          IDENTIFIER: ${{ steps.meta.outputs.identifier }}
         shell: bash
         run: |
           set -euo pipefail
@@ -294,12 +295,11 @@ jobs:
           if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; fi
           if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; fi
 
-          # 修復：徹底移除已廢棄的 with_reality_server 與 with_v2ray_api，避免編譯崩潰
           if [ -f "release/DEFAULT_BUILD_TAGS_OTHERS" ]; then
             TAGS="$(cat release/DEFAULT_BUILD_TAGS_OTHERS | tr -d '\r\n')"
           else
             TAGS="with_quic,with_utls,with_clash_api"
-            [ "${{ matrix.target.flavor }}" != "lite" ] && TAGS="${TAGS},with_gvisor,with_acme"
+            if [ "${{ matrix.target.flavor }}" != "lite" ]; then TAGS="${TAGS},with_gvisor,with_acme"; fi
           fi
 
           if [ -f "release/LDFLAGS" ]; then
@@ -309,10 +309,12 @@ jobs:
           fi
 
           BIN="sing-box"
-          [ "$GOOS" = "windows" ] && BIN="sing-box.exe"
+          if [ "$GOOS" = "windows" ]; then BIN="sing-box.exe"; fi
 
           VERSION_LDFLAG="${{ matrix.branch_info.display_ver }}"
-          [ "${{ matrix.branch_info.display_ver }}" != "${{ matrix.branch_info.short_sha }}" ] && VERSION_LDFLAG="${{ matrix.branch_info.display_ver }}-${{ matrix.branch_info.short_sha }}"
+          if [ "${{ matrix.branch_info.display_ver }}" != "${{ matrix.branch_info.short_sha }}" ]; then 
+            VERSION_LDFLAG="${{ matrix.branch_info.display_ver }}-${{ matrix.branch_info.short_sha }}"
+          fi
 
           LDFLAGS="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=$VERSION_LDFLAG $LDFLAGS_SHARED"
 
@@ -429,12 +431,13 @@ jobs:
             exit 1
           fi
 
-          NDK_VERSION="$(grep -hE '(ndkVersion|ndk[[:space:]]*=)' $(find sfa -type f \( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'libs.versions.toml' \)) 2>/dev/null | head -n 1 | sed -E "s/.*[\"']([^\"']+)[\"'].*/\1/" | tr -d '\r' || true)"
-          [ -z "$NDK_VERSION" ] && NDK_VERSION="26.3.11579264"
+          # 安全修復：增加 /dev/null 以防止 find 為空時導致 grep 卡死
+          NDK_VERSION="$(grep -hE '(ndkVersion|ndk[[:space:]]*=)' $(find sfa -type f \( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'libs.versions.toml' \)) /dev/null 2>/dev/null | head -n 1 | sed -E "s/.*[\"']([^\"']+)[\"'].*/\1/" | tr -d '\r' || true)"
+          if [ -z "$NDK_VERSION" ]; then NDK_VERSION="26.3.11579264"; fi
 
           if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
             SDK_MGR="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-            [ ! -x "$SDK_MGR" ] && SDK_MGR="$(command -v sdkmanager || true)"
+            if [ ! -x "$SDK_MGR" ]; then SDK_MGR="$(command -v sdkmanager || true)"; fi
             if [ -n "${SDK_MGR:-}" ] && [ -x "$SDK_MGR" ]; then
               yes | "$SDK_MGR" "ndk;$NDK_VERSION" >/dev/null 2>&1 || true
             fi
@@ -582,11 +585,11 @@ jobs:
           L_YACD="$(echo "$OLD_META" | jq -r '.yacd_sha // "none"')"
 
           DEP_CHANGES=""
-          [ "$L_SFA" != "none" ] && [ "$L_SFA" != "$SFA_SHA" ] && DEP_CHANGES="${DEP_CHANGES}\n- ⬆️ **SFA Android**: \`$L_SFA\` -> \`${SFA_SHA:0:7}\`"
-          [ "$L_GEOIP" != "none" ] && [ "$L_GEOIP" != "$GEOIP_TAG" ] && DEP_CHANGES="${DEP_CHANGES}\n- 🌍 **GeoIP**: \`$L_GEOIP\` -> \`$GEOIP_TAG\`"
-          [ "$L_GEOSITE" != "none" ] && [ "$L_GEOSITE" != "$GEOSITE_TAG" ] && DEP_CHANGES="${DEP_CHANGES}\n- 🌍 **Geosite**: \`$L_GEOSITE\` -> \`$GEOSITE_TAG\`"
-          [ "$L_META" != "none" ] && [ "$L_META" != "$META_SHA" ] && DEP_CHANGES="${DEP_CHANGES}\n- 🖥️ **Metacubexd**: \`${L_META:0:7}\` -> \`${META_SHA:0:7}\`"
-          [ "$L_YACD" != "none" ] && [ "$L_YACD" != "$YACD_SHA" ] && DEP_CHANGES="${DEP_CHANGES}\n- 🖥️ **YACD**: \`${L_YACD:0:7}\` -> \`${YACD_SHA:0:7}\`"
+          if [ "$L_SFA" != "none" ] && [ "$L_SFA" != "$SFA_SHA" ]; then DEP_CHANGES="${DEP_CHANGES}\n- ⬆️ **SFA Android**: \`$L_SFA\` -> \`${SFA_SHA:0:7}\`"; fi
+          if [ "$L_GEOIP" != "none" ] && [ "$L_GEOIP" != "$GEOIP_TAG" ]; then DEP_CHANGES="${DEP_CHANGES}\n- 🌍 **GeoIP**: \`$L_GEOIP\` -> \`$GEOIP_TAG\`"; fi
+          if [ "$L_GEOSITE" != "none" ] && [ "$L_GEOSITE" != "$GEOSITE_TAG" ]; then DEP_CHANGES="${DEP_CHANGES}\n- 🌍 **Geosite**: \`$L_GEOSITE\` -> \`$GEOSITE_TAG\`"; fi
+          if [ "$L_META" != "none" ] && [ "$L_META" != "$META_SHA" ]; then DEP_CHANGES="${DEP_CHANGES}\n- 🖥️ **Metacubexd**: \`${L_META:0:7}\` -> \`${META_SHA:0:7}\`"; fi
+          if [ "$L_YACD" != "none" ] && [ "$L_YACD" != "$YACD_SHA" ]; then DEP_CHANGES="${DEP_CHANGES}\n- 🖥️ **YACD**: \`${L_YACD:0:7}\` -> \`${YACD_SHA:0:7}\`"; fi
 
           EOF_DELIM="EOF_$(head -c 10 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 8)"
           {
@@ -657,7 +660,7 @@ jobs:
             fi
             
             FLAVOR_SUF=""
-            [ "$FLAVOR" = "lite" ] && FLAVOR_SUF="-lite"
+            if [ "$FLAVOR" = "lite" ]; then FLAVOR_SUF="-lite"; fi
             IDENTIFIER="${OS}-${ARCH}${SUF}${FLAVOR_SUF}"
 
             if [ -f "SUCCESS-$IDENTIFIER" ]; then
@@ -719,14 +722,14 @@ jobs:
           if fetch_with_retry curl -fL -sS -o metacubexd.zip "https://github.com/MetaCubeX/metacubexd/archive/${META_SHA}.zip"; then
             if unzip -q metacubexd.zip -d tmp_meta/; then
               META_DIR="$(find tmp_meta -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
-              [ -n "$META_DIR" ] && mv "$META_DIR" Essential-Assets/ui/metacubexd || true
+              if [ -n "$META_DIR" ]; then mv "$META_DIR" Essential-Assets/ui/metacubexd || true; fi
             fi || true
           fi || true
 
           if fetch_with_retry curl -fL -sS -o yacd.zip "https://github.com/haishanh/yacd/archive/${YACD_SHA}.zip"; then
             if unzip -q yacd.zip -d tmp_yacd/; then
               YACD_DIR="$(find tmp_yacd -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
-              [ -n "$YACD_DIR" ] && mv "$YACD_DIR" Essential-Assets/ui/yacd || true
+              if [ -n "$YACD_DIR" ]; then mv "$YACD_DIR" Essential-Assets/ui/yacd || true; fi
             fi || true
           fi || true
 
@@ -740,7 +743,7 @@ jobs:
           find . -maxdepth 1 -type f \( ! -name 'sha256sums.txt' ! -name 'metadata.json' ! -name 'temp_hashes.txt' \) -print0 | xargs -0 -r sha256sum | sed 's| \./|  |' > temp_hashes.txt
           
           HASHES_JSON="$(awk '{printf "{\"file\":\"%s\",\"hash\":\"%s\"}\n", $2, $1}' temp_hashes.txt | jq -s -c '.' || echo "[]")"
-          [ -z "$HASHES_JSON" ] && HASHES_JSON="[]"
+          if [ -z "$HASHES_JSON" ]; then HASHES_JSON="[]"; fi
 
           jq -n \
             --arg repo "${{ matrix.branch_info.repo }}" \
@@ -777,7 +780,7 @@ jobs:
           TITLE="${{ matrix.branch_info.title }}"
           DISPLAY_VER="${{ matrix.branch_info.display_ver }}"
           REL_NAME="v$DISPLAY_VER | $TITLE"
-          [ "${{ matrix.branch_info.rolling }}" = "true" ] && REL_NAME="$TITLE (Rolling) | $DISPLAY_VER"
+          if [ "${{ matrix.branch_info.rolling }}" = "true" ]; then REL_NAME="$TITLE (Rolling) | $DISPLAY_VER"; fi
           
           {
             echo "## 🚀 sing-box Core ($TITLE)"
