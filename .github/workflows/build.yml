@@ -296,16 +296,15 @@ jobs:
           if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; fi
 
           if [ -f "release/DEFAULT_BUILD_TAGS_OTHERS" ]; then
-            TAGS="$(cat release/DEFAULT_BUILD_TAGS_OTHERS | tr -d '\r\n')"
+            TAGS="$(tr -d '\r\n' < release/DEFAULT_BUILD_TAGS_OTHERS)"
           else
-            TAGS="with_quic,with_utls,with_clash_api"
-            if [ "${{ matrix.target.flavor }}" != "lite" ]; then TAGS="${TAGS},with_gvisor,with_acme"; fi
+            TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,badlinkname,tfogo_checklinkname0"
           fi
 
           if [ -f "release/LDFLAGS" ]; then
-            LDFLAGS_SHARED="$(cat release/LDFLAGS | tr -d '\r\n')"
+            LDFLAGS_SHARED="$(tr -d '\r\n' < release/LDFLAGS)"
           else
-            LDFLAGS_SHARED=""
+            LDFLAGS_SHARED="-X internal/godebug.defaultGODEBUG=multipathtcp=0 -checklinkname=0"
           fi
 
           BIN="sing-box"
@@ -400,7 +399,7 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Link Custom sing-box Core to SFA
+      - name: Link Custom sing-box Core to SFA (Workspace Setup)
         shell: bash
         run: |
           set -euo pipefail
@@ -408,10 +407,12 @@ jobs:
           cd sfa
           rm -f go.work go.work.sum
           
-          if [ -f "go.mod" ]; then
-            go mod edit -replace github.com/sagernet/sing-box="$ABS_CORE"
-            go mod tidy -e || true
-          fi
+          # Initialize Go workspace gracefully
+          go work init
+          if [ -f "go.mod" ]; then go work use .; fi
+          if [ -d "libbox" ] && [ -f "libbox/go.mod" ]; then go work use ./libbox; fi
+          
+          go work edit -replace github.com/sagernet/sing-box="$ABS_CORE"
           
           if [ -d "libbox" ] && [ -f "libbox/go.mod" ]; then
             cd libbox
@@ -420,7 +421,7 @@ jobs:
             cd ..
           fi
 
-      - name: Prepare Android Environment
+      - name: Prepare Android Environment & Gomobile
         shell: bash
         run: |
           set -euo pipefail
@@ -431,7 +432,6 @@ jobs:
             exit 1
           fi
 
-          # 安全修復：增加 /dev/null 以防止 find 為空時導致 grep 卡死
           NDK_VERSION="$(grep -hE '(ndkVersion|ndk[[:space:]]*=)' $(find sfa -type f \( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'libs.versions.toml' \)) /dev/null 2>/dev/null | head -n 1 | sed -E "s/.*[\"']([^\"']+)[\"'].*/\1/" | tr -d '\r' || true)"
           if [ -z "$NDK_VERSION" ]; then NDK_VERSION="26.3.11579264"; fi
 
@@ -450,8 +450,9 @@ jobs:
           export GOPATH="$(go env GOPATH)"
           export PATH="$PATH:$GOPATH/bin"
           
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
+          # SagerNet uses specific bindings in their gomobile fork
+          go install github.com/sagernet/gomobile/cmd/gomobile@latest
+          go install github.com/sagernet/gomobile/cmd/gobind@latest
           gomobile init || true
 
       - name: Build Android APK
@@ -476,46 +477,59 @@ jobs:
           cd sfa
           chmod +x ./gradlew
 
-          printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
+          # SFA exclusively requires keystore data to be in local.properties 
+          printf 'sdk.dir=%s\nndk.dir=%s\nKEYSTORE_PASS=%s\nALIAS_NAME=%s\nALIAS_PASS=%s\n' \
+            "$ANDROID_HOME" "$ANDROID_NDK_HOME" "$KEYSTORE_PASS" "$KEY_ALIAS" "$KEY_PASS" > local.properties
 
           {
-            echo "org.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8"
+            echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
             echo "org.gradle.caching=true"
             echo "org.gradle.parallel=false"
-            echo "kotlin.daemon.jvmargs=-Xmx1g"
+            echo "kotlin.daemon.jvmargs=-Xmx2g"
             echo "android.useAndroidX=true"
             echo "android.enableJetifier=true"
           } >> gradle.properties
 
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::notice::KEYSTORE_BASE64 is empty, generating a temporary PKCS12 keystore."
-            keytool -genkeypair -v -keystore ci-release.p12 -storetype PKCS12 -keyalg RSA -keysize 2048 -validity 10000 -alias "$KEY_ALIAS" -storepass "$KEYSTORE_PASS" -keypass "$KEY_PASS" -dname "CN=sing-box,O=CI,C=US"
-            KEY_FILE="ci-release.p12"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > release.keystore
           else
-            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > ci-release.jks
-            KEY_FILE="ci-release.jks"
+            echo "::notice::KEYSTORE_BASE64 is empty, generating a temporary PKCS12 keystore."
+            keytool -genkeypair -v \
+              -keystore release.keystore \
+              -storetype PKCS12 \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -alias "$KEY_ALIAS" \
+              -storepass "$KEYSTORE_PASS" \
+              -keypass "$KEY_PASS" \
+              -dname "CN=sing-box,O=CI,C=US"
           fi
 
-          BUILD_TASK=":app:assembleFossRelease"
-          if ! ./gradlew help --task "$BUILD_TASK" >/dev/null 2>&1; then
-            BUILD_TASK=":app:assemblePlayRelease"
-            if ! ./gradlew help --task "$BUILD_TASK" >/dev/null 2>&1; then
-               BUILD_TASK=":app:assembleRelease"
+          BUILD_TASK=""
+          # Identify dynamically proper SFA release task
+          for task in ":app:assembleOtherLegacyRelease" ":app:assembleOtherRelease" ":app:assemblePlayRelease"; do
+            if ./gradlew help --task "$task" >/dev/null 2>&1; then
+              BUILD_TASK="$task"
+              break
             fi
+          done
+
+          if [ -z "$BUILD_TASK" ]; then
+            echo "::error::No compatible release assemble task found."
+            exit 1
           fi
 
-          if ! ./gradlew clean "$BUILD_TASK" \
-            --no-daemon --stacktrace -x lint \
-            -Pandroid.injected.signing.store.file="$(pwd)/$KEY_FILE" \
-            -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
-            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
-            -Pandroid.injected.signing.key.password="$KEY_PASS"; then
+          if ! ./gradlew clean "$BUILD_TASK" --no-daemon --stacktrace -x lint; then
             echo "::warning::SFA APK Compilation failed."
             echo "APK_STATUS=failed" > ../output/apk_meta.env
             exit 0
           fi
 
-          APK_PATH="$(find app/build/outputs/apk -type f -name '*release*.apk' | sort | head -n 1 || true)"
+          # SFA build outputs do not append "-release" explicitly
+          APK_PATH="$(find app/build/outputs/apk -type f -name '*.apk' | grep -i 'universal' | sort | head -n 1 || true)"
+          if [ -z "$APK_PATH" ]; then
+            APK_PATH="$(find app/build/outputs/apk -type f -name '*.apk' | sort | head -n 1 || true)"
+          fi
+
           if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
             echo "::warning::APK not found."
             echo "APK_STATUS=failed" > ../output/apk_meta.env
