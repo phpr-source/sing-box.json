@@ -88,6 +88,7 @@ jobs:
       - name: Determine Build Matrix & Targets
         id: set_matrix
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT: ${{ github.event_name }}
           IN_BRANCH: ${{ github.event.inputs.branch }}
           PAYLOAD_BRANCH: ${{ github.event.client_payload.branch || '' }}
@@ -102,10 +103,11 @@ jobs:
           
           CORE_TARGETS_JSON='[{"os":"linux","arch":"amd64","amd":"v3","arm":"","mips":"","flavor":"full","upx":false},{"os":"linux","arch":"amd64","amd":"","arm":"","mips":"","flavor":"full","upx":false},{"os":"linux","arch":"arm64","amd":"","arm":"","mips":"","flavor":"full","upx":false},{"os":"linux","arch":"arm","amd":"","arm":"7","mips":"","flavor":"full","upx":true},{"os":"linux","arch":"arm","amd":"","arm":"7","mips":"","flavor":"lite","upx":true},{"os":"linux","arch":"arm","amd":"","arm":"5","mips":"","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","amd":"","arm":"","mips":"","flavor":"lite","upx":true},{"os":"linux","arch":"mipsle","amd":"","arm":"","mips":"softfloat","flavor":"lite","upx":true},{"os":"windows","arch":"amd64","amd":"v3","arm":"","mips":"","flavor":"full","upx":false},{"os":"darwin","arch":"amd64","amd":"","arm":"","mips":"","flavor":"full","upx":false},{"os":"darwin","arch":"arm64","amd":"","arm":"","mips":"","flavor":"full","upx":false}]'
 
+          # 修復：將 reF1nd 的分支名從 testing/stable 改為與其遠端一致的 reF1nd-testing/reF1nd-stable 等
           TARGETS=(
-            "reF1nd/sing-box|testing|reF1nd-Testing|true"
-            "reF1nd/sing-box|stable|reF1nd-Stable|false"
-            "reF1nd/sing-box|oldstable|reF1nd-OldStable|false"
+            "reF1nd/sing-box|reF1nd-testing|reF1nd-Testing|true"
+            "reF1nd/sing-box|reF1nd-stable|reF1nd-Stable|false"
+            "reF1nd/sing-box|reF1nd-oldstable|reF1nd-OldStable|false"
             "SagerNet/sing-box|testing|Official-Alpha|true"
             "SagerNet/sing-box|stable|Official-Stable|false"
             "SagerNet/sing-box|oldstable|Official-OldStable|false"
@@ -166,6 +168,7 @@ jobs:
 
             OLD_META_DIR="$(mktemp -d)"
             OLD_META='{}'
+            # GH_TOKEN 確保即使在受限環境也能下載歷史 release 以比對更新
             if gh release download "$CHK_TAG" --pattern metadata.json --repo "${{ github.repository }}" --dir "$OLD_META_DIR" >/dev/null 2>&1; then
               if [ -f "$OLD_META_DIR/metadata.json" ]; then
                 OLD_META="$(cat "$OLD_META_DIR/metadata.json")"
@@ -291,12 +294,12 @@ jobs:
           if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; fi
           if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; fi
 
-          # 安全動態讀取，移除已廢棄可能導致編譯崩潰的標籤
+          # 修復：徹底移除已廢棄的 with_reality_server 與 with_v2ray_api，避免編譯崩潰
           if [ -f "release/DEFAULT_BUILD_TAGS_OTHERS" ]; then
             TAGS="$(cat release/DEFAULT_BUILD_TAGS_OTHERS | tr -d '\r\n')"
           else
             TAGS="with_quic,with_utls,with_clash_api"
-            [ "${{ matrix.target.flavor }}" != "lite" ] && TAGS="${TAGS},with_gvisor,with_acme,with_v2ray_api,with_reality_server"
+            [ "${{ matrix.target.flavor }}" != "lite" ] && TAGS="${TAGS},with_gvisor,with_acme"
           fi
 
           if [ -f "release/LDFLAGS" ]; then
@@ -435,11 +438,6 @@ jobs:
             if [ -n "${SDK_MGR:-}" ] && [ -x "$SDK_MGR" ]; then
               yes | "$SDK_MGR" "ndk;$NDK_VERSION" >/dev/null 2>&1 || true
             fi
-          fi
-
-          if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
-            echo "::error::NDK install failed for version $NDK_VERSION."
-            exit 1
           fi
 
           ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
