@@ -37,7 +37,13 @@ jobs:
       geosite_tag: ${{ steps.fetch_deps.outputs.geosite_tag }}
       meta_sha: ${{ steps.fetch_deps.outputs.meta_sha }}
       yacd_sha: ${{ steps.fetch_deps.outputs.yacd_sha }}
+      go_version: ${{ steps.go.outputs.version }}
     steps:
+      - name: Get latest Go version
+        id: go
+        run: |
+          echo "version=$(curl -sSL https://raw.githubusercontent.com/actions/go-versions/update-versions-manifest-file/versions-manifest.json | jq -r '.[0].version')" >> $GITHUB_OUTPUT
+
       - name: Fetch External Dependencies
         id: fetch_deps
         env:
@@ -45,21 +51,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          
           fetch_with_retry() {
             local attempt=1 max_attempts=3 out
             while [ "$attempt" -le "$max_attempts" ]; do
-              if out="$("$@")"; then
-                printf '%s' "$out"
-                return 0
-              fi
-              echo "::warning::Command failed: $* . Retrying ($attempt/$max_attempts)..."
-              sleep 3
-              attempt=$((attempt + 1))
+              if out="$("$@")"; then printf '%s' "$out"; return 0; fi
+              sleep 3; attempt=$((attempt + 1))
             done
             return 1
           }
-          
           git_head() { git ls-remote "$1" "$2" 2>/dev/null | awk 'NR==1{print $1}'; }
           latest_tag() { curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$1" | jq -r '.tag_name // empty'; }
 
@@ -71,13 +70,6 @@ jobs:
           GEOSITE_TAG="$(fetch_with_retry latest_tag https://api.github.com/repos/SagerNet/sing-geosite/releases/latest || true)"
           META_SHA="$(fetch_with_retry git_head https://github.com/MetaCubeX/metacubexd.git refs/heads/gh-pages || true)"
           YACD_SHA="$(fetch_with_retry git_head https://github.com/haishanh/yacd.git refs/heads/gh-pages || true)"
-
-          for var in SFA_SHA GEOIP_TAG GEOSITE_TAG META_SHA YACD_SHA; do
-            if [ -z "${!var}" ] || [ "${!var}" = "null" ]; then
-              echo "::error::Failed to fetch dependency: $var"
-              exit 1
-            fi
-          done
 
           echo "sfa_sha=$SFA_SHA" >> "$GITHUB_OUTPUT"
           echo "geoip_tag=$GEOIP_TAG" >> "$GITHUB_OUTPUT"
@@ -115,34 +107,29 @@ jobs:
           JSON="[]"
           HAS="false"
 
+          resolve_branch() {
+            local repo="$1" wanted="$2"
+            local -a candidates=("$wanted" "main-next" "dev" "main" "master")
+            local br sha
+            for br in "${candidates[@]}"; do
+              sha="$(git ls-remote "https://github.com/${repo}.git" "refs/heads/${br}" 2>/dev/null | awk 'NR==1{print $1}' || true)"
+              if [ -n "$sha" ]; then
+                printf '%s %s\n' "$br" "$sha"
+                return 0
+              fi
+            done
+            return 1
+          }
+
           for e in "${TARGETS[@]}"; do
             IFS='|' read -r REPO BR TIT ROLLING <<< "$e"
 
-            if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ] && [ "$IN_BRANCH" != "$TIT" ]; then
+            if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ] && [ "$IN_BRANCH" != "$TIT" ]; then continue; fi
+            if [ "$EVENT" = "repository_dispatch" ] && [ -n "$PAYLOAD_BRANCH" ] && [ "$PAYLOAD_BRANCH" != "$BR" ] && [ "$PAYLOAD_BRANCH" != "$TIT" ]; then continue; fi
+
+            if ! read -r RESOLVED_BR SHA < <(resolve_branch "$REPO" "$BR"); then
+              echo "::warning::Branch or repo not found, skipping: $REPO / $BR"
               continue
-            fi
-            if [ "$EVENT" = "repository_dispatch" ] && [ -n "$PAYLOAD_BRANCH" ] && [ "$PAYLOAD_BRANCH" != "$BR" ] && [ "$PAYLOAD_BRANCH" != "$TIT" ]; then
-              continue
-            fi
-
-            RESOLVED_BR="$BR"
-            SHA=""
-            for search_br in "$BR" "main-next" "dev" "main" "master"; do
-              SHA="$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/$search_br" 2>/dev/null | awk 'NR==1{print $1}' || true)"
-              if [ -n "$SHA" ]; then
-                if [ "$search_br" != "$BR" ]; then RESOLVED_BR="$search_br"; fi
-                break
-              fi
-            done
-
-            if [ -z "$SHA" ]; then
-              SHA="$(git ls-remote "https://github.com/${REPO}.git" HEAD 2>/dev/null | awk 'NR==1{print $1}' || true)"
-              if [ -n "$SHA" ]; then RESOLVED_BR="HEAD"; fi
-            fi
-
-            if [ -z "$SHA" ]; then
-              echo "::error::Could not resolve a valid commit for $REPO"
-              exit 1
             fi
 
             SHORT_SHA="${SHA:0:7}"
@@ -152,25 +139,18 @@ jobs:
               APP_VER="$(git --git-dir="$TMPDIR" describe --tags --abbrev=0 "$SHA" 2>/dev/null | sed 's/^v//' || true)"
             fi
             rm -rf "$TMPDIR"
-
             if [ -z "$APP_VER" ]; then APP_VER="$SHORT_SHA"; fi
+
             BUILD_VER="$SHA"
             DISPLAY_VER="$APP_VER"
 
-            if [ "$ROLLING" = "false" ]; then
-              CHK_TAG="v${DISPLAY_VER}-${TIT}"
-              IS_ROLLING=false
-            else
-              CHK_TAG="${TIT}"
-              IS_ROLLING=true
-            fi
+            if [ "$ROLLING" = "false" ]; then CHK_TAG="v${DISPLAY_VER}-${TIT}"; IS_ROLLING=false
+            else CHK_TAG="${TIT}"; IS_ROLLING=true; fi
 
             OLD_META_DIR="$(mktemp -d)"
             OLD_META='{}'
             if gh release download "$CHK_TAG" --pattern metadata.json --repo "${{ github.repository }}" --dir "$OLD_META_DIR" >/dev/null 2>&1; then
-              if [ -f "$OLD_META_DIR/metadata.json" ]; then
-                OLD_META="$(cat "$OLD_META_DIR/metadata.json")"
-              fi
+              if [ -f "$OLD_META_DIR/metadata.json" ]; then OLD_META="$(cat "$OLD_META_DIR/metadata.json")"; fi
             fi
             rm -rf "$OLD_META_DIR"
 
@@ -185,35 +165,23 @@ jobs:
             UPDATE_REASON=""
 
             if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" = "all" ]; then
-              NEEDS_UPDATE="true"
-              UPDATE_REASON="Forced Full Sync"
+              NEEDS_UPDATE="true"; UPDATE_REASON="Forced Full Sync"
             elif [ "$L_SHA" = "none" ] || [ -z "$L_SHA" ]; then
-              NEEDS_UPDATE="true"
-              UPDATE_REASON="Initial Release"
+              NEEDS_UPDATE="true"; UPDATE_REASON="Initial Release"
             elif [ "$SHA" != "$L_SHA" ]; then
-              NEEDS_UPDATE="true"
-              UPDATE_REASON="Core Updates"
+              NEEDS_UPDATE="true"; UPDATE_REASON="Core Updates"
             elif [ "$SFA_SHA" != "$L_SFA" ] || [ "$GEOIP_TAG" != "$L_GEOIP" ] || [ "$GEOSITE_TAG" != "$L_GEOSITE" ] || [ "$META_SHA" != "$L_META" ] || [ "$YACD_SHA" != "$L_YACD" ]; then
-              NEEDS_UPDATE="true"
-              UPDATE_REASON="Dependency Updates"
+              NEEDS_UPDATE="true"; UPDATE_REASON="Dependency Updates"
             elif [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_BRANCH" != "all" ]; then
-              NEEDS_UPDATE="true"
-              UPDATE_REASON="Manual Branch Sync"
+              NEEDS_UPDATE="true"; UPDATE_REASON="Manual Branch Sync"
             fi
 
             if [ "$NEEDS_UPDATE" = "true" ]; then
               JSON="$(echo "$JSON" | jq -c \
-                --arg repo "$REPO" \
-                --arg branch "$RESOLVED_BR" \
-                --arg title "$TIT" \
-                --argjson rolling "$IS_ROLLING" \
-                --arg sha "$SHA" \
-                --arg local_sha "$L_SHA" \
-                --arg short_sha "$SHORT_SHA" \
-                --arg build_ver "$BUILD_VER" \
-                --arg display_ver "$DISPLAY_VER" \
-                --arg tag "$CHK_TAG" \
-                --arg reason "$UPDATE_REASON" \
+                --arg repo "$REPO" --arg branch "$RESOLVED_BR" --arg title "$TIT" \
+                --argjson rolling "$IS_ROLLING" --arg sha "$SHA" --arg local_sha "$L_SHA" \
+                --arg short_sha "$SHORT_SHA" --arg build_ver "$BUILD_VER" \
+                --arg display_ver "$DISPLAY_VER" --arg tag "$CHK_TAG" --arg reason "$UPDATE_REASON" \
                 '. += [{"repo": $repo, "branch": $branch, "title": $title, "rolling": $rolling, "sha": $sha, "local_sha": $local_sha, "short_sha": $short_sha, "build_ver": $build_ver, "display_ver": $display_ver, "tag": $tag, "reason": $reason}]')"
               HAS="true"
             fi
@@ -241,10 +209,10 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: ${{ needs.check_updates.outputs.go_version }}
           cache: true
 
-      - uses: crazy-max/ghaction-upx@v3
+      - uses: crazy-max/ghaction-upx@v4
         if: matrix.target.upx == true
         with:
           install-only: true
@@ -254,27 +222,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          
           AMD="${{ matrix.target.amd || '' }}"
           ARM="${{ matrix.target.arm || '' }}"
           MIPS="${{ matrix.target.mips || '' }}"
           FLAVOR="${{ matrix.target.flavor }}"
 
           SUF=""
-          if [ -n "$AMD" ]; then
-            SUF="-${AMD}"
-          elif [ -n "$ARM" ]; then
-            SUF="v${ARM}"
-          elif [ -n "$MIPS" ]; then
-            SUF="-${MIPS}"
-          fi
-          
+          if [ -n "$AMD" ]; then SUF="-${AMD}"
+          elif [ -n "$ARM" ]; then SUF="v${ARM}"
+          elif [ -n "$MIPS" ]; then SUF="-${MIPS}"; fi
+
           FLAVOR_SUF=""
           if [ "$FLAVOR" = "lite" ]; then FLAVOR_SUF="-lite"; fi
-          
+
           IDENTIFIER="${{ matrix.target.os }}-${{ matrix.target.arch }}${SUF}${FLAVOR_SUF}"
           FILE_NAME="sing-box-${{ matrix.branch_info.display_ver }}-${IDENTIFIER}"
-          
+
           echo "file_name=$FILE_NAME" >> "$GITHUB_OUTPUT"
           echo "identifier=$IDENTIFIER" >> "$GITHUB_OUTPUT"
           echo "artifact_name=art-${{ matrix.branch_info.title }}-${FILE_NAME}" >> "$GITHUB_OUTPUT"
@@ -286,23 +249,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          
           export GOOS="${{ matrix.target.os }}"
           export GOARCH="${{ matrix.target.arch }}"
           export CGO_ENABLED=0
-          
+
           if [ -n "${{ matrix.target.amd || '' }}" ]; then export GOAMD64="${{ matrix.target.amd }}"; fi
           if [ -n "${{ matrix.target.arm || '' }}" ]; then export GOARM="${{ matrix.target.arm }}"; fi
           if [ -n "${{ matrix.target.mips || '' }}" ]; then export GOMIPS="${{ matrix.target.mips }}"; fi
 
           if [ -f "release/DEFAULT_BUILD_TAGS_OTHERS" ]; then
-            TAGS="$(tr -d '\r\n' < release/DEFAULT_BUILD_TAGS_OTHERS)"
+            TAGS="$(tr -d '\r\n' < release/DEFAULT_BUILD_TAGS_OTHERS),badlinkname,tfogo_checklinkname0"
           else
             TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,badlinkname,tfogo_checklinkname0"
           fi
 
           if [ -f "release/LDFLAGS" ]; then
-            LDFLAGS_SHARED="$(tr -d '\r\n' < release/LDFLAGS)"
+            LDFLAGS_SHARED="$(tr -d '\r\n' < release/LDFLAGS) -checklinkname=0"
           else
             LDFLAGS_SHARED="-X internal/godebug.defaultGODEBUG=multipathtcp=0 -checklinkname=0"
           fi
@@ -391,69 +353,44 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: sing-box/go.mod
+          go-version: ${{ needs.check_updates.outputs.go_version }}
           cache: false
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '17'
 
-      - name: Link Custom sing-box Core to SFA (Workspace Setup)
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
+
+      - name: Build libbox.aar (AAR Injection Method)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         shell: bash
         run: |
           set -euo pipefail
-          ABS_CORE="$(realpath sing-box)"
-          cd sfa
-          rm -f go.work go.work.sum
+          cd sing-box
           
-          # Initialize Go workspace gracefully
-          go work init
-          if [ -f "go.mod" ]; then go work use .; fi
-          if [ -d "libbox" ] && [ -f "libbox/go.mod" ]; then go work use ./libbox; fi
+          # 強制使用 SagerNet 版 gomobile
+          make lib_install || {
+            go install github.com/sagernet/gomobile/cmd/gomobile@latest
+            go install github.com/sagernet/gomobile/cmd/gobind@latest
+            gomobile init
+          }
           
-          go work edit -replace github.com/sagernet/sing-box="$ABS_CORE"
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0"
+          LDFLAGS="-X github.com/sagernet/sing-box/constant.Version=${{ matrix.branch_info.display_ver }} -s -w -buildid= -checklinkname=0"
           
-          if [ -d "libbox" ] && [ -f "libbox/go.mod" ]; then
-            cd libbox
-            go mod edit -replace github.com/sagernet/sing-box="$ABS_CORE"
-            go mod tidy -e || true
-            cd ..
-          fi
-
-      - name: Prepare Android Environment & Gomobile
-        shell: bash
-        run: |
-          set -euo pipefail
+          # 使用 target android 生成真正的 universal，並顯式指定輸出文件名為 libbox.aar
+          gomobile bind -v -o libbox.aar -target android -androidapi 23 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false -tags="$TAGS" -ldflags="$LDFLAGS" ./experimental/libbox
           
-          ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
-          if [ -z "$ANDROID_SDK_ROOT" ] || [ ! -d "$ANDROID_SDK_ROOT" ]; then
-            echo "::error::Android SDK not found on runner."
-            exit 1
-          fi
-
-          NDK_VERSION="$(grep -hE '(ndkVersion|ndk[[:space:]]*=)' $(find sfa -type f \( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'libs.versions.toml' \)) /dev/null 2>/dev/null | head -n 1 | sed -E "s/.*[\"']([^\"']+)[\"'].*/\1/" | tr -d '\r' || true)"
-          if [ -z "$NDK_VERSION" ]; then NDK_VERSION="26.3.11579264"; fi
-
-          if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
-            SDK_MGR="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-            if [ ! -x "$SDK_MGR" ]; then SDK_MGR="$(command -v sdkmanager || true)"; fi
-            if [ -n "${SDK_MGR:-}" ] && [ -x "$SDK_MGR" ]; then
-              yes | "$SDK_MGR" "ndk;$NDK_VERSION" >/dev/null 2>&1 || true
-            fi
-          fi
-
-          ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
-          printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\nANDROID_NDK_HOME=%s\n' \
-            "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" "$ANDROID_SDK_ROOT" "$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
-
-          export GOPATH="$(go env GOPATH)"
-          export PATH="$PATH:$GOPATH/bin"
-          
-          # SagerNet uses specific bindings in their gomobile fork
-          go install github.com/sagernet/gomobile/cmd/gomobile@latest
-          go install github.com/sagernet/gomobile/cmd/gobind@latest
-          gomobile init || true
+          mkdir -p ../sfa/app/libs
+          cp libbox.aar ../sfa/app/libs/
 
       - name: Build Android APK
         env:
@@ -461,10 +398,10 @@ jobs:
           KEYSTORE_PASS_SEC: ${{ secrets.KEYSTORE_PASS }}
           KEY_ALIAS_SEC: ${{ secrets.KEY_ALIAS }}
           KEY_PASS_SEC: ${{ secrets.KEY_PASS }}
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         shell: bash
         run: |
           set -euo pipefail
-          
           KEYSTORE_PASS="${KEYSTORE_PASS_SEC:-password}"
           KEY_ALIAS="${KEY_ALIAS_SEC:-release}"
           KEY_PASS="${KEY_PASS_SEC:-password}"
@@ -477,9 +414,30 @@ jobs:
           cd sfa
           chmod +x ./gradlew
 
-          # SFA exclusively requires keystore data to be in local.properties 
+          # 替換源碼依賴為本地 AAR 依賴 (最核心修復)
+          sed -i 's/implementation(project(":libbox"))/implementation(files("libs\/libbox.aar"))/g' app/build.gradle.kts || true
+
+          # 屏蔽 SFA 的 GitHub 更新檢查器
+          UPDATE_FILE="app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt"
+          if [ -f "$UPDATE_FILE" ]; then
+             sed -i 's|SagerNet/sing-box|fake/repo|g' "$UPDATE_FILE" || true
+          fi
+
+          # 確保 Gradle 能夠通過環境變量獲取屬性
+          sed -i '/fun getProps(propName: String): String {/,/^}/c\
+          fun getProps(propName: String): String {\
+              System.getenv(propName)?.let { return it }\
+              val propsFile = rootProject.file("local.properties")\
+              if (propsFile.exists()) {\
+                  val props = Properties()\
+                  props.load(FileInputStream(propsFile))\
+                  props.getProperty(propName)?.let { return it }\
+              }\
+              return ""\
+          }' app/build.gradle.kts || true
+
           printf 'sdk.dir=%s\nndk.dir=%s\nKEYSTORE_PASS=%s\nALIAS_NAME=%s\nALIAS_PASS=%s\n' \
-            "$ANDROID_HOME" "$ANDROID_NDK_HOME" "$KEYSTORE_PASS" "$KEY_ALIAS" "$KEY_PASS" > local.properties
+            "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" "$ANDROID_NDK_HOME" "$KEYSTORE_PASS" "$KEY_ALIAS" "$KEY_PASS" > local.properties
 
           {
             echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
@@ -491,11 +449,11 @@ jobs:
           } >> gradle.properties
 
           if [ -n "$KEYSTORE_BASE64" ]; then
-            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > release.keystore
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > app/release.keystore
           else
             echo "::notice::KEYSTORE_BASE64 is empty, generating a temporary PKCS12 keystore."
             keytool -genkeypair -v \
-              -keystore release.keystore \
+              -keystore app/release.keystore \
               -storetype PKCS12 \
               -keyalg RSA -keysize 2048 -validity 10000 \
               -alias "$KEY_ALIAS" \
@@ -505,7 +463,6 @@ jobs:
           fi
 
           BUILD_TASK=""
-          # Identify dynamically proper SFA release task
           for task in ":app:assembleOtherLegacyRelease" ":app:assembleOtherRelease" ":app:assemblePlayRelease"; do
             if ./gradlew help --task "$task" >/dev/null 2>&1; then
               BUILD_TASK="$task"
@@ -518,13 +475,16 @@ jobs:
             exit 1
           fi
 
-          if ! ./gradlew clean "$BUILD_TASK" --no-daemon --stacktrace -x lint; then
+          if ! ./gradlew clean "$BUILD_TASK" --no-daemon --stacktrace -x lint \
+               -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
+               -Pandroid.injected.signing.store.password="${KEYSTORE_PASS}" \
+               -Pandroid.injected.signing.key.alias="${KEY_ALIAS}" \
+               -Pandroid.injected.signing.key.password="${KEY_PASS}"; then
             echo "::warning::SFA APK Compilation failed."
             echo "APK_STATUS=failed" > ../output/apk_meta.env
             exit 0
           fi
 
-          # SFA build outputs do not append "-release" explicitly
           APK_PATH="$(find app/build/outputs/apk -type f -name '*.apk' | grep -i 'universal' | sort | head -n 1 || true)"
           if [ -z "$APK_PATH" ]; then
             APK_PATH="$(find app/build/outputs/apk -type f -name '*.apk' | sort | head -n 1 || true)"
@@ -645,11 +605,7 @@ jobs:
           set -euo pipefail
           cd release_assets
           
-          if [ -f "apk_meta.env" ]; then
-            source apk_meta.env
-          else
-            APK_STATUS="failed"
-          fi
+          if [ -f "apk_meta.env" ]; then source apk_meta.env; else APK_STATUS="failed"; fi
           echo "APK_STATUS=$APK_STATUS" >> "$GITHUB_ENV"
 
           SUCCESS_LIST=""
@@ -665,13 +621,9 @@ jobs:
             FLAVOR="$(echo "$ITEM" | jq -r '.flavor')"
 
             SUF=""
-            if [ -n "$AMD" ]; then
-              SUF="-${AMD}"
-            elif [ -n "$ARM" ]; then
-              SUF="v${ARM}"
-            elif [ -n "$MIPS" ]; then
-              SUF="-${MIPS}"
-            fi
+            if [ -n "$AMD" ]; then SUF="-${AMD}"
+            elif [ -n "$ARM" ]; then SUF="v${ARM}"
+            elif [ -n "$MIPS" ]; then SUF="-${MIPS}"; fi
             
             FLAVOR_SUF=""
             if [ "$FLAVOR" = "lite" ]; then FLAVOR_SUF="-lite"; fi
@@ -708,8 +660,7 @@ jobs:
             local attempt=1 max_attempts=3
             while [ "$attempt" -le "$max_attempts" ]; do
               if "$@"; then return 0; fi
-              sleep 3
-              attempt=$((attempt + 1))
+              sleep 3; attempt=$((attempt + 1))
             done
             return 1
           }
@@ -717,11 +668,7 @@ jobs:
           safe_download() {
             local url="$1" dest="$2" tmpfile
             tmpfile="$(mktemp)"
-            if fetch_with_retry curl -fL -sS -o "$tmpfile" "$url"; then
-              mv "$tmpfile" "$dest"
-            else
-              rm -f "$tmpfile"
-            fi
+            if fetch_with_retry curl -fL -sS -o "$tmpfile" "$url"; then mv "$tmpfile" "$dest"; else rm -f "$tmpfile"; fi
           }
 
           safe_download "https://github.com/SagerNet/sing-geoip/releases/download/${GEOIP_TAG}/geoip.db" "Essential-Assets/geoip.db" || true
@@ -731,7 +678,8 @@ jobs:
           safe_download "https://raw.githubusercontent.com/SagerNet/sing-geosite/release/geosite-cn.db" "Essential-Assets/geosite-cn.db" || true
           safe_download "https://raw.githubusercontent.com/SagerNet/sing-geoip/release/geoip-cn.db" "Essential-Assets/geoip-cn.db" || true
 
-          rm -rf tmp_meta tmp_yacd metacubexd.zip yacd.zip
+          # 修正: 明確刪除特定臨時文件，不要使用 *.zip 避免刪除 Windows 的二進制產物
+          rm -f metacubexd.zip yacd.zip
 
           if fetch_with_retry curl -fL -sS -o metacubexd.zip "https://github.com/MetaCubeX/metacubexd/archive/${META_SHA}.zip"; then
             if unzip -q metacubexd.zip -d tmp_meta/; then
@@ -747,7 +695,7 @@ jobs:
             fi || true
           fi || true
 
-          rm -rf tmp_* *.zip
+          rm -rf tmp_meta tmp_yacd metacubexd.zip yacd.zip
           zip -9 -r "sing-box-${{ matrix.branch_info.title }}-Essential-Assets.zip" Essential-Assets/ || true
           rm -rf Essential-Assets/
 
