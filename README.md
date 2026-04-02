@@ -1,29 +1,55 @@
 # sing-box 自动编译
 
-基于 [SagerNet/sing-box](https://github.com/SagerNet/sing-box) 和 [reF1nd/sing-box](https://github.com/reF1nd/sing-box)
+自动检测并编译 [SagerNet/sing-box](https://github.com/SagerNet/sing-box) 和 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的多个版本。
 
-## 快速下载
+## 支持版本
 
-\`\`\`bash
-# SagerNet Stable (amd64-v3)
-wget https://github.com/phpr-source/sing-box.json/releases/download/sing-box/sing-box-stable-linux-amd64-v3.tar.gz
-tar -xzf sing-box-stable-linux-amd64-v3.tar.gz
+| 版本 | 仓库 | 分支 |
+|------|------|------|
+| Oldstable | SagerNet/sing-box | oldstable |
+| Stable | SagerNet/sing-box | stable |
+| Testing | SagerNet/sing-box | testing |
+| reF1nd-Oldstable | reF1nd/sing-box | reF1nd-oldstable |
+| reF1nd-Stable | reF1nd/sing-box | reF1nd-stable |
+| reF1nd-Testing | reF1nd/sing-box | reF1nd-testing |
 
-# reF1nd Stable (amd64-v3)
-wget https://github.com/phpr-source/sing-box.json/releases/download/sing-box/sing-box-ref1nd-stable-linux-amd64-v3.tar.gz
-tar -xzf sing-box-ref1nd-stable-linux-amd64-v3.tar.gz
-\`\`\`
+## 支持平台
 
-## 支持架构
+### Linux
+- amd64-v1, amd64-v3
+- armv5, armv6, armv7, arm64
+- mips-softfloat, mipsle-softfloat, mipsle-hardfloat
 
-**桌面端:** Linux (amd64-v1/v3, arm64, armv7, mips, mipsle), Windows (amd64-v1/v3, arm64)
-**移动端:** Android arm64-v8a (reF1nd版本)
+### Windows
+- amd64-v1, amd64-v3, arm64
 
-## 配置
+### Android
+- arm64-v8a (仅 reF1nd-Stable 和 reF1nd-Testing)
 
-- Go: ~1.25.8 | NDK: r29 | Tags: clash_api, gvisor, quic, utls, wireguard
-- 压缩: UPX (--best --lzma) + tar.gz
-- 更新频率: 每6小时
+## 编译标签
 
----
-*由 GitHub Actions 维护 | $(date -u '+%Y-%m-%d %H:%M UTC')*
+```
+with_gvisor,with_quic,with_dhcp,with_utls,with_wireguard,with_clash_api
+```
+
+## 版本信息
+
+### SagerNet/sing-box
+
+| 版本 | 版本号 | 发布日期 |
+|------|--------|----------|
+| Oldstable | v |  |
+| Stable | v |  |
+| Testing | v1.14.0-alpha.8 | 2026-03-31 |
+
+### reF1nd/sing-box
+
+| 版本 | 版本号 | 发布日期 |
+|------|--------|----------|
+| Oldstable | v |  |
+| Stable | v |  |
+| Testing | v1.14.0-alpha.8-reF1nd | 2026-03-31 |
+
+## 下载
+
+[前往 Releases 页面下载](https://github.com/phpr-source/sing-box.json/releases/tag/sing-box)
