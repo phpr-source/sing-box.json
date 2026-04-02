@@ -183,14 +183,14 @@ jobs:
               has_update="true"
               echo "- 🔄 強制構建 **[$id]($branch_url)** \`v$ver\` ($time)" >> release_notes.txt
               echo "$marker" >> markers.txt
-              targets=$(echo "$targets" | jq --arg id "$id" --arg repo "$repo" --arg branch "$branch" \
+              targets=$(echo "$targets" | jq -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" \
                 --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" \
                 '. += [{"id": $id, "repo": $repo, "branch": $branch, "sfa_repo": $sfa_repo, "sfa_branch": $sfa_branch, "ver": $ver, "time": $time}]')
             elif ! echo "$current_release" | grep -qF "${marker}"; then
               has_update="true"
               echo "- ✨ 更新 **[$id]($branch_url)** 至 \`v$ver\`，發佈於 $time" >> release_notes.txt
               echo "$marker" >> markers.txt
-              targets=$(echo "$targets" | jq --arg id "$id" --arg repo "$repo" --arg branch "$branch" \
+              targets=$(echo "$targets" | jq -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" \
                 --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" \
                 '. += [{"id": $id, "repo": $repo, "branch": $branch, "sfa_repo": $sfa_repo, "sfa_branch": $sfa_branch, "ver": $ver, "time": $time}]')
             fi
@@ -204,7 +204,7 @@ jobs:
           check_branch "reF1nd_Testing" "reF1nd/sing-box" "reF1nd-testing" "reF1nd/sing-box-for-android" "reF1nd-testing"
           check_branch "PuerNya_Building" "PuerNya/sing-box" "building" "none" "none"
 
-          echo "matrix=${targets}" >> $GITHUB_OUTPUT
+          echo "matrix=$(echo "$targets" | jq -c .)" >> $GITHUB_OUTPUT
           echo "has_update=${has_update}" >> $GITHUB_OUTPUT
 
       - name: Generate Patch Hashes
