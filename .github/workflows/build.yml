@@ -50,8 +50,7 @@ jobs:
 
       - name: Get Go latest version
         id: go
-        run: |
-          echo "version=$(curl -sSL https://raw.githubusercontent.com/actions/go-versions/update-versions-manifest-file/versions-manifest.json | jq -r '.[0].version')" >> $GITHUB_OUTPUT
+        run: echo "version=$(curl -sSL https://raw.githubusercontent.com/actions/go-versions/update-versions-manifest-file/versions-manifest.json | jq -r '.[0].version')" >> $GITHUB_OUTPUT
 
       - name: Validate Secrets
         env:
@@ -194,16 +193,12 @@ jobs:
               has_update="true"
               echo "- 🔄 強制構建 **[$id]($branch_url)** \`v$ver\` ($time)" >> release_notes.txt
               echo "$marker" >> markers.txt
-              targets=$(echo "$targets" | jq -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" \
-                --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" \
-                '. += [{"id": $id, "repo": $repo, "branch": $branch, "sfa_repo": $sfa_repo, "sfa_branch": $sfa_branch, "ver": $ver, "time": $time}]')
+              targets=$(echo "$targets" | jq -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" '. += [{"id": $id, "repo": $repo, "branch": $branch, "sfa_repo": $sfa_repo, "sfa_branch": $sfa_branch, "ver": $ver, "time": $time}]')
             elif ! echo "$current_release" | grep -qF "${marker}"; then
               has_update="true"
               echo "- ✨ 更新 **[$id]($branch_url)** 至 \`v$ver\`，發佈於 $time" >> release_notes.txt
               echo "$marker" >> markers.txt
-              targets=$(echo "$targets" | jq -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" \
-                --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" \
-                '. += [{"id": $id, "repo": $repo, "branch": $branch, "sfa_repo": $sfa_repo, "sfa_branch": $sfa_branch, "ver": $ver, "time": $time}]')
+              targets=$(echo "$targets" | jq -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" '. += [{"id": $id, "repo": $repo, "branch": $branch, "sfa_repo": $sfa_repo, "sfa_branch": $sfa_branch, "ver": $ver, "time": $time}]')
             fi
           }
 
@@ -235,7 +230,7 @@ jobs:
               content=$(curl -sfL "${BASE_URL}/${patch}.patch" || true)
               if [ -n "$content" ]; then
                 sha=$(echo "$content" | sha256sum | awk '{print $1}')
-                echo "EXPECTED_SHA256[$patch]="$sha"" >> .github/patch_hashes.sh
+                echo "EXPECTED_SHA256[$patch]=\"$sha\"" >> .github/patch_hashes.sh
               fi
             done
           fi
@@ -252,10 +247,7 @@ jobs:
 
   build_core:
     needs: [init, check]
-    if: >-
-      needs.check.outputs.has_update == 'true' && 
-      needs.check.outputs.matrix != '[]' &&
-      needs.check.outputs.matrix != ''
+    if: needs.check.outputs.has_update == 'true' && needs.check.outputs.matrix != '[]' && needs.check.outputs.matrix != ''
     strategy:
       fail-fast: false
       matrix:
@@ -300,8 +292,7 @@ jobs:
         run: |
           cd sing-box
           if [ -f "./experimental/clashapi/trafficontrol/tracker.go" ]; then
-            grep -q "sniffHosts" ./experimental/clashapi/trafficontrol/tracker.go && \
-              sed -i 's/sniffHosts/sniffHost/' ./experimental/clashapi/trafficontrol/tracker.go
+            grep -q "sniffHosts" ./experimental/clashapi/trafficontrol/tracker.go && sed -i 's/sniffHosts/sniffHost/' ./experimental/clashapi/trafficontrol/tracker.go
           fi
 
       - name: Setup Go
@@ -388,10 +379,7 @@ jobs:
             cd ~/cronet-go
             GPG_TTY=/dev/null ./naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh 2>/dev/null || true
             cd ~/cronet-go
-            go run ./cmd/build-naive --target="$TARGET" download-toolchain 2>/dev/null || {
-              echo "::warning::Failed to download Chromium toolchain for naive proxy"
-              exit 0
-            }
+            go run ./cmd/build-naive --target="$TARGET" download-toolchain 2>/dev/null || { echo "::warning::Failed to download Chromium toolchain for naive proxy"; exit 0; }
             go run ./cmd/build-naive --target="$TARGET" env >> $GITHUB_ENV 2>/dev/null || true
           elif [ "${{ matrix.platform.goos }}" = "windows" ]; then
             cd ~/cronet-go
@@ -412,10 +400,7 @@ jobs:
 
   build_android:
     needs: [init, check]
-    if: >-
-      needs.check.outputs.has_update == 'true' && 
-      needs.check.outputs.matrix != '[]' &&
-      needs.check.outputs.matrix != ''
+    if: needs.check.outputs.has_update == 'true' && needs.check.outputs.matrix != '[]' && needs.check.outputs.matrix != ''
     strategy:
       fail-fast: false
       matrix:
@@ -494,19 +479,15 @@ jobs:
       - name: Calculate Version Code
         if: steps.sfa_check.outputs.exists == 'true'
         id: version_code
-        run: |
-          VERSION_CODE=$(( ($(date +%s) - 1735689600) / 60 ))
-          echo "code=${VERSION_CODE}" >> $GITHUB_OUTPUT
+        run: VERSION_CODE=$(( ($(date +%s) - 1735689600) / 60 )) && echo "code=${VERSION_CODE}" >> $GITHUB_OUTPUT
 
       - name: Apply Streamline & Tweaks
         if: steps.sfa_check.outputs.exists == 'true'
         run: |
           cd sing-box-for-android
-          
-          printf 'VERSION_CODE=%s
-VERSION_NAME=%s
-GO_VERSION=%s
-' "${{ steps.version_code.outputs.code }}" "${{ matrix.target.ver }}" "${{ needs.init.outputs.go_version }}" > version.properties
+          echo "VERSION_CODE=${{ steps.version_code.outputs.code }}" > version.properties
+          echo "VERSION_NAME=${{ matrix.target.ver }}" >> version.properties
+          echo "GO_VERSION=${{ needs.init.outputs.go_version }}" >> version.properties
           
           GRADLE_FILE="app/build.gradle.kts"
           if [ -f "$GRADLE_FILE" ]; then
@@ -523,7 +504,7 @@ GO_VERSION=%s
           fi
 
           if [[ "${{ matrix.target.repo }}" != *"PuerNya"* ]]; then
-            echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQKCi0g6ZqQ6JeP6K6+572u6aG16Z2i5Lit5bqU55So5Y2h54mH77yM5LiN5Yig6Zmk5Luj56CB5LuF5bGP6JS95YWl5Y+jCi0g56aB55So5omL5Yqo5qOA5p+l5pu05paw5oyJ6ZKu5ZKM6Ieq5Yqo5pu05paw5byA5YWzCi0g56aB55So5bqU55So5ZCv5Yqo5pe255qE6Ieq5Yqo5pu05paw5qOA5p+lCi0tLQogLi4uL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IHwgMTMgKysrKysrKysrKysrKwogLi4uL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0ICAgIHwgIDggKysrLS0tLS0KIC4uLi9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QgICB8ICA3IC0tLS0tLS0KIDMgZmlsZXMgY2hhbmdlZCwgMTYgaW5zZXJ0aW9ucygrKSwgMTIgZGVsZXRpb25zKC0pCgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdAppbmRleCA1NzQ0MjJiLi4xYjFiNmM5IDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9NYWluQWN0aXZpdHkua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdApBQEAtLTE5MSw2ICsxOTEsMTUgQEAgY2xhc3MgTWFpbkFjdGl2aXR5IDoKCiAgICAgICAgIGNvbm5lY3Rpb24ucmVjb25uZWN0KCkKCisgICAgICAgIC8vIOW8uuWItuemgeeUqOiHquWKqOabtOaWsOWKn+iDvQorICAgICAgICBTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQgPSBmYWxzZQorICAgICAgICAvLyDmoIforrDkuLrlt7Lmj5DnpLrov4fvvIzpmLLmraLmmL7npLrpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xlr7nor53moYYKKyAgICAgICAgU2V0dGluZ3MudXBkYXRlQ2hlY2tQcm9tcHRlZCA9IHRydWUKKyAgICAgICAgLy8g5riF6Zmk5Lu75L2V57yT5a2Y55qE5pu05paw54q25oCBCisgICAgICAgIFVwZGF0ZVN0YXRlLmNsZWFyKCkKKworICAgICAgICAvLyDoh6rliqjmm7TmlrDmo4Dmn6Xlt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgVXBkYXRlU3RhdGUubG9hZEZyb21DYWNoZSgpCiAgICAgICAgIGlmIChTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQpIHsKICAgICAgICAgICAgIGxpZmVjeWNsZVNjb3BlLmxhdW5jaChEaXNwYXRjaGVycy5JTykgewpAQCAtMjAyLDYgKzIxMSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgfQogICAgICAgICB9CisgICAgICAgICovCgogICAgICAgICBoYW5kbGVJbnRlbnQoaW50ZW50KQoKQEAtNDY1LDYgKzQ3NSw4IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgKQogICAgICAgICB9CgorICAgICAgICAvLyDpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xmj5DnpLrlr7nor53moYblt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBjaGVjayBwcm9tcHQgZGlhbG9nIChzaG93biBvbmx5IG9uY2Ugb24gZmlyc3QgbGF1bmNoKQogICAgICAgICB2YXIgc2hvd1VwZGF0ZUNoZWNrUHJvbXB0IGJ5IHJlbWVtYmVyIHsgbXV0YWJsZVN0YXRlT2YoIVNldHRpbmdzLnVwZGF0ZUNoZWNrUHJvbXB0ZWQpIH0KICAgICAgICAgaWYgKHNob3dVcGRhdGVDaGVja1Byb21wdCkgewpAQCAtNTEzLDYgKzUyNSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICApCiAgICAgICAgICB9CisgICAgICAgICAqLwoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBhdmFpbGFibGUgZGlhbG9nCiAgICAgICAgIHZhbCB1cGRhdGVJbmZvIGJ5IFVwZGF0ZVN0YXRlLnVwZGF0ZUluZm8KZGlmZiAtLWdpdCBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdAppbmRleCA4YWE2ZDIxLi4xYzJmNzlhIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvQXBwU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdApBQCAtNDAxLDExICs0MDEsNiBAIGZ1biBBcHBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAic3RhdHVzIjogJCBoYXNVcGRhdGUgPyAiTmV3IiA6ICIiLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KSB7IFRleHQoIk5ldyIpIH0KLSAgICAgICAgICAgICAgICAgICAgICAgICAgfQotICAgICAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgbW9kaWZpZXIgPQogICAgICAgICAgICAgICAgICAgICBNb2RpZmllcgogICAgICAgICAgICAgICAgICAgICAgICAgLmNsaXAoUm91bmRlZENvcm5lclNoYXBlKHRvcFN0YXJ0ID0gMTIuZHAsIHRvcEVuZCA9IDEyLmRwKSksCkBAIC01MzUsNiArNTMwLDggQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgIH0KICAgICAgICAgfQoKKyAgICAgICAgLy8g5bey6ZqQ6JeP5pu05paw6K6+572u5ZKM5pON5L2c5Y2h54mHCisgICAgICAgIC8qCiAgICAgICAgIFNwYWNlcihtb2RpZmllciA9IE1vZGlmaWVyLmhlaWdodCg4LmRwKSkKCiAgICAgICAgIFRleHQoCkBAIC05OTUsNiArOTkyLDcgQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICB9CiAgICAgICAgIH0KKyAgICAgICAgKi8KICAgICB9CiB9CgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdAppbmRleCBmNDY4ZjUxLi4yYTM1MzEyIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdApBQCAtNTEsNyArNTEsNiBAIGltcG9ydCBhbmRyb2lkLm5hdmlnYXRpb24uTmF2Q29udHJvbGxlcgoKaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS5SCmltcG9ydCBpby5uZWtvaGFzZWthaS5zZmEuY29tcG9zZS50b3BiYXIuT3ZlcnJpZGVUb3BCYXIKaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS5kYXRhYmFzZS5TZXR0aW5ncwotaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS51cGRhdGUuVXBkYXRlU3RhdGUKaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS51dGlscy5Ib29rTW9kdWxlVXBkYXRlTm90aWZpZXIKCkBAIC02Niw3ICs2NSw2IEBAIGZ1biBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7Cg==" | base64 -d > patch.diff
+            echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQKCi0g6ZqQ6JeP6K6+572u6aG16Z2i5Lit5bqU55So5Y2h54mH77yM5LiN5Yig6Zmk5Luj56CB5LuF5bGP6JS95YWl5Y+jCi0g56aB55So5omL5Yqo5qOA5p+l5pu05paw5oyJ6ZKu5ZKM6Ieq5Yqo5pu05paw5byA5YWzCi0g56aB55So5bqU55So5ZCv5Yqo5pe255qE6Ieq5Yqo5pu05paw5qOA5p+lCi0tLQogLi4uL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IHwgMTMgKysrKysrKysrKysrKwogLi4uL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0ICAgIHwgIDggKysrLS0tLS0KIC4uLi9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QgICB8ICA3IC0tLS0tLS0KIDMgZmlsZXMgY2hhbmdlZCwgMTYgaW5zZXJ0aW9ucygrKSwgMTIgZGVsZXRpb25zKC0pCgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdAppbmRleCA1NzQ0MjJiLi4xYjFiNmM5IDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9NYWluQWN0aXZpdHkua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdApBQEAtLTE5MSw2ICsxOTEsMTUgQEAgY2xhc3MgTWFpbkFjdGl2aXR5IDoKCiAgICAgICAgIGNvbm5lY3Rpb24ucmVjb25uZWN0KCkKCisgICAgICAgIC8vIOW8uuWItuemgeeUqOiHquWKqOabtOaWsOWKn+iDvQorICAgICAgICBTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQgPSBmYWxzZQorICAgICAgICAvLyDmoIforrDkuLrlt7Lmj5DnpLrov4fvvIzpmLLmraLmmL7npLrpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xlr7nor53moYYKKyAgICAgICAgU2V0dGluZ3MudXBkYXRlQ2hlY2tQcm9tcHRlZCA9IHRydWUKKyAgICAgICAgLy8g5riF6Zmk5Lu75L2V57yT5a2Y55qE5pu05paw54q25oCBCisgICAgICAgIFVwZGF0ZVN0YXRlLmNsZWFyKCkKKworICAgICAgICAvLyDoh6rliqjmm7TmlrDmo4Dmn6Xlt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgVXBkYXRlU3RhdGUubG9hZEZyb21DYWNoZSgpCiAgICAgICAgIGlmIChTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQpIHsKICAgICAgICAgICAgIGxpZmVjeWNsZVNjb3BlLmxhdW5jaChEaXNwYXRjaGVycy5JTykgewpAQCAtMjAyLDYgKzIxMSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgfQogICAgICAgICB9CisgICAgICAgICovCgogICAgICAgICBoYW5kbGVJbnRlbnQoaW50ZW50KQoKQEAtNDY1LDYgKzQ3NSw4IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgKQogICAgICAgICB9CgorICAgICAgICAvLyDpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xmj5DnpLrlr7nor53moYblt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBjaGVjayBwcm9tcHQgZGlhbG9nIChzaG93biBvbmx5IG9uY2Ugb24gZmlyc3QgbGF1bmNoKQogICAgICAgICB2YXIgc2hvd1VwZGF0ZUNoZWNrUHJvbXB0IGJ5IHJlbWVtYmVyIHsgbXV0YWJsZVN0YXRlT2YoIVNldHRpbmdzLnVwZGF0ZUNoZWNrUHJvbXB0ZWQpIH0KICAgICAgICAgaWYgKHNob3dVcGRhdGVDaGVja1Byb21wdCkgewpAQCAtNTEzLDYgKzUyNSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICApCiAgICAgICAgICB9CisgICAgICAgICAqLwoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBhdmFpbGFibGUgZGlhbG9nCiAgICAgICAgIHZhbCB1cGRhdGVJbmZvIGJ5IFVwZGF0ZVN0YXRlLnVwZGF0ZUluZm8KZGlmZiAtLWdpdCBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdAppbmRleCA4YWE2ZDIxLi4xYzJmNzlhIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvQXBwU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdApBQCAtNDAxLDExICs0MDEsNiBAIGZ1biBBcHBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAic3RhdHVzIjogJCBoYXNVcGRhdGUgPyAiTmV3IiA6ICIiLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KSB7IFRleHQoIk5ldyIpIH0KLSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgfQotICAgICAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgbW9kaWZpZXIgPQogICAgICAgICAgICAgICAgICAgICBNb2RpZmllcgogICAgICAgICAgICAgICAgICAgICAgICAgLmNsaXAoUm91bmRlZENvcm5lclNoYXBlKHRvcFN0YXJ0ID0gMTIuZHAsIHRvcEVuZCA9IDEyLmRwKSksCkBAIC01MzUsNiArNTMwLDggQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgIH0KICAgICAgICAgfQoKKyAgICAgICAgLy8g5bey6ZqQ6JeP5pu05paw6K6+572u5ZKM5pON5L2c5Y2h54mHCisgICAgICAgIC8qCiAgICAgICAgIFNwYWNlcihtb2RpZmllciA9IE1vZGlmaWVyLmhlaWdodCg4LmRwKSkKCiAgICAgICAgIFRleHQoCkBAIC05OTUsNiArOTkyLDcgQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICB9CiAgICAgICAgIH0KKyAgICAgICAgKi8KICAgICB9CiB9CgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdAppbmRleCBmNDY4ZjUxLi4yYTM1MzEyIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdApBQCAtNTEsNyArNTEsNiBAIGltcG9ydCBhbmRyb2lkLm5hdmlnYXRpb24uTmF2Q29udHJvbGxlcgoKaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS5SCmltcG9ydCBpby5uZWtvaGFzZWthaS5zZmEuY29tcG9zZS50b3BiYXIuT3ZlcnJpZGVUb3BCYXIKaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS5kYXRhYmFzZS5TZXR0aW5ncwotaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS51cGRhdGUuVXBkYXRlU3RhdGUKaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS51dGlscy5Ib29rTW9kdWxlVXBkYXRlTm90aWZpZXIKCkBAIC02Niw3ICs2NSw2IEBAIGZ1biBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7Cg==" | base64 -d > patch.diff
             git apply patch.diff || true
           fi
 
@@ -574,20 +555,7 @@ GO_VERSION=%s
             if [ -f "$file" ]; then
               basename_file=$(basename "$file")
               mv -f "$file" "../apks/SFA-${{ matrix.target.id }}-${basename_file}"
-              printf '{
-  "version_code": %s,
-  "version_name": "%s",
-  "build_time": "%s",
-  "workflow_run_id": "%s",
-  "naive_enabled": %s
-}
-' \
-                "${{ steps.version_code.outputs.code }}" \
-                "${{ matrix.target.ver }}" \
-                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                "${{ github.run_id }}" \
-                "${{ github.event.inputs.enable_naive }}" \
-                > "../apks/SFA-${{ matrix.target.id }}-metadata.json"
+              printf '{\n  "version_code": %s,\n  "version_name": "%s",\n  "build_time": "%s",\n  "workflow_run_id": "%s",\n  "naive_enabled": %s\n}\n' "${{ steps.version_code.outputs.code }}" "${{ matrix.target.ver }}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${{ github.run_id }}" "${{ github.event.inputs.enable_naive }}" > "../apks/SFA-${{ matrix.target.id }}-metadata.json"
             fi
           done
 
@@ -673,13 +641,8 @@ GO_VERSION=%s
             if [[ -d "$dir" ]]; then mv "$dir"/* release_files/ 2>/dev/null || true; fi
           done
 
-          echo -e "# 🚀 sing-box 自動編譯
-
-## 📦 本次更新內容
-" > release_body.txt
-          if [ -f "./tmp/workflow-metadata/release_notes.txt" ]; then 
-            cat ./tmp/workflow-metadata/release_notes.txt >> release_body.txt
-          fi
+          echo -e "# 🚀 sing-box 自動編譯\n\n## 📦 本次更新內容\n" > release_body.txt
+          if [ -f "./tmp/workflow-metadata/release_notes.txt" ]; then cat ./tmp/workflow-metadata/release_notes.txt >> release_body.txt; fi
           
           echo "" >> release_body.txt
           echo "### ⏱️ 構建時間統計" >> release_body.txt
@@ -725,17 +688,12 @@ GO_VERSION=%s
         run: |
           echo "Cleaning up old workflow runs (keeping latest 5)..."
           CURRENT_RUN="${{ github.run_id }}"
-          
-          ALL_RUNS=$(gh api --paginate "repos/${{ github.repository }}/actions/runs?per_page=100" \
-            --jq ".workflow_runs[] | select(.id != $CURRENT_RUN) | .id" 2>/dev/null || echo "")
-          
+          ALL_RUNS=$(gh api --paginate "repos/${{ github.repository }}/actions/runs?per_page=100" --jq ".workflow_runs[] | select(.id != $CURRENT_RUN) | .id" 2>/dev/null || echo "")
           TOTAL=$(echo "$ALL_RUNS" | grep -c '[0-9]' || echo "0")
           KEEP=5
-          
           if [ "$TOTAL" -gt "$KEEP" ]; then
             echo "$ALL_RUNS" | tail -n +$((KEEP + 1)) | while read run_id; do
-              [ -n "$run_id" ] && gh api -X DELETE "repos/${{ github.repository }}/actions/runs/$run_id" 2>/dev/null && \
-                echo "Deleted old run: $run_id" || true
+              [ -n "$run_id" ] && gh api -X DELETE "repos/${{ github.repository }}/actions/runs/$run_id" 2>/dev/null && echo "Deleted old run: $run_id" || true
             done
           fi
 
@@ -801,22 +759,14 @@ GO_VERSION=%s
         id: find_files
         run: |
           ANDROID_APK=$(find dist -name "*.apk" -type f 2>/dev/null | head -n 1)
-          
           LINUX_TAR=$(find dist -name "*linux-amd64-v3*.tar.gz" ! -name "*-original*" -type f 2>/dev/null | head -n 1)
-          if [ -z "$LINUX_TAR" ]; then
-            LINUX_TAR=$(find dist -name "*linux-amd64*v3*glibc*.tar.gz" -type f 2>/dev/null | head -n 1)
-          fi
-          if [ -z "$LINUX_TAR" ]; then
-            LINUX_TAR=$(find dist -name "*linux-amd64*v3*.tar.gz" -type f 2>/dev/null | head -n 1)
-          fi
-          
+          if [ -z "$LINUX_TAR" ]; then LINUX_TAR=$(find dist -name "*linux-amd64*v3*glibc*.tar.gz" -type f 2>/dev/null | head -n 1); fi
+          if [ -z "$LINUX_TAR" ]; then LINUX_TAR=$(find dist -name "*linux-amd64*v3*.tar.gz" -type f 2>/dev/null | head -n 1); fi
           WINDOWS_ZIP=$(find dist -name "*windows-amd64-v3*.zip" ! -name "*-original*" -type f 2>/dev/null | head -n 1)
-          
           FILES=""
           [ -n "$ANDROID_APK" ] && FILES="$FILES%0A$ANDROID_APK"
           [ -n "$LINUX_TAR" ] && FILES="$FILES%0A$LINUX_TAR"
           [ -n "$WINDOWS_ZIP" ] && FILES="$FILES%0A$WINDOWS_ZIP"
-          
           echo "upload_files=$FILES" >> $GITHUB_OUTPUT
 
       - name: Telegram notification
