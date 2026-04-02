@@ -7,6 +7,7 @@
 - SFA Android 客戶端同步編譯 (自帶包名偽裝與在線更新劫持)
 - 自動動態拉取最新 Tag，使用時間戳控制 Android 版本升級覆蓋
 - CGO 環境動態適配，舊工作流自動清理
+- 核心二進制文件自動壓縮（Linux 使用 .tar.gz，Windows 使用 .zip）
 
 ## 编译标签
 ```text
