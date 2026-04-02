@@ -32,9 +32,8 @@ on:
       - ".github/workflows/*.yml"
 
 env:
-  GO_VERSION: "~1.25.8"
-  TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_clash_api,with_gvisor,with_quic,with_utls,with_wireguard"
-  TAGS_ANDROID_EXTRA: "with_conntrack"
+  GO_VERSION: "~1.23"
+  TAGS_COMMON: "with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api"
   PATCH_URL_BASE: "https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/patches"
 
 jobs:
@@ -48,16 +47,21 @@ jobs:
         run: |
           echo "version=$(curl -sSL https://raw.githubusercontent.com/actions/go-versions/main/versions-manifest.json | jq -r '.[0].version')" >> $GITHUB_OUTPUT
 
-  detect_singbox_oldstable:
+  # ========== SagerNet OldStable ==========\n\n  detect_singbox_oldstable:
     runs-on: ubuntu-latest
     needs: setup
     outputs:
       version: ${{ steps.detect.outputs.version }}
       time: ${{ steps.detect.outputs.time }}
-      tags: ${{ steps.detect.outputs.tags }}
       skip: ${{ steps.compare.outputs.skip }}
     steps:
-      - name: Detect oldstable version
+      - uses: actions/checkout@v6
+        with:
+          repository: SagerNet/sing-box
+          ref: oldstable
+          fetch-depth: 0
+
+      - name: Detect version
         id: detect
         run: |
           VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "oldstable-$(git log -1 --format=%h)")
@@ -65,11 +69,7 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "time=${TIME}" >> $GITHUB_OUTPUT
           echo "tags=${TAGS_COMMON}" >> $GITHUB_OUTPUT
-      - uses: actions/checkout@v6
-        with:
-          repository: SagerNet/sing-box
-          ref: oldstable
-          fetch-depth: 0
+
       - name: Compare versions
         id: compare
         run: |
@@ -82,13 +82,12 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-  detect_singbox_stable:
+  # ========== SagerNet Stable ==========\n\n  detect_singbox_stable:
     runs-on: ubuntu-latest
     needs: setup
     outputs:
       version: ${{ steps.detect.outputs.version }}
       time: ${{ steps.detect.outputs.time }}
-      tags: ${{ steps.detect.outputs.tags }}
       skip: ${{ steps.compare.outputs.skip }}
     steps:
       - name: Detect stable version
@@ -102,6 +101,7 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "time=${TIME}" >> $GITHUB_OUTPUT
           echo "tags=${TAGS_COMMON}" >> $GITHUB_OUTPUT
+
       - name: Compare versions
         id: compare
         run: |
@@ -114,13 +114,12 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-  detect_singbox_testing:
+  # ========== SagerNet Testing ==========\n\n  detect_singbox_testing:
     runs-on: ubuntu-latest
     needs: setup
     outputs:
       version: ${{ steps.detect.outputs.version }}
       time: ${{ steps.detect.outputs.time }}
-      tags: ${{ steps.detect.outputs.tags }}
       skip: ${{ steps.compare.outputs.skip }}
     steps:
       - name: Detect testing version
@@ -134,6 +133,7 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "time=${TIME}" >> $GITHUB_OUTPUT
           echo "tags=${TAGS_COMMON}" >> $GITHUB_OUTPUT
+
       - name: Compare versions
         id: compare
         run: |
@@ -146,16 +146,21 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-  detect_ref1nd_oldstable:
+  # ========== reF1nd OldStable ==========\n\n  detect_ref1nd_oldstable:
     runs-on: ubuntu-latest
     needs: setup
     outputs:
       version: ${{ steps.detect.outputs.version }}
       time: ${{ steps.detect.outputs.time }}
-      tags: ${{ steps.detect.outputs.tags }}
       skip: ${{ steps.compare.outputs.skip }}
     steps:
-      - name: Detect reF1nd-oldstable version
+      - uses: actions/checkout@v6
+        with:
+          repository: reF1nd/sing-box
+          ref: reF1nd-oldstable
+          fetch-depth: 0
+
+      - name: Detect version
         id: detect
         run: |
           VERSION=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/tags | \
@@ -167,6 +172,7 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "time=${TIME}" >> $GITHUB_OUTPUT
           echo "tags=${TAGS_COMMON}" >> $GITHUB_OUTPUT
+
       - name: Compare versions
         id: compare
         run: |
@@ -179,13 +185,12 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-  detect_ref1nd_stable:
+  # ========== reF1nd Stable ==========\n\n  detect_ref1nd_stable:
     runs-on: ubuntu-latest
     needs: setup
     outputs:
       version: ${{ steps.detect.outputs.version }}
       time: ${{ steps.detect.outputs.time }}
-      tags: ${{ steps.detect.outputs.tags }}
       skip: ${{ steps.compare.outputs.skip }}
     steps:
       - name: Detect reF1nd-stable version
@@ -200,6 +205,7 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "time=${TIME}" >> $GITHUB_OUTPUT
           echo "tags=${TAGS_COMMON}" >> $GITHUB_OUTPUT
+
       - name: Compare versions
         id: compare
         run: |
@@ -212,13 +218,12 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-  detect_ref1nd_testing:
+  # ========== reF1nd Testing ==========\n\n  detect_ref1nd_testing:
     runs-on: ubuntu-latest
     needs: setup
     outputs:
       version: ${{ steps.detect.outputs.version }}
       time: ${{ steps.detect.outputs.time }}
-      tags: ${{ steps.detect.outputs.tags }}
       skip: ${{ steps.compare.outputs.skip }}
     steps:
       - name: Detect reF1nd-testing version
@@ -233,6 +238,7 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "time=${TIME}" >> $GITHUB_OUTPUT
           echo "tags=${TAGS_COMMON}" >> $GITHUB_OUTPUT
+
       - name: Compare versions
         id: compare
         run: |
@@ -245,7 +251,7 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-  build_singbox_oldstable:
+  # ========== Build Jobs ==========\n\n  build_singbox_oldstable:
     runs-on: ubuntu-latest
     if: needs.detect_singbox_oldstable.outputs.skip != 'true'
     needs: [setup, detect_singbox_oldstable]
@@ -539,7 +545,7 @@ jobs:
           name: ref1nd-testing-${{ matrix.name }}
           path: sing-box-*
 
-  build_android_ref1nd_stable:
+  # ========== Android Builds ==========\n\n  build_android_ref1nd_stable:
     runs-on: ubuntu-latest
     if: needs.detect_ref1nd_stable.outputs.skip != 'true'
     needs: [setup, detect_ref1nd_stable]
@@ -558,8 +564,7 @@ jobs:
         with:
           ndk-version: r29
       - name: Setup JDK
-        run: |
-          sudo apt-get update && sudo apt-get install -y openjdk-17-jdk-headless
+        run: sudo apt-get update && sudo apt-get install -y openjdk-17-jdk-headless
       - name: Set tag
         run: git tag "v${{ needs.detect_ref1nd_stable.outputs.version }}" -f
       - name: Build library
@@ -580,9 +585,7 @@ jobs:
           ref: reF1nd-stable
           path: clients/android
       - name: Update version
-        run: |
-          cd clients/android
-          go run -v ../../../sing-box/cmd/internal/update_android_version --ci --nightly
+        run: cd clients/android && go run -v ../../../sing-box/cmd/internal/update_android_version --ci --nightly
       - name: Decode Keystore
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > clients/android/app/release.keystore
@@ -603,9 +606,7 @@ jobs:
           echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQK" | base64 -d > streamline.patch
           git apply streamline.patch || true
       - name: Prepare library
-        run: |
-          mkdir -p clients/android/app/libs/
-          cp -f libbox.aar clients/android/app/libs/
+        run: mkdir -p clients/android/app/libs/ && cp -f libbox.aar clients/android/app/libs/
       - name: Build APK
         run: |
           cd clients/android
@@ -652,8 +653,7 @@ jobs:
         with:
           ndk-version: r29
       - name: Setup JDK
-        run: |
-          sudo apt-get update && sudo apt-get install -y openjdk-17-jdk-headless
+        run: sudo apt-get update && sudo apt-get install -y openjdk-17-jdk-headless
       - name: Set tag
         run: git tag "v${{ needs.detect_ref1nd_testing.outputs.version }}" -f
       - name: Build library
@@ -674,9 +674,7 @@ jobs:
           ref: reF1nd-testing
           path: clients/android
       - name: Update version
-        run: |
-          cd clients/android
-          go run -v ../../../sing-box/cmd/internal/update_android_version --ci --nightly
+        run: cd clients/android && go run -v ../../../sing-box/cmd/internal/update_android_version --ci --nightly
       - name: Decode Keystore
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > clients/android/app/release.keystore
@@ -697,9 +695,7 @@ jobs:
           echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQK" | base64 -d > streamline.patch
           git apply streamline.patch || true
       - name: Prepare library
-        run: |
-          mkdir -p clients/android/app/libs/
-          cp -f libbox.aar clients/android/app/libs/
+        run: mkdir -p clients/android/app/libs/ && cp -f libbox.aar clients/android/app/libs/
       - name: Build APK
         run: |
           cd clients/android
@@ -725,7 +721,7 @@ jobs:
           name: apk-ref1nd-testing
           path: apks/ref1nd-testing/*
 
-  publish_release:
+  # ========== Publish Release ==========\n\n  publish_release:
     runs-on: ubuntu-latest
     if: always()
     needs:
@@ -806,7 +802,7 @@ jobs:
           | Testing | ${REF1ND_TESTING_VER:-'-'} | ${REF1ND_TESTING_TIME:-'-'} |
           
           ---
-          构建: $(date -u '+%Y-%m-%d %H:%M UTC') | NaiveProxy: ${NAIVE_STATUS:-'Disabled'}
+          构建: $(date -u '+%Y-%m-%d %H:%M UTC') | Tags: ${TAGS_COMMON}
           EOF
         env:
           OLDSTABLE_VER: ${{ needs.detect_singbox_oldstable.outputs.version }}
@@ -815,7 +811,6 @@ jobs:
           REF1ND_OLDSTABLE_VER: ${{ needs.detect_ref1nd_oldstable.outputs.version }}
           REF1ND_STABLE_VER: ${{ needs.detect_ref1nd_stable.outputs.version }}
           REF1ND_TESTING_VER: ${{ needs.detect_ref1nd_testing.outputs.version }}
-          NAIVE_STATUS: ${{ github.event.inputs.enable_naive == 'true' && 'Enabled' || 'Disabled' }}
       - name: Release
         if: steps.check.outputs.has_files == 'true'
         uses: softprops/action-gh-release@v2
@@ -891,7 +886,7 @@ jobs:
           
           ## 配置
           
-          - Go: ~1.25.8 | NDK: r29 | Tags: clash_api, gvisor, quic, utls, wireguard
+          - Go: ~1.23 | NDK: r29 | Tags: gvisor, quic, dhcp, utls, clash_api
           - 压缩: UPX (--best --lzma) + tar.gz
           - 更新频率: 每6小时
           
