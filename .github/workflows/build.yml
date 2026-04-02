@@ -27,7 +27,6 @@ on:
     - cron: "0 */6 * * *"
 
 env:
-  GO_VERSION: "~1.25.8"
   TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_clash_api,with_gvisor,with_quic,with_utls,with_wireguard"
   TAGS_ANDROID_EXTRA: "with_conntrack"
   PATCH_URL_BASE: "https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/patches"
@@ -40,8 +39,7 @@ jobs:
     steps:
       - name: Get Go version
         id: go
-        run: |
-          echo "version=$(curl -sSL https://raw.githubusercontent.com/actions/go-versions/main/versions-manifest.json | jq -r '.[0].version')" >> $GITHUB_OUTPUT
+        run: echo "version=$(curl -sSL https://raw.githubusercontent.com/actions/go-versions/main/versions-manifest.json | jq -r '.[0].version')" >> $GITHUB_OUTPUT
 
   detect_singbox_oldstable:
     runs-on: ubuntu-latest
@@ -49,7 +47,6 @@ jobs:
     outputs:
       version: ${{ steps.detect.outputs.version }}
       time: ${{ steps.detect.outputs.time }}
-      tags: ${{ steps.detect.outputs.tags }}
       skip: ${{ steps.compare.outputs.skip }}
     steps:
       - uses: actions/checkout@v6
@@ -83,17 +80,13 @@ jobs:
     outputs:
       version: ${{ steps.detect.outputs.version }}
       time: ${{ steps.detect.outputs.time }}
-      tags: ${{ steps.detect.outputs.tags }}
       skip: ${{ steps.compare.outputs.skip }}
     steps:
       - name: Detect stable version
         id: detect
         run: |
-          VERSION=$(curl -sSL https://api.github.com/repos/SagerNet/sing-box/releases | \
-            jq -r '.[] | select(.tag_name | test("alpha|beta|rc") | not) | .tag_name' | head -n 1 | sed 's/^v//')
-          TIME=$(curl -sSL https://api.github.com/repos/SagerNet/sing-box/releases | \
-            jq -r '.[] | select(.tag_name | test("alpha|beta|rc") | not) | (.published_at // .created_at)' | head -n 1 | \
-            xargs -I {} date -d '{} +8 hours' '+%Y-%m-%d')
+          VERSION=$(curl -sSL https://api.github.com/repos/SagerNet/sing-box/releases | jq -r '.[] | select(.tag_name | test("alpha|beta|rc") | not) | .tag_name' | head -n 1 | sed 's/^v//')
+          TIME=$(curl -sSL https://api.github.com/repos/SagerNet/sing-box/releases | jq -r '.[] | select(.tag_name | test("alpha|beta|rc") | not) | (.published_at // .created_at)' | head -n 1 | xargs -I {} date -d '{} +8 hours' '+%Y-%m-%d')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "time=${TIME}" >> $GITHUB_OUTPUT
           echo "tags=${TAGS_COMMON}" >> $GITHUB_OUTPUT
@@ -115,17 +108,13 @@ jobs:
     outputs:
       version: ${{ steps.detect.outputs.version }}
       time: ${{ steps.detect.outputs.time }}
-      tags: ${{ steps.detect.outputs.tags }}
       skip: ${{ steps.compare.outputs.skip }}
     steps:
       - name: Detect testing version
         id: detect
         run: |
-          VERSION=$(curl -sSL https://api.github.com/repos/SagerNet/sing-box/releases | \
-            jq -r '.[] | select(.tag_name | test("alpha|beta|rc")) | .tag_name' | head -n 1 | sed 's/^v//')
-          TIME=$(curl -sSL https://api.github.com/repos/SagerNet/sing-box/releases | \
-            jq -r '.[] | select(.tag_name | test("alpha|beta|rc")) | (.published_at // .created_at)' | head -n 1 | \
-            xargs -I {} date -d '{} +8 hours' '+%Y-%m-%d')
+          VERSION=$(curl -sSL https://api.github.com/repos/SagerNet/sing-box/releases | jq -r '.[] | select(.tag_name | test("alpha|beta|rc")) | .tag_name' | head -n 1 | sed 's/^v//')
+          TIME=$(curl -sSL https://api.github.com/repos/SagerNet/sing-box/releases | jq -r '.[] | select(.tag_name | test("alpha|beta|rc")) | (.published_at // .created_at)' | head -n 1 | xargs -I {} date -d '{} +8 hours' '+%Y-%m-%d')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "time=${TIME}" >> $GITHUB_OUTPUT
           echo "tags=${TAGS_COMMON}" >> $GITHUB_OUTPUT
@@ -147,18 +136,14 @@ jobs:
     outputs:
       version: ${{ steps.detect.outputs.version }}
       time: ${{ steps.detect.outputs.time }}
-      tags: ${{ steps.detect.outputs.tags }}
       skip: ${{ steps.compare.outputs.skip }}
     steps:
       - name: Detect reF1nd-oldstable version
         id: detect
         run: |
-          VERSION=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/tags | \
-            jq -r '[.[] | select(.name | contains("reF1nd") and (contains("alpha") | not)) | .name] | sort_by(.) | reverse | .[0]' | sed 's/^v//')
-          COMMIT=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/tags | \
-            jq -r '[.[] | select(.name | contains("reF1nd") and (contains("alpha") | not)) | .name] | sort_by(.) | reverse | .[0]')
-          TIME=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/commits/${COMMIT} | \
-            jq -r '.commit.committer.date' | xargs -I {} date -d '{} +8 hours' '+%Y-%m-%d')
+          VERSION=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/tags | jq -r '[.[] | select(.name | contains("reF1nd") and (contains("alpha") | not)) | .name] | sort_by(.) | reverse | .[0]' | sed 's/^v//')
+          COMMIT=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/tags | jq -r '[.[] | select(.name | contains("reF1nd") and (contains("alpha") | not)) | .name] | sort_by(.) | reverse | .[0]')
+          TIME=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/commits/${COMMIT} | jq -r '.commit.committer.date' | xargs -I {} date -d '{} +8 hours' '+%Y-%m-%d')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "time=${TIME}" >> $GITHUB_OUTPUT
           echo "tags=${TAGS_COMMON}" >> $GITHUB_OUTPUT
@@ -180,18 +165,14 @@ jobs:
     outputs:
       version: ${{ steps.detect.outputs.version }}
       time: ${{ steps.detect.outputs.time }}
-      tags: ${{ steps.detect.outputs.tags }}
       skip: ${{ steps.compare.outputs.skip }}
     steps:
       - name: Detect reF1nd-stable version
         id: detect
         run: |
-          VERSION=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/tags | \
-            jq -r '.[] | select(.name | contains("reF1nd") and (contains("alpha") | not)) | .name' | head -n 1 | sed 's/^v//')
-          COMMIT=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/tags | \
-            jq -r '.[] | select(.name | contains("reF1nd") and (contains("alpha") | not)) | .name' | head -n 1)
-          TIME=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/commits/${COMMIT} | \
-            jq -r '.commit.committer.date' | xargs -I {} date -d '{} +8 hours' '+%Y-%m-%d')
+          VERSION=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/tags | jq -r '.[] | select(.name | contains("reF1nd") and (contains("alpha") | not)) | .name' | head -n 1 | sed 's/^v//')
+          COMMIT=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/tags | jq -r '.[] | select(.name | contains("reF1nd") and (contains("alpha") | not)) | .name' | head -n 1)
+          TIME=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/commits/${COMMIT} | jq -r '.commit.committer.date' | xargs -I {} date -d '{} +8 hours' '+%Y-%m-%d')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "time=${TIME}" >> $GITHUB_OUTPUT
           echo "tags=${TAGS_COMMON}" >> $GITHUB_OUTPUT
@@ -213,18 +194,14 @@ jobs:
     outputs:
       version: ${{ steps.detect.outputs.version }}
       time: ${{ steps.detect.outputs.time }}
-      tags: ${{ steps.detect.outputs.tags }}
       skip: ${{ steps.compare.outputs.skip }}
     steps:
       - name: Detect reF1nd-testing version
         id: detect
         run: |
-          VERSION=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/tags | \
-            jq -r '.[] | select(.name | contains("reF1nd") and (test("alpha|beta|rc"))) | .name' | head -n 1 | sed 's/^v//')
-          COMMIT=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/tags | \
-            jq -r '.[] | select(.name | contains("reF1nd") and (test("alpha|beta|rc"))) | .name' | head -n 1)
-          TIME=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/commits/${COMMIT} | \
-            jq -r '.commit.committer.date' | xargs -I {} date -d '{} +8 hours' '+%Y-%m-%d')
+          VERSION=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/tags | jq -r '.[] | select(.name | contains("reF1nd") and (test("alpha|beta|rc"))) | .name' | head -n 1 | sed 's/^v//')
+          COMMIT=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/tags | jq -r '.[] | select(.name | contains("reF1nd") and (test("alpha|beta|rc"))) | .name' | head -n 1)
+          TIME=$(curl -sSL https://api.github.com/repos/reF1nd/sing-box/commits/${COMMIT} | jq -r '.commit.committer.date' | xargs -I {} date -d '{} +8 hours' '+%Y-%m-%d')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "time=${TIME}" >> $GITHUB_OUTPUT
           echo "tags=${TAGS_COMMON}" >> $GITHUB_OUTPUT
@@ -276,10 +253,7 @@ jobs:
         if: github.event.inputs.custom_patch_url != ''
         run: curl -sfL "${{ github.event.inputs.custom_patch_url }}" | git apply -v || true
       - name: Build
-        run: go build -v -trimpath -o "sing-box-${{ matrix.name }}" \
-          -tags "${TAGS}" \
-          -ldflags "-s -w -buildid= -X 'github.com/sagernet/sing-box/constant.Version=${VERSION}'" \
-          ./cmd/sing-box
+        run: go build -v -trimpath -o "sing-box-${{ matrix.name }}" -tags "${TAGS}" -ldflags "-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${VERSION}" ./cmd/sing-box
       - uses: actions/upload-artifact@v4
         with:
           name: oldstable-${{ matrix.name }}
@@ -324,10 +298,7 @@ jobs:
         if: github.event.inputs.custom_patch_url != ''
         run: curl -sfL "${{ github.event.inputs.custom_patch_url }}" | git apply -v || true
       - name: Build
-        run: go build -v -trimpath -o "sing-box-${{ matrix.name }}" \
-          -tags "${TAGS}" \
-          -ldflags "-s -w -buildid= -X 'github.com/sagernet/sing-box/constant.Version=${VERSION}'" \
-          ./cmd/sing-box
+        run: go build -v -trimpath -o "sing-box-${{ matrix.name }}" -tags "${TAGS}" -ldflags "-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${VERSION}" ./cmd/sing-box
       - uses: actions/upload-artifact@v4
         with:
           name: stable-${{ matrix.name }}
@@ -372,10 +343,7 @@ jobs:
         if: github.event.inputs.custom_patch_url != ''
         run: curl -sfL "${{ github.event.inputs.custom_patch_url }}" | git apply -v || true
       - name: Build
-        run: go build -v -trimpath -o "sing-box-${{ matrix.name }}" \
-          -tags "${TAGS}" \
-          -ldflags "-s -w -buildid= -X 'github.com/sagernet/sing-box/constant.Version=${VERSION}'" \
-          ./cmd/sing-box
+        run: go build -v -trimpath -o "sing-box-${{ matrix.name }}" -tags "${TAGS}" -ldflags "-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${VERSION}" ./cmd/sing-box
       - uses: actions/upload-artifact@v4
         with:
           name: testing-${{ matrix.name }}
@@ -421,10 +389,7 @@ jobs:
         if: github.event.inputs.custom_patch_url != ''
         run: curl -sfL "${{ github.event.inputs.custom_patch_url }}" | git apply -v || true
       - name: Build
-        run: go build -v -trimpath -o "sing-box-${{ matrix.name }}" \
-          -tags "${TAGS}" \
-          -ldflags "-s -w -buildid= -X 'github.com/sagernet/sing-box/constant.Version=${VERSION}'" \
-          ./cmd/sing-box
+        run: go build -v -trimpath -o "sing-box-${{ matrix.name }}" -tags "${TAGS}" -ldflags "-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${VERSION}" ./cmd/sing-box
       - uses: actions/upload-artifact@v4
         with:
           name: ref1nd-oldstable-${{ matrix.name }}
@@ -473,10 +438,7 @@ jobs:
         if: github.event.inputs.custom_patch_url != ''
         run: curl -sfL "${{ github.event.inputs.custom_patch_url }}" | git apply -v || true
       - name: Build
-        run: go build -v -trimpath -o "sing-box-${{ matrix.name }}" \
-          -tags "${TAGS}" \
-          -ldflags "-s -w -buildid= -X 'github.com/sagernet/sing-box/constant.Version=${VERSION}'" \
-          ./cmd/sing-box
+        run: go build -v -trimpath -o "sing-box-${{ matrix.name }}" -tags "${TAGS}" -ldflags "-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${VERSION}" ./cmd/sing-box
       - uses: actions/upload-artifact@v4
         with:
           name: ref1nd-stable-${{ matrix.name }}
@@ -525,10 +487,7 @@ jobs:
         if: github.event.inputs.custom_patch_url != ''
         run: curl -sfL "${{ github.event.inputs.custom_patch_url }}" | git apply -v || true
       - name: Build
-        run: go build -v -trimpath -o "sing-box-${{ matrix.name }}" \
-          -tags "${TAGS}" \
-          -ldflags "-s -w -buildid= -X 'github.com/sagernet/sing-box/constant.Version=${VERSION}'" \
-          ./cmd/sing-box
+        run: go build -v -trimpath -o "sing-box-${{ matrix.name }}" -tags "${TAGS}" -ldflags "-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=${VERSION}" ./cmd/sing-box
       - uses: actions/upload-artifact@v4
         with:
           name: ref1nd-testing-${{ matrix.name }}
@@ -592,7 +551,7 @@ jobs:
       - name: Streamline update module
         run: |
           cd clients/android
-          echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQK" | base64 -d > streamline.patch && git apply streamline.patch || true
+          echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VURYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1ZlcnNpb246IDEuMApDb250ZW50LVR5cGU6IHRleHQvcGxhaW47OyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQK" | base64 -d > streamline.patch && git apply streamline.patch || true
       - name: Prepare library
         run: mkdir -p clients/android/app/libs/ && cp -f libbox.aar clients/android/app/libs/
       - name: Build APK
@@ -676,7 +635,7 @@ jobs:
       - name: Streamline update module
         run: |
           cd clients/android
-          echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQK" | base64 -d > streamline.patch && git apply streamline.patch || true
+          echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VURYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1ZlcnNpb246IDEuMApDb250ZW50LVR5cGU6IHRleHQvcGxhaW47OyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQK" | base64 -d > streamline.patch && git apply streamline.patch || true
       - name: Prepare library
         run: mkdir -p clients/android/app/libs/ && cp -f libbox.aar clients/android/app/libs/
       - name: Build APK
