@@ -1,92 +1,99 @@
-name: Update sing-box & SFA
+name: Build sing-box
 
 on:
   workflow_dispatch:
+    inputs:
+      enable_telegram:
+        description: "Enable Telegram notification"
+        required: false
+        type: boolean
+        default: false
+      enable_naive:
+        description: "Enable naive outbound (requires cronet)"
+        required: false
+        type: boolean
+        default: false
   schedule:
-    - cron: "0 18 * * *"
+    - cron: "0 */6 * * *"
   push:
     branches:
       - main
     paths-ignore:
       - "README.md"
+      - ".github/workflows/**"
 
 env:
-  ENABLE_TG: 'false'
   GO_VERSION: "~1.23"
-  CORE_TAGS: "with_gvisor,with_quic,with_utls,with_clash_api,with_ech,with_wireguard"
-  ANDROID_TAGS: "with_gvisor,with_quic,with_utls,with_clash_api,with_ech,with_wireguard,with_conntrack"
+  TAGS_COMMON: "with_gvisor,with_quic,with_dhcp,with_utls,with_wireguard,with_clash_api,with_ech"
+  TAGS_ANDROID_EXTRA: "with_conntrack"
 
 jobs:
   check:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.check_versions.outputs.matrix }}
-      has_update: ${{ steps.check_versions.outputs.has_update }}
+      matrix: ${{ steps.check.outputs.matrix }}
+      has_update: ${{ steps.check.outputs.has_update }}
     steps:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Check latest versions and generate matrix
-        id: check_versions
+      - name: Check versions and generate matrix
+        id: check
         run: |
-          targets_json="[]"
-          release_body="# 📝 Sing-Box Release Notes\n\n"
+          targets="[]"
           has_update="false"
-          
-          # 獲取當前 Release 信息用於比對
           current_release=$(curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}/releases/tags/sing-box" | jq -r '.body // ""')
-          
+
           check_branch() {
             local id=$1
             local repo=$2
             local branch=$3
             local sfa_repo=$4
             local sfa_branch=$5
-            
+
             echo "Checking $id ($repo@$branch)..."
-            if ! git clone -b "$branch" --single-branch "https://github.com/$repo.git" "$id" 2>/dev/null; then
-              echo "Branch $branch not found in $repo. Skipping."
+            if ! git clone -b "$branch" --depth 1 "https://github.com/$repo.git" "$id" 2>/dev/null; then
               return
             fi
-            
+
             cd "$id"
-            local ver=$(CGO_ENABLED=0 go run ./cmd/internal/read_tag)
+            local ver=$(CGO_ENABLED=0 go run ./cmd/internal/read_tag 2>/dev/null || echo "unknown")
             local time=$(git log -1 --format=%cd --date=format:'%Y-%m-%d')
             cd ..
-            
+            rm -rf "$id"
+
+            if [ "$ver" = "unknown" ]; then return; fi
             local marker=""
-            release_body="${release_body}- $id 版本: v${ver} 更新於: ${time}\n${marker}\n"
-            
+            echo "$marker" >> markers.txt
+
             if echo "$current_release" | grep -q "$marker"; then
-              echo "[$id] 已是最新版本，無需更新"
+              echo "[$id] Already up to date."
             else
-              echo "[$id] 發現新版本，加入構建隊列"
+              echo "[$id] Update detected."
               has_update="true"
-              targets_json=$(echo "$targets_json" | jq --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" \
+              targets=$(echo "$targets" | jq --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" \
                 '. += [{"id": $id, "repo": $repo, "branch": $branch, "sfa_repo": $sfa_repo, "sfa_branch": $sfa_branch, "ver": $ver, "time": $time}]')
             fi
           }
-          
-          # 分別檢測 6 個維護版本（Core 與 SFA 對應的 branch 映射）
-          check_branch "sager_oldstable" "SagerNet/sing-box" "oldstable" "SagerNet/sing-box-for-android" "stable"
+
+          check_branch "sager_oldstable" "SagerNet/sing-box" "oldstable" "SagerNet/sing-box-for-android" "oldstable"
           check_branch "sager_stable" "SagerNet/sing-box" "stable" "SagerNet/sing-box-for-android" "stable"
           check_branch "sager_testing" "SagerNet/sing-box" "testing" "SagerNet/sing-box-for-android" "main"
-          
           check_branch "ref1nd_oldstable" "reF1nd/sing-box" "reF1nd-oldstable" "reF1nd/sing-box-for-android" "reF1nd-stable"
           check_branch "ref1nd_stable" "reF1nd/sing-box" "reF1nd-stable" "reF1nd/sing-box-for-android" "reF1nd-stable"
           check_branch "ref1nd_testing" "reF1nd/sing-box" "reF1nd-testing" "reF1nd/sing-box-for-android" "reF1nd-testing"
-          
-          echo "matrix=$targets_json" >> $GITHUB_OUTPUT
-          echo "has_update=$has_update" >> $GITHUB_OUTPUT
-          echo -e "$release_body" > release_body.txt
 
-      - name: Upload temporary release notes
+          echo "matrix=${targets}" >> $GITHUB_OUTPUT
+          echo "has_update=${has_update}" >> $GITHUB_OUTPUT
+
+      - name: Upload markers
+        if: steps.check.outputs.has_update == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: release-body
-          path: release_body.txt
+          name: update-markers
+          path: markers.txt
 
   build_core:
     needs: check
@@ -98,8 +105,13 @@ jobs:
         platform:
           - { name: linux-amd64-v1, goos: linux, goarch: amd64, goamd64: v1 }
           - { name: linux-amd64-v3, goos: linux, goarch: amd64, goamd64: v3 }
+          - { name: linux-armv5, goos: linux, goarch: arm, goarm: 5 }
+          - { name: linux-armv6, goos: linux, goarch: arm, goarm: 6 }
           - { name: linux-armv7, goos: linux, goarch: arm, goarm: 7 }
           - { name: linux-arm64, goos: linux, goarch: arm64 }
+          - { name: linux-mips-softfloat, goos: linux, goarch: mips, gomips: softfloat }
+          - { name: linux-mipsle-softfloat, goos: linux, goarch: mipsle, gomips: softfloat }
+          - { name: linux-mipsle-hardfloat, goos: linux, goarch: mipsle, gomips: hardfloat }
           - { name: windows-amd64-v1, goos: windows, goarch: amd64, goamd64: v1 }
           - { name: windows-amd64-v3, goos: windows, goarch: amd64, goamd64: v3 }
           - { name: windows-arm64, goos: windows, goarch: arm64 }
@@ -109,6 +121,7 @@ jobs:
       GOARCH: ${{ matrix.platform.goarch }}
       GOAMD64: ${{ matrix.platform.goamd64 }}
       GOARM: ${{ matrix.platform.goarm }}
+      GOMIPS: ${{ matrix.platform.gomips }}
       CGO_ENABLED: 0
     steps:
       - name: Checkout Core
@@ -122,10 +135,29 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Build Core
-        run: go build -v -trimpath -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid=" -tags "${{ env.CORE_TAGS }}" ./cmd/sing-box
+      - name: Apply patches (reF1nd only)
+        if: contains(matrix.target.repo, 'reF1nd')
+        run: |
+          curl -sfL https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box/concurrent_dial.patch | git apply -v || true
+          curl -sfL https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box/make_log_better.patch | git apply -v || true
+          curl -sfL https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box/fix_interrupt_connections.patch | git apply -v || true
 
-      - name: Upload Core Artifact
+      - name: Configure Tags
+        id: tags
+        run: |
+          FINAL_TAGS="${{ env.TAGS_COMMON }}"
+          if [ "${{ github.event.inputs.enable_naive }}" = "true" ]; then
+            FINAL_TAGS="${FINAL_TAGS},with_naive_outbound"
+            if [ "${{ matrix.platform.goos }}" = "windows" ]; then
+              FINAL_TAGS="${FINAL_TAGS},with_purego"
+            fi
+          fi
+          echo "tags=${FINAL_TAGS}" >> $GITHUB_OUTPUT
+
+      - name: Build Core
+        run: go build -v -trimpath -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid=" -tags "${{ steps.tags.outputs.tags }}" ./cmd/sing-box
+
+      - name: Upload Core
         uses: actions/upload-artifact@v4
         with:
           name: core-${{ matrix.target.id }}-${{ matrix.platform.name }}
@@ -147,65 +179,90 @@ jobs:
           ref: ${{ matrix.target.branch }}
           path: sing-box
 
-      - name: Checkout SFA
-        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          repository: ${{ matrix.target.sfa_repo }}
-          ref: ${{ matrix.target.sfa_branch }}
-          path: sing-box-for-android
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
 
+      - name: Check if SFA branch exists
+        id: sfa_check
+        run: |
+          if git ls-remote --heads https://github.com/${{ matrix.target.sfa_repo }}.git ${{ matrix.target.sfa_branch }} | grep -q ${{ matrix.target.sfa_branch }}; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout SFA
+        if: steps.sfa_check.outputs.exists == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.target.sfa_repo }}
+          ref: ${{ matrix.target.sfa_branch }}
+          path: sing-box-for-android
+
       - name: Setup OpenJDK
+        if: steps.sfa_check.outputs.exists == 'true'
         run: sudo apt update && sudo apt install -y openjdk-17-jdk-headless
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Decode Keystore
-        run: echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > ./sing-box-for-android/app/release.keystore
-
-      - name: Streamline "Update" module
+      - name: Apply SFA Streamline Patch (reF1nd only)
+        if: steps.sfa_check.outputs.exists == 'true' && contains(matrix.target.sfa_repo, 'reF1nd')
         run: |
-          cd ./sing-box-for-android/
+          cd sing-box-for-android
+          # 借鑑代碼中的精簡更新模塊補丁
           echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQKCi0g6ZqQ6JeP6K6+572u6aG16Z2i5Lit5bqU55So5Y2h54mH77yM5LiN5Yig6Zmk5Luj56CB5LuF5bGP6JS95YWl5Y+jCi0g56aB55So5omL5Yqo5qOA5p+l5pu05paw5oyJ6ZKu5ZKM6Ieq5Yqo5pu05paw5byA5YWzCi0g56aB55So5bqU55So5ZCv5Yqo5pe255qE6Ieq5Yqo5pu05paw5qOA5p+lCi0tLQogLi4uL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IHwgMTMgKysrKysrKysrKysrKwogLi4uL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0ICAgIHwgIDggKysrLS0tLS0KIC4uLi9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QgICB8ICA3IC0tLS0tLS0KIDMgZmlsZXMgY2hhbmdlZCwgMTYgaW5zZXJ0aW9ucygrKSwgMTIgZGVsZXRpb25zKC0pCgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0CmluZGV4IDU3NDQyMmIuLjFiMWI2YzkgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9NYWluQWN0aXZpdHkua3QKQEAgLTE5MSw2ICsxOTEsMTUgQEAgY2xhc3MgTWFpbkFjdGl2aXR5IDoKCiAgICAgICAgIGNvbm5lY3Rpb24ucmVjb25uZWN0KCkKCisgICAgICAgIC8vIOW8uuWItuemgeeUqOiHquWKqOabtOaWsOWKn+iDvQorICAgICAgICBTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQgPSBmYWxzZQorICAgICAgICAvLyDmoIforrDkuLrlt7Lmj5DnpLrov4fvvIzpmLLmraLmmL7npLrpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xlr7nor53moYYKKyAgICAgICAgU2V0dGluZ3MudXBkYXRlQ2hlY2tQcm9tcHRlZCA9IHRydWUKKyAgICAgICAgLy8g5riF6Zmk5Lu75L2V57yT5a2Y55qE5pu05paw54q25oCBCisgICAgICAgIFVwZGF0ZVN0YXRlLmNsZWFyKCkKKworICAgICAgICAvLyDoh6rliqjmm7TmlrDmo4Dmn6Xlt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgVXBkYXRlU3RhdGUubG9hZEZyb21DYWNoZSgpCiAgICAgICAgIGlmIChTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQpIHsKICAgICAgICAgICAgIGxpZmVjeWNsZVNjb3BlLmxhdW5jaChEaXNwYXRjaGVycy5JTykgewpAQCAtMjAyLDYgKzIxMSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgfQogICAgICAgICB9CisgICAgICAgICovCgogICAgICAgICBoYW5kbGVJbnRlbnQoaW50ZW50KQoKQEAgLTQ2NSw2ICs0NzUsOCBAQCBjbGFzcyBNYWluQWN0aXZpdHkgOgogICAgICAgICAgICAgKQogICAgICAgICB9CgorICAgICAgICAvLyDpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xmj5DnpLrlr7nor53moYblt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBjaGVjayBwcm9tcHQgZGlhbG9nIChzaG93biBvbmx5IG9uY2Ugb24gZmlyc3QgbGF1bmNoKQogICAgICAgICB2YXIgc2hvd1VwZGF0ZUNoZWNrUHJvbXB0IGJ5IHJlbWVtYmVyIHsgbXV0YWJsZVN0YXRlT2YoIVNldHRpbmdzLnVwZGF0ZUNoZWNrUHJvbXB0ZWQpIH0KICAgICAgICAgaWYgKHNob3dVcGRhdGVDaGVja1Byb21wdCkgewpAQCAtNTEzLDYgKzUyNSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICkKICAgICAgICAgfQorICAgICAgICAqLwoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBhdmFpbGFibGUgZGlhbG9nCiAgICAgICAgIHZhbCB1cGRhdGVJbmZvIGJ5IFVwZGF0ZVN0YXRlLnVwZGF0ZUluZm8KZGlmZiAtLWdpdCBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdAppbmRleCA4YWE2ZDIxLi4xYzJmNzlhIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvQXBwU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0CkBAIC00MDEsMTEgKzQwMSw2IEBAIGZ1biBBcHBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KSB7IFRleHQoIk5ldyIpIH0KLSAgICAgICAgICAgICAgICAgICAgICAgIH0KLSAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgbW9kaWZpZXIgPQogICAgICAgICAgICAgICAgICAgICBNb2RpZmllcgogICAgICAgICAgICAgICAgICAgICAgICAgLmNsaXAoUm91bmRlZENvcm5lclNoYXBlKHRvcFN0YXJ0ID0gMTIuZHAsIHRvcEVuZCA9IDEyLmRwKSksCkBAIC01MzUsNiArNTMwLDggQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgIH0KICAgICAgICAgfQoKKyAgICAgICAgLy8g5bey6ZqQ6JeP5pu05paw6K6+572u5ZKM5pON5L2c5Y2h54mHCisgICAgICAgIC8qCiAgICAgICAgIFNwYWNlcihtb2RpZmllciA9IE1vZGlmaWVyLmhlaWdodCg4LmRwKSkKCiAgICAgICAgIFRleHQoCkBAIC05OTUsNiArOTkyLDcgQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICB9CiAgICAgICAgIH0KKyAgICAgICAgKi8KICAgICB9CiB9CgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0CmluZGV4IGY0NjhmNTEuLjJhMzUzMTIgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QKQEAgLTUxLDcgKzUxLDYgQEAgaW1wb3J0IGFuZHJvaWR4Lm5hdmlnYXRpb24uTmF2Q29udHJvbGxlcgogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS5SCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLmNvbXBvc2UudG9wYmFyLk92ZXJyaWRlVG9wQmFyCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLmRhdGFiYXNlLlNldHRpbmdzCi1pbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLnVwZGF0ZS5VcGRhdGVTdGF0ZQogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS51dGlscy5Ib29rTW9kdWxlVXBkYXRlTm90aWZpZXIKIGltcG9ydCBpby5uZWtvaGFzZWthaS5zZmEudXRpbHMuSG9va1N0YXR1c0NsaWVudAoKQEAgLTY2LDcgKzY1LDYgQEAgZnVuIFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKCiAgICAgdmFsIGNvbnRleHQgPSBMb2NhbENvbnRleHQuY3VycmVudAogICAgIHZhbCBzY29wZSA9IHJlbWVtYmVyQ29yb3V0aW5lU2NvcGUoKQotICAgIHZhbCBoYXNVcGRhdGUgYnkgVXBkYXRlU3RhdGUuaGFzVXBkYXRlCiAgICAgdmFsIGhvb2tTdGF0dXMgYnkgSG9va1N0YXR1c0NsaWVudC5zdGF0dXMuY29sbGVjdEFzU3RhdGUoKQogICAgIHZhbCBoYXNQZW5kaW5nUHJpdmlsZWdlRG93bmdyYWRlID0gSG9va01vZHVsZVVwZGF0ZU5vdGlmaWVyLmlzRG93bmdyYWRlKGhvb2tTdGF0dXMpCiAgICAgdmFsIGhhc1BlbmRpbmdQcml2aWxlZ2VVcGRhdGUgPSBIb29rTW9kdWxlVXBkYXRlTm90aWZpZXIuaXNVcGdyYWRlKGhvb2tTdGF0dXMpCkBAIC0xMTUsMTEgKzExMyw2IEBAIGZ1biBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KQotICAgICAgICAgICAgICAgICAgICAgICAgfQotICAgICAgICAgICAgICAgICAgICB9LAogICAgICAgICAgICAgICAgICAgICBtb2RpZmllciA9CiAgICAgICAgICAgICAgICAgICAgIE1vZGlmaWVyCiAgICAgICAgICAgICAgICAgICAgICAgICAuY2xpcChSb3VuZGVkQ29ybmVyU2hhcGUodG9wU3RhcnQgPSAxMi5kcCwgdG9wRW5kID0gMTIuZHApKQotLQoyLjUwLjEgKEFwcGxlIEdpdC0xNTUpCg==" | base64 -d > ./streamline-update.patch
-          git apply ./streamline-update.patch || echo "Patching failed, but continuing..."
+          git apply ./streamline-update.patch || true
 
       - name: Build libbox.aar
+        if: steps.sfa_check.outputs.exists == 'true'
         run: |
-          cd ./sing-box/
+          cd sing-box
           make lib_install
           go install golang.org/x/mobile/cmd/gomobile@latest
           export PATH="$PATH:$(go env GOPATH)/bin"
-          gomobile bind -v -o libbox.aar -target android -androidapi 23 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false -tags="${{ env.ANDROID_TAGS }}" -ldflags="-X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0" ./experimental/libbox/
+          
+          FINAL_TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_ANDROID_EXTRA }}"
+          if [ "${{ github.event.inputs.enable_naive }}" = "true" ]; then FINAL_TAGS="${FINAL_TAGS},with_naive_outbound"; fi
+          
+          gomobile bind -v -o libbox.aar -target android -androidapi 23 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false -tags="${FINAL_TAGS}" -ldflags="-X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0" ./experimental/libbox
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: Build APK
+      - name: Decode Keystore
+        if: steps.sfa_check.outputs.exists == 'true'
+        run: echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > ./sing-box-for-android/app/release.keystore
+
+      - name: Build and Rename APK
+        if: steps.sfa_check.outputs.exists == 'true'
         run: |
-          mkdir -p ./sing-box-for-android/app/libs/
-          cp -f ./sing-box/libbox.aar ./sing-box-for-android/app/libs/
-          cd ./sing-box-for-android/
+          mkdir -p sing-box-for-android/app/libs
+          cp sing-box/libbox.aar sing-box-for-android/app/libs/
+          cd sing-box-for-android
           chmod +x gradlew
           ./gradlew :app:assembleOtherRelease \
             -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
             -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASS }}" \
             -Pandroid.injected.signing.key.alias="${{ secrets.ALIAS_NAME }}" \
             -Pandroid.injected.signing.key.password="${{ secrets.ALIAS_PASS }}"
-
-      - name: Rename and Upload APK
-        run: |
-          mkdir -p ./apks
-          for file in ./sing-box-for-android/app/build/outputs/apk/other/release/*.apk; do
-            mv -f "$file" "./apks/sfa-${{ matrix.target.id }}.apk"
+          
+          mkdir -p ../apks
+          for file in app/build/outputs/apk/other/release/*.apk; do
+            mv -f "$file" "../apks/SFA-${{ matrix.target.id }}.apk"
           done
-      - uses: actions/upload-artifact@v4
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+
+      - name: Upload APK
+        if: steps.sfa_check.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
         with:
-          name: sfa-${{ matrix.target.id }}-apk
-          path: ./apks/*.apk
+          name: apk-${{ matrix.target.id }}
+          path: apks/*.apk
 
   publish:
     needs: [check, build_core, build_android]
@@ -222,11 +279,10 @@ jobs:
         with:
           path: ./tmp/
 
-      - name: Process, Compress & Organize
+      - name: Process and Compress
         run: |
           mkdir -p ./release_files
           
-          # 處理二進制內核 (加 UPX)
           for dir in ./tmp/core-*; do
             if [[ -d "$dir" ]]; then
               base=$(basename "$dir" | sed 's/core-//')
@@ -240,43 +296,81 @@ jobs:
             fi
           done
           
-          # 處理 APK
-          for dir in ./tmp/sfa-*-apk; do
-            if [[ -d "$dir" ]]; then
-              mv "$dir"/*.apk release_files/
-            fi
+          for dir in ./tmp/apk-*; do
+            if [[ -d "$dir" ]]; then mv "$dir"/*.apk release_files/; fi
           done
 
-      - name: Create or Update Release
+          # 整合 markers 創建發布說明
+          echo -e "# Sing-Box 自動編譯發布\n" > release_body.txt
+          if [ -f "./tmp/update-markers/markers.txt" ]; then
+            cat ./tmp/update-markers/markers.txt >> release_body.txt
+          fi
+
+      - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: sing-box
           name: sing-box
-          body_path: ./tmp/release-body/release_body.txt
+          body_path: release_body.txt
           files: ./release_files/*
           repo_token: ${{ secrets.GITHUB_TOKEN }}
 
-  release-tg:
+  telegram_notify:
     needs: publish
     runs-on: ubuntu-latest
-    if: always() && env.ENABLE_TG == 'true'
+    if: always() && github.event.inputs.enable_telegram == 'true'
     steps:
-      - name: Download artifacts
+      - name: Download artifacts for TG
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Upload to Telegram
+      - name: Telegram notification
         uses: xz-dev/TelegramFileUploader@v1
         with:
           to-who: "${{ secrets.CHAT_ID }}"
           message: |
-            **Sing-Box & SFA 更新通知**
-            檢測到分支更新，二進制文件與 APK 已經編譯打包完畢。
-          files: |
-            dist/*
+            **sing-box Build Completed**
+            更新已檢測並編譯打包完畢。
+            [Download Releases](https://github.com/${{ github.repository }}/releases/tag/sing-box)
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+  update_readme:
+    needs: publish
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Generate README
+        run: |
+          cat > README.md <<EOF
+          # sing-box 自动编译
+
+          自动检测并编译 [SagerNet/sing-box](https://github.com/SagerNet/sing-box) 和 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的多个版本。
+
+          ## 支持平台与特性
+          - 架构支持完善 (amd64, arm, mips)
+          - SFA Android 客戶端同步編譯
+          - 自動動態拉取最新 Tag (取代脆弱的 API 檢測)
+          - reF1nd 分支默認合併防中斷與日誌優化補丁
+
+          ## 编译标签
+          \`\`\`text
+          ${{ env.TAGS_COMMON }}
+          \`\`\`
+
+          [前往 Releases 页面下载](https://github.com/${{ github.repository }}/releases/tag/sing-box)
+          EOF
+
+      - name: Commit README
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add README.md
+          git commit -m "Update README" || echo "No changes"
+          git push
