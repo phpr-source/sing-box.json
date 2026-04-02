@@ -54,9 +54,7 @@ jobs:
             local sfa_branch=$5
 
             echo "Checking $id ($repo@$branch)..."
-            if ! git clone -b "$branch" --depth 1 "https://github.com/$repo.git" "$id" 2>/dev/null; then
-              return
-            fi
+            if ! git clone -b "$branch" --depth 1 "https://github.com/$repo.git" "$id" 2>/dev/null; then return; fi
 
             cd "$id"
             local ver=$(CGO_ENABLED=0 go run ./cmd/internal/read_tag 2>/dev/null || echo "unknown")
@@ -122,7 +120,6 @@ jobs:
       GOAMD64: ${{ matrix.platform.goamd64 }}
       GOARM: ${{ matrix.platform.goarm }}
       GOMIPS: ${{ matrix.platform.gomips }}
-      CGO_ENABLED: 0
     steps:
       - name: Checkout Core
         uses: actions/checkout@v4
@@ -142,20 +139,26 @@ jobs:
           curl -sfL https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box/make_log_better.patch | git apply -v || true
           curl -sfL https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box/fix_interrupt_connections.patch | git apply -v || true
 
-      - name: Configure Tags
-        id: tags
+      - name: Configure Tags and CGO
+        id: env
         run: |
           FINAL_TAGS="${{ env.TAGS_COMMON }}"
+          CGO_VAL=0
           if [ "${{ github.event.inputs.enable_naive }}" = "true" ]; then
             FINAL_TAGS="${FINAL_TAGS},with_naive_outbound"
             if [ "${{ matrix.platform.goos }}" = "windows" ]; then
               FINAL_TAGS="${FINAL_TAGS},with_purego"
+            elif [ "${{ matrix.platform.goos }}" = "linux" ]; then
+              CGO_VAL=1
             fi
           fi
           echo "tags=${FINAL_TAGS}" >> $GITHUB_OUTPUT
+          echo "cgo=${CGO_VAL}" >> $GITHUB_OUTPUT
 
       - name: Build Core
-        run: go build -v -trimpath -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid=" -tags "${{ steps.tags.outputs.tags }}" ./cmd/sing-box
+        run: |
+          export CGO_ENABLED=${{ steps.env.outputs.cgo }}
+          go build -v -trimpath -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid=" -tags "${{ steps.env.outputs.tags }}" ./cmd/sing-box
 
       - name: Upload Core
         uses: actions/upload-artifact@v4
@@ -179,16 +182,6 @@ jobs:
           ref: ${{ matrix.target.branch }}
           path: sing-box
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Setup Android NDK
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r28
-
       - name: Check if SFA branch exists
         id: sfa_check
         run: |
@@ -206,6 +199,18 @@ jobs:
           ref: ${{ matrix.target.sfa_branch }}
           path: sing-box-for-android
 
+      - name: Setup Go
+        if: steps.sfa_check.outputs.exists == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Setup Android NDK
+        if: steps.sfa_check.outputs.exists == 'true'
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
+
       - name: Setup OpenJDK
         if: steps.sfa_check.outputs.exists == 'true'
         run: sudo apt update && sudo apt install -y openjdk-17-jdk-headless
@@ -214,9 +219,32 @@ jobs:
         if: steps.sfa_check.outputs.exists == 'true' && contains(matrix.target.sfa_repo, 'reF1nd')
         run: |
           cd sing-box-for-android
-          # 借鑑代碼中的精簡更新模塊補丁
           echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQKCi0g6ZqQ6JeP6K6+572u6aG16Z2i5Lit5bqU55So5Y2h54mH77yM5LiN5Yig6Zmk5Luj56CB5LuF5bGP6JS95YWl5Y+jCi0g56aB55So5omL5Yqo5qOA5p+l5pu05paw5oyJ6ZKu5ZKM6Ieq5Yqo5pu05paw5byA5YWzCi0g56aB55So5bqU55So5ZCv5Yqo5pe255qE6Ieq5Yqo5pu05paw5qOA5p+lCi0tLQogLi4uL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IHwgMTMgKysrKysrKysrKysrKwogLi4uL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0ICAgIHwgIDggKysrLS0tLS0KIC4uLi9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QgICB8ICA3IC0tLS0tLS0KIDMgZmlsZXMgY2hhbmdlZCwgMTYgaW5zZXJ0aW9ucygrKSwgMTIgZGVsZXRpb25zKC0pCgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0CmluZGV4IDU3NDQyMmIuLjFiMWI2YzkgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9NYWluQWN0aXZpdHkua3QKQEAgLTE5MSw2ICsxOTEsMTUgQEAgY2xhc3MgTWFpbkFjdGl2aXR5IDoKCiAgICAgICAgIGNvbm5lY3Rpb24ucmVjb25uZWN0KCkKCisgICAgICAgIC8vIOW8uuWItuemgeeUqOiHquWKqOabtOaWsOWKn+iDvQorICAgICAgICBTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQgPSBmYWxzZQorICAgICAgICAvLyDmoIforrDkuLrlt7Lmj5DnpLrov4fvvIzpmLLmraLmmL7npLrpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xlr7nor53moYYKKyAgICAgICAgU2V0dGluZ3MudXBkYXRlQ2hlY2tQcm9tcHRlZCA9IHRydWUKKyAgICAgICAgLy8g5riF6Zmk5Lu75L2V57yT5a2Y55qE5pu05paw54q25oCBCisgICAgICAgIFVwZGF0ZVN0YXRlLmNsZWFyKCkKKworICAgICAgICAvLyDoh6rliqjmm7TmlrDmo4Dmn6Xlt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgVXBkYXRlU3RhdGUubG9hZEZyb21DYWNoZSgpCiAgICAgICAgIGlmIChTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQpIHsKICAgICAgICAgICAgIGxpZmVjeWNsZVNjb3BlLmxhdW5jaChEaXNwYXRjaGVycy5JTykgewpAQCAtMjAyLDYgKzIxMSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgfQogICAgICAgICB9CisgICAgICAgICovCgogICAgICAgICBoYW5kbGVJbnRlbnQoaW50ZW50KQoKQEAgLTQ2NSw2ICs0NzUsOCBAQCBjbGFzcyBNYWluQWN0aXZpdHkgOgogICAgICAgICAgICAgKQogICAgICAgICB9CgorICAgICAgICAvLyDpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xmj5DnpLrlr7nor53moYblt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBjaGVjayBwcm9tcHQgZGlhbG9nIChzaG93biBvbmx5IG9uY2Ugb24gZmlyc3QgbGF1bmNoKQogICAgICAgICB2YXIgc2hvd1VwZGF0ZUNoZWNrUHJvbXB0IGJ5IHJlbWVtYmVyIHsgbXV0YWJsZVN0YXRlT2YoIVNldHRpbmdzLnVwZGF0ZUNoZWNrUHJvbXB0ZWQpIH0KICAgICAgICAgaWYgKHNob3dVcGRhdGVDaGVja1Byb21wdCkgewpAQCAtNTEzLDYgKzUyNSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICkKICAgICAgICAgfQorICAgICAgICAqLwoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBhdmFpbGFibGUgZGlhbG9nCiAgICAgICAgIHZhbCB1cGRhdGVJbmZvIGJ5IFVwZGF0ZVN0YXRlLnVwZGF0ZUluZm8KZGlmZiAtLWdpdCBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdAppbmRleCA4YWE2ZDIxLi4xYzJmNzlhIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvQXBwU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0CkBAIC00MDEsMTEgKzQwMSw2IEBAIGZ1biBBcHBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KSB7IFRleHQoIk5ldyIpIH0KLSAgICAgICAgICAgICAgICAgICAgICAgIH0KLSAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgbW9kaWZpZXIgPQogICAgICAgICAgICAgICAgICAgICBNb2RpZmllcgogICAgICAgICAgICAgICAgICAgICAgICAgLmNsaXAoUm91bmRlZENvcm5lclNoYXBlKHRvcFN0YXJ0ID0gMTIuZHAsIHRvcEVuZCA9IDEyLmRwKSksCkBAIC01MzUsNiArNTMwLDggQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgIH0KICAgICAgICAgfQoKKyAgICAgICAgLy8g5bey6ZqQ6JeP5pu05paw6K6+572u5ZKM5pON5L2c5Y2h54mHCisgICAgICAgIC8qCiAgICAgICAgIFNwYWNlcihtb2RpZmllciA9IE1vZGlmaWVyLmhlaWdodCg4LmRwKSkKCiAgICAgICAgIFRleHQoCkBAIC05OTUsNiArOTkyLDcgQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICB9CiAgICAgICAgIH0KKyAgICAgICAgKi8KICAgICB9CiB9CgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0CmluZGV4IGY0NjhmNTEuLjJhMzUzMTIgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QKQEAgLTUxLDcgKzUxLDYgQEAgaW1wb3J0IGFuZHJvaWR4Lm5hdmlnYXRpb24uTmF2Q29udHJvbGxlcgogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS5SCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLmNvbXBvc2UudG9wYmFyLk92ZXJyaWRlVG9wQmFyCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLmRhdGFiYXNlLlNldHRpbmdzCi1pbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLnVwZGF0ZS5VcGRhdGVTdGF0ZQogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS51dGlscy5Ib29rTW9kdWxlVXBkYXRlTm90aWZpZXIKIGltcG9ydCBpby5uZWtvaGFzZWthaS5zZmEudXRpbHMuSG9va1N0YXR1c0NsaWVudAoKQEAgLTY2LDcgKzY1LDYgQEAgZnVuIFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKCiAgICAgdmFsIGNvbnRleHQgPSBMb2NhbENvbnRleHQuY3VycmVudAogICAgIHZhbCBzY29wZSA9IHJlbWVtYmVyQ29yb3V0aW5lU2NvcGUoKQotICAgIHZhbCBoYXNVcGRhdGUgYnkgVXBkYXRlU3RhdGUuaGFzVXBkYXRlCiAgICAgdmFsIGhvb2tTdGF0dXMgYnkgSG9va1N0YXR1c0NsaWVudC5zdGF0dXMuY29sbGVjdEFzU3RhdGUoKQogICAgIHZhbCBoYXNQZW5kaW5nUHJpdmlsZWdlRG93bmdyYWRlID0gSG9va01vZHVsZVVwZGF0ZU5vdGlmaWVyLmlzRG93bmdyYWRlKGhvb2tTdGF0dXMpCiAgICAgdmFsIGhhc1BlbmRpbmdQcml2aWxlZ2VVcGRhdGUgPSBIb29rTW9kdWxlVXBkYXRlTm90aWZpZXIuaXNVcGdyYWRlKGhvb2tTdGF0dXMpCkBAIC0xMTUsMTEgKzExMyw2IEBAIGZ1biBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KQotICAgICAgICAgICAgICAgICAgICAgICAgfQotICAgICAgICAgICAgICAgICAgICB9LAogICAgICAgICAgICAgICAgICAgICBtb2RpZmllciA9CiAgICAgICAgICAgICAgICAgICAgIE1vZGlmaWVyCiAgICAgICAgICAgICAgICAgICAgICAgICAuY2xpcChSb3VuZGVkQ29ybmVyU2hhcGUodG9wU3RhcnQgPSAxMi5kcCwgdG9wRW5kID0gMTIuZHApKQotLQoyLjUwLjEgKEFwcGxlIEdpdC0xNTUpCg==" | base64 -d > ./streamline-update.patch
           git apply ./streamline-update.patch || true
+
+      - name: Apply Advanced SFA Tweaks (Spoof & Dynamism)
+        if: steps.sfa_check.outputs.exists == 'true'
+        run: |
+          cd sing-box-for-android
+          # 1. 動態更新版本號
+          VERSION_CODE=$(( ($(date +%s) - 1735689600) / 60 ))
+          printf 'VERSION_CODE=%s\nVERSION_NAME=%s\nGO_VERSION=%s\n' "$VERSION_CODE" "${{ matrix.target.ver }}" "${{ env.GO_VERSION }}" > version.properties
+          
+          # 2. 替換包名為防檢測名稱
+          GRADLE_FILE="app/build.gradle.kts"
+          if [ -f "$GRADLE_FILE" ]; then
+            sed -i 's/applicationId\s*=\s*".*"/applicationId = "com.android.internal.net"/' "$GRADLE_FILE"
+          else
+            GRADLE_FILE="app/build.gradle"
+            sed -i '/applicationId/s/io\..*/com.android.internal.net/' "$GRADLE_FILE" || true
+          fi
+
+          # 3. 替換更新源為當前倉庫
+          UPDATE_FILE="app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt"
+          if [ -f "$UPDATE_FILE" ]; then
+            sed -i 's|reF1nd/sing-box-releases|${{ github.repository }}|g' "$UPDATE_FILE"
+            sed -i 's|SagerNet/sing-box|${{ github.repository }}|g' "$UPDATE_FILE"
+          fi
 
       - name: Build libbox.aar
         if: steps.sfa_check.outputs.exists == 'true'
@@ -229,6 +257,7 @@ jobs:
           FINAL_TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_ANDROID_EXTRA }}"
           if [ "${{ github.event.inputs.enable_naive }}" = "true" ]; then FINAL_TAGS="${FINAL_TAGS},with_naive_outbound"; fi
           
+          export CGO_ENABLED=1
           gomobile bind -v -o libbox.aar -target android -androidapi 23 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false -tags="${FINAL_TAGS}" -ldflags="-X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0" ./experimental/libbox
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -300,7 +329,6 @@ jobs:
             if [[ -d "$dir" ]]; then mv "$dir"/*.apk release_files/; fi
           done
 
-          # 整合 markers 創建發布說明
           echo -e "# Sing-Box 自動編譯發布\n" > release_body.txt
           if [ -f "./tmp/update-markers/markers.txt" ]; then
             cat ./tmp/update-markers/markers.txt >> release_body.txt
@@ -314,6 +342,14 @@ jobs:
           body_path: release_body.txt
           files: ./release_files/*
           repo_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Delete old workflow runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --paginate "repos/${{ github.repository }}/actions/runs?per_page=100" \
+            --jq '.workflow_runs[] | select(.id != ${{ github.run_id }}) | .id' | \
+            xargs -I {} gh api -X DELETE "repos/${{ github.repository }}/actions/runs/{}" || true
 
   telegram_notify:
     needs: publish
@@ -355,9 +391,9 @@ jobs:
 
           ## 支持平台与特性
           - 架构支持完善 (amd64, arm, mips)
-          - SFA Android 客戶端同步編譯
-          - 自動動態拉取最新 Tag (取代脆弱的 API 檢測)
-          - reF1nd 分支默認合併防中斷與日誌優化補丁
+          - SFA Android 客戶端同步編譯 (自帶包名偽裝與在線更新劫持)
+          - 自動動態拉取最新 Tag，使用時間戳控制 Android 版本升級覆蓋
+          - CGO 環境動態適配，舊工作流自動清理
 
           ## 编译标签
           \`\`\`text
