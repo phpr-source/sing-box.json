@@ -2,7 +2,7 @@
 
 > 自動檢測並編譯 [SagerNet/sing-box](https://github.com/SagerNet/sing-box)、[reF1nd/sing-box](https://github.com/reF1nd/sing-box) 和 [PuerNya/sing-box](https://github.com/PuerNya/sing-box)
 
-## 📦 最新版本狀態 (2026-04-02 19:17 UTC)
+## 📦 最新版本狀態 (2026-04-03 02:43 UTC)
 
 
 - ✨ 更新 **[SagerNet_Oldstable](https://github.com/SagerNet/sing-box/tree/oldstable)** 至 `v1.13.5`，發佈於 2026-03-24
