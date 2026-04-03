@@ -1,0 +1,1 @@
+declare -A EXPECTED_SHA256
