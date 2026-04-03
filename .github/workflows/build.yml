@@ -8,6 +8,11 @@ on:
         required: false
         type: boolean
         default: false
+      override_version:
+        description: "Override version (leave empty for auto-detect)"
+        required: false
+        type: string
+        default: ""
       enable_telegram:
         description: "Enable Telegram notification"
         required: false
@@ -25,17 +30,23 @@ on:
       - main
     paths-ignore:
       - "README.md"
-      - ".github/workflows/**"
+      - "LICENSE"
+      - ".github/workflows/delete-old-workflows.yml"
+      - ".github/workflows/update-dashboard.yml"
+      - ".github/workflows/update-adguardhome.yml"
+      - ".github/workflows/update-mihomo.yml"
 
 permissions:
   contents: write
   actions: write
 
 env:
-  TAGS_SAGERNET: "with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard"
-  TAGS_REF1ND: "with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api"
-  TAGS_PUERNYA: "with_quic,with_dhcp,with_wireguard,with_shadowsocksr,with_ech,with_utls,with_clash_api,with_gvisor"
+  TAGS_SAGERNET_BASE: "with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard,badlinkname"
+  TAGS_REF1ND_BASE: "with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard,badlinkname"
+  TAGS_PUERNYA: "with_quic,with_dhcp,with_wireguard,with_shadowsocksr,with_ech,with_utls,with_clash_api,with_gvisor,badlinkname"
   TAGS_ANDROID_EXTRA: "with_conntrack"
+  TAGS_NEW: "tfogo_checklinkname0"
+  CURL_TIMEOUT: 15
 
 jobs:
   init:
@@ -43,16 +54,18 @@ jobs:
     outputs:
       go_version: ${{ steps.go.outputs.version }}
       start_time: ${{ steps.time.outputs.start }}
+      android_secrets_valid: ${{ steps.validate.outputs.android_secrets_valid }}
     steps:
       - name: Record Start Time
         id: time
-        run: echo "start=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_OUTPUT
+        run: echo "start=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
 
       - name: Get Go latest version
         id: go
-        run: echo "version=$(curl -sSL https://raw.githubusercontent.com/actions/go-versions/update-versions-manifest-file/versions-manifest.json | jq -r '.[0].version')" >> $GITHUB_OUTPUT
+        run: echo "version=$(curl -m ${CURL_TIMEOUT} -sSL https://raw.githubusercontent.com/actions/go-versions/update-versions-manifest-file/versions-manifest.json | jq -r '.[0].version')" >> $GITHUB_OUTPUT
 
       - name: Validate Secrets
+        id: validate
         env:
           ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE || '' }}
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || '' }}
@@ -63,140 +76,155 @@ jobs:
           API_ID: ${{ secrets.API_ID || '' }}
           API_HASH: ${{ secrets.API_HASH || '' }}
         run: |
-          MISSING_SECRETS=""
-          [ -z "$ANDROID_KEYSTORE" ] && MISSING_SECRETS="$MISSING_SECRETS ANDROID_KEYSTORE"
-          [ -z "$KEYSTORE_PASS" ] && MISSING_SECRETS="$MISSING_SECRETS KEYSTORE_PASS"
-          [ -z "$ALIAS_NAME" ] && MISSING_SECRETS="$MISSING_SECRETS ALIAS_NAME"
-          [ -z "$ALIAS_PASS" ] && MISSING_SECRETS="$MISSING_SECRETS ALIAS_PASS"
-          
           if [ "${{ github.event.inputs.enable_telegram }}" = "true" ]; then
-            [ -z "$TELEGRAM_BOT_TOKEN" ] && MISSING_SECRETS="$MISSING_SECRETS TELEGRAM_BOT_TOKEN"
-            [ -z "$CHAT_ID" ] && MISSING_SECRETS="$MISSING_SECRETS CHAT_ID"
-            [ -z "$API_ID" ] && MISSING_SECRETS="$MISSING_SECRETS API_ID"
-            [ -z "$API_HASH" ] && MISSING_SECRETS="$MISSING_SECRETS API_HASH"
+            if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$CHAT_ID" ] || [ -z "$API_ID" ] || [ -z "$API_HASH" ]; then
+              echo "::warning::Telegram secrets missing. Disabling Android build to be safe."
+              echo "android_secrets_valid=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
           fi
           
-          if [ -n "$MISSING_SECRETS" ]; then
-            echo "::warning::Missing secrets (may cause failures if targeting Android/Telegram):$MISSING_SECRETS"
+          if [ -z "$ANDROID_KEYSTORE" ] || [ -z "$KEYSTORE_PASS" ] || [ -z "$ALIAS_NAME" ] || [ -z "$ALIAS_PASS" ]; then
+            echo "::warning::Android Keystore secrets missing."
+            echo "android_secrets_valid=false" >> $GITHUB_OUTPUT
+          else
+            echo "android_secrets_valid=true" >> $GITHUB_OUTPUT
           fi
 
-  check:
+  puernya_version:
+    runs-on: ubuntu-latest
     needs: init
+    outputs:
+      version: ${{ steps.puernya.outputs.version }}
+      time: ${{ steps.puernya.outputs.time }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: PuerNya/sing-box
+          ref: building
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ needs.init.outputs.go_version }}
+
+      - name: Get PuerNya version via read_tag
+        id: puernya
+        run: |
+          set +e
+          git remote add sekai https://github.com/SagerNet/sing-box.git 2>/dev/null || true
+          git fetch --tags sekai 2>/dev/null || true
+          
+          puernya_version=$(CGO_ENABLED=0 go run ./cmd/internal/read_tag 2>/dev/null || echo "")
+          set -e
+          
+          if [ -z "$puernya_version" ]; then
+            echo "::warning::read_tag failed, using commit-based fallback"
+            puernya_version="building-$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+            puernya_time="$(date -u '+%Y-%m-%d')"
+          else
+            ver_commit=$(echo "${puernya_version}" | awk -F '-' '{print $3}')
+            if [ -n "$ver_commit" ] && [ "$ver_commit" != "" ] && [ "$ver_commit" != "null" ]; then
+              puernya_time=$(git log -1 --format=%cd --date=format:'%Y-%m-%d' "$ver_commit" 2>/dev/null || echo "")
+            else
+              puernya_time="$(date -u '+%Y-%m-%d')"
+            fi
+          fi
+          
+          echo "version=${puernya_version}" >> $GITHUB_OUTPUT
+          echo "time=${puernya_time}" >> $GITHUB_OUTPUT
+
+  check:
+    needs: [init, puernya_version]
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.check.outputs.matrix }}
       has_update: ${{ steps.check.outputs.has_update }}
     steps:
-      - name: Setup Go (Minimal)
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ needs.init.outputs.go_version }}
-
       - name: Check versions and generate matrix
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          
+          RATE_LIMIT_RESPONSE=$(curl -m ${CURL_TIMEOUT} -sSL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/rate_limit" 2>/dev/null || echo '{}')
+          RATE_LIMIT_REMAINING=$(echo "$RATE_LIMIT_RESPONSE" | jq -r '.resources.core.remaining' 2>/dev/null || echo "999")
+          if [ "$RATE_LIMIT_REMAINING" != "999" ] && [ -n "$RATE_LIMIT_REMAINING" ] && [ "$RATE_LIMIT_REMAINING" -lt 30 ] 2>/dev/null; then
+            echo "::warning::GitHub API rate limit low ($RATE_LIMIT_REMAINING remaining). Checks may be incomplete."
+          fi
+
           targets="[]"
           has_update="false"
           FORCE_BUILD="${{ github.event.inputs.force_build }}"
+          OVERRIDE_VERSION="${{ github.event.inputs.override_version }}"
           
-          current_release=$(curl -sSL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${{ github.repository }}/releases/tags/sing-box" | jq -r '.body // ""' 2>/dev/null || echo "")
+          current_release=$(curl -m ${CURL_TIMEOUT} -sSL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${{ github.repository }}/releases/tags/sing-box" | jq -r '.body // ""' 2>/dev/null || echo "")
           echo "" > release_notes.txt
 
           check_branch() {
-            local id=$1
-            local repo=$2
-            local branch=$3
-            local sfa_repo=$4
-            local sfa_branch=$5
+            local id="${1:-}"
+            local repo="${2:-}"
+            local branch="${3:-}"
+            local sfa_repo="${4:-}"
+            local sfa_branch="${5:-}"
             
-            local max_retries=3
-            local retry_count=0
-            local cloned="false"
-            while [ $retry_count -lt $max_retries ]; do
-              if git clone -b "$branch" --depth 1 "https://github.com/$repo.git" "$id" 2>/dev/null; then
-                cloned="true"
-                break
+            local ver="" time=""
+            
+            if [ -n "$OVERRIDE_VERSION" ]; then
+              ver="$OVERRIDE_VERSION"
+              time="$(date -u '+%Y-%m-%d')"
+            elif [[ "$id" == "PuerNya_Building" ]]; then
+              ver="${{ needs.puernya_version.outputs.version }}"
+              time="${{ needs.puernya_version.outputs.time }}"
+            else
+              local release_data=$(curl -m ${CURL_TIMEOUT} -sSL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$repo/releases" 2>/dev/null)
+              if [[ "$repo" == *"reF1nd"* ]]; then
+                local tag_data=$(curl -m ${CURL_TIMEOUT} -sSL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$repo/tags" 2>/dev/null)
+                if [[ "$branch" == *"testing"* ]]; then
+                  ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | contains("reF1nd") and test("alpha|beta|rc"))][0].name' | sed 's/^v//' 2>/dev/null || true)
+                else
+                  ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | contains("reF1nd") and (test("alpha|beta|rc") | not))][0].name' | sed 's/^v//' 2>/dev/null || true)
+                fi
               else
-                retry_count=$((retry_count + 1))
-                if [ $retry_count -lt $max_retries ]; then
-                  sleep 5
+                if [[ "$branch" == *"testing"* ]]; then
+                  ver=$(echo "$release_data" | jq -r '[.[] | select(.tag_name | test("alpha|beta|rc"))][0].tag_name' | sed 's/^v//' 2>/dev/null || true)
+                else
+                  ver=$(echo "$release_data" | jq -r '[.[] | select(.tag_name | (test("alpha|beta|rc") | not))][0].tag_name' | sed 's/^v//' 2>/dev/null || true)
                 fi
               fi
-            done
-            
-            if [ "$cloned" = "false" ]; then 
-              echo "::warning::[$id] Clone failed. Skipping."
-              return 
-            fi
-
-            cd "$id"
-            
-            if [[ "$repo" == *"PuerNya"* ]]; then
-              git remote add upstream https://github.com/SagerNet/sing-box.git 2>/dev/null || true
-              git fetch --tags upstream 2>/dev/null || true
-            fi
-            git fetch --tags --unshallow 2>/dev/null || true
-
-            local ver=""
-            
-            if [[ "$repo" == *"reF1nd"* ]]; then
-              if [[ "$branch" == *"testing"* ]] || [[ "$branch" == *"test"* ]]; then
-                ver=$(curl -sfL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$repo/tags" | jq -r '[.[] | select(.name | contains("reF1nd") and (test("alpha|beta|rc")))][0].name' 2>/dev/null | sed 's/^v//' || echo "")
-              else
-                ver=$(curl -sfL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$repo/tags" | jq -r '[.[] | select(.name | contains("reF1nd") and (contains("alpha") | not))][0].name' 2>/dev/null | sed 's/^v//' || echo "")
-              fi
-            elif [[ "$repo" == *"SagerNet"* ]]; then
-              if [[ "$branch" == *"testing"* ]] || [[ "$branch" == *"test"* ]]; then
-                ver=$(curl -sfL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$repo/releases" | jq -r '[.[] | select(.tag_name | test("alpha|beta|rc"))][0].tag_name' 2>/dev/null | sed 's/^v//' || echo "")
-              else
-                ver=$(curl -sfL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$repo/releases" | jq -r '[.[] | select(.tag_name | contains("alpha") | not)][0].tag_name' 2>/dev/null | sed 's/^v//' || echo "")
+              
+              if [ -n "$ver" ] && [ "$ver" != "null" ]; then
+                local commit_date=$(curl -m ${CURL_TIMEOUT} -sSL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$repo/commits/$branch" | jq -r '.commit.committer.date' 2>/dev/null)
+                [ -n "$commit_date" ] && [ "$commit_date" != "null" ] && time=$(date -u -d "$commit_date +8 hours" '+%Y-%m-%d' 2>/dev/null) || time="unknown"
               fi
             fi
 
-            if [ -z "$ver" ] || [ "$ver" = "unknown" ] || [ "$ver" = "null" ]; then
-              if command -v go >/dev/null 2>&1; then
-                ver=$(CGO_ENABLED=0 go run ./cmd/internal/read_tag 2>/dev/null || echo "")
-              fi
-              if [ -z "$ver" ] || [ "$ver" = "unknown" ]; then
-                ver=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "")
-              fi
-              if [ -z "$ver" ] || [ "$ver" = "unknown" ]; then
-                ver=$(curl -sfL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$repo/tags?per_page=1" | jq -r '[.[].name | select(test("alpha|beta|rc") | not)][0]' 2>/dev/null | sed 's/^v//' || echo "unknown")
-              fi
+            if [ -z "$ver" ] || [ "$ver" = "null" ] || [ -z "$time" ]; then
+              echo "::warning::[$id] Cannot read valid version or time via API. Skipping."
+              return 0
             fi
-            
-            local time=""
-            if [[ "$repo" == *"reF1nd"* ]] && [ "$ver" != "unknown" ] && [ -n "$ver" ]; then
-              local tag_sha=$(curl -sfL "https://api.github.com/repos/$repo/tags" | jq -r --arg v "v$ver" '.[] | select(.name == $v) | .commit.sha' 2>/dev/null)
-              if [ -n "$tag_sha" ] && [ "$tag_sha" != "null" ]; then
-                time=$(curl -sfL "https://api.github.com/repos/$repo/commits/$tag_sha" | jq -r '.commit.committer.date' 2>/dev/null | xargs -I {} date -d '{} +8 hours' '+%Y-%m-%d' 2>/dev/null || echo "")
-              fi
-            fi
-            if [ -z "$time" ]; then
-              time=$(git log -1 --format=%cd --date=format:'%Y-%m-%d' 2>/dev/null || echo "unknown")
-            fi
-            
-            cd ..
-            rm -rf "$id"
 
-            if [ "$ver" = "unknown" ]; then 
-              echo "::warning::[$id] Cannot read version. Skipping."
-              return 
+            if [[ "$sfa_repo" != "none" ]]; then
+              if ! git ls-remote --heads "https://github.com/${sfa_repo}.git" "$sfa_branch" &>/dev/null; then
+                echo "::warning::[$id] Android branch $sfa_repo/$sfa_branch not found. Disabling Android."
+                sfa_repo="none"
+                sfa_branch="none"
+              fi
             fi
             
-            local marker="$id|$ver|$time"
+            local display_name="$id"
+            local marker="$display_name|$ver|$time"
             local branch_url="https://github.com/$repo/tree/$branch"
             
-            if [ "$FORCE_BUILD" = "true" ]; then
+            if [ "$FORCE_BUILD" = "true" ] || [ -n "$OVERRIDE_VERSION" ]; then
               has_update="true"
-              echo "- 🔄 強制構建 **[$id]($branch_url)** \`v$ver\` ($time)" >> release_notes.txt
+              echo "- 🔄 強制構建 **[$display_name]($branch_url)** \`v$ver\` ($time)" >> release_notes.txt
               echo "$marker" >> markers.txt
               targets=$(echo "$targets" | jq -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" '. += [{"id": $id, "repo": $repo, "branch": $branch, "sfa_repo": $sfa_repo, "sfa_branch": $sfa_branch, "ver": $ver, "time": $time}]')
-            elif ! echo "$current_release" | grep -qF "${marker}"; then
+            elif ! echo "$current_release" | grep -q "${display_name}.*${ver}.*${time}"; then
               has_update="true"
-              echo "- ✨ 更新 **[$id]($branch_url)** 至 \`v$ver\`，發佈於 $time" >> release_notes.txt
+              echo "- ✨ 更新 **[$display_name]($branch_url)** 至 \`v$ver\`，發佈於 $time" >> release_notes.txt
               echo "$marker" >> markers.txt
               targets=$(echo "$targets" | jq -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" '. += [{"id": $id, "repo": $repo, "branch": $branch, "sfa_repo": $sfa_repo, "sfa_branch": $sfa_branch, "ver": $ver, "time": $time}]')
             fi
@@ -210,24 +238,33 @@ jobs:
           check_branch "reF1nd_Testing" "reF1nd/sing-box" "reF1nd-testing" "reF1nd/sing-box-for-android" "reF1nd-testing"
           check_branch "PuerNya_Building" "PuerNya/sing-box" "building" "none" "none"
 
-          MATRIX_JSON=$(echo "$targets" | jq -c .)
-          echo "matrix=${MATRIX_JSON}" >> $GITHUB_OUTPUT
-          echo "has_update=${has_update}" >> $GITHUB_OUTPUT
+          if [ ! -s release_notes.txt ]; then
+            echo "- 📝 自動構建完成（無版本變更檢測）" > release_notes.txt
+          fi
+          if [ ! -s markers.txt ]; then
+            echo "no-updates-$(date +%s)" > markers.txt
+          fi
+
+          VALIDATED_MATRIX=$(echo "$targets" | jq -c '[.[] | select(.ver != "" and .ver != null and .time != "" and .time != null)]')
+          echo "matrix=${VALIDATED_MATRIX}" >> $GITHUB_OUTPUT
           
-          if [ "$MATRIX_JSON" = "[]" ] || [ -z "$MATRIX_JSON" ]; then
-            echo "::notice::No updates detected, all versions are current."
+          if [ "$VALIDATED_MATRIX" = "[]" ] || [ -z "$VALIDATED_MATRIX" ]; then
+            echo "has_update=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_update=${has_update}" >> $GITHUB_OUTPUT
           fi
 
       - name: Generate Patch Hashes
         if: steps.check.outputs.has_update == 'true'
         run: |
+          set -euo pipefail
           mkdir -p .github
           echo "declare -A EXPECTED_SHA256" > .github/patch_hashes.sh
           
           if echo "${{ steps.check.outputs.matrix }}" | grep -q '"reF1nd"'; then
             BASE_URL="https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box"
             for patch in concurrent_dial make_log_better fix_interrupt_connections; do
-              content=$(curl -sfL "${BASE_URL}/${patch}.patch" || true)
+              content=$(curl -m ${CURL_TIMEOUT} -sfL "${BASE_URL}/${patch}.patch" || true)
               if [ -n "$content" ]; then
                 sha=$(echo "$content" | sha256sum | awk '{print $1}')
                 echo "EXPECTED_SHA256[$patch]=\"$sha\"" >> .github/patch_hashes.sh
@@ -237,7 +274,7 @@ jobs:
 
       - name: Upload Metadata
         if: steps.check.outputs.has_update == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: workflow-metadata
           path: |
@@ -247,9 +284,14 @@ jobs:
 
   build_core:
     needs: [init, check]
-    if: needs.check.outputs.has_update == 'true' && needs.check.outputs.matrix != '[]' && needs.check.outputs.matrix != ''
+    timeout-minutes: 30
+    if: >-
+      needs.check.outputs.has_update == 'true' &&
+      needs.check.outputs.matrix != '[]' &&
+      needs.check.outputs.matrix != ''
     strategy:
       fail-fast: false
+      max-parallel: 20
       matrix:
         target: ${{ fromJson(needs.check.outputs.matrix) }}
         platform:
@@ -275,136 +317,205 @@ jobs:
       CGO_ENABLED: 0
     steps:
       - name: Checkout Core
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ matrix.target.repo }}
           ref: ${{ matrix.target.branch }}
           path: sing-box
 
       - name: Download Metadata
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: workflow-metadata
           path: ./metadata/
 
-      - name: Fix sniff (PuerNya only)
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ needs.init.outputs.go_version }}
+        
+      - name: Go Build Cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('sing-box/go.sum') }}
+          restore-keys: |
+            go-${{ runner.os }}-
+
+      - name: Fix sniff
         if: contains(matrix.target.repo, 'PuerNya')
         run: |
           cd sing-box
           if [ -f "./experimental/clashapi/trafficontrol/tracker.go" ]; then
-            grep -q "sniffHosts" ./experimental/clashapi/trafficontrol/tracker.go && sed -i 's/sniffHosts/sniffHost/' ./experimental/clashapi/trafficontrol/tracker.go
+            grep -q "sniffHosts" ./experimental/clashapi/trafficontrol/tracker.go && sed -i 's/sniffHosts/sniffHost/' ./experimental/clashapi/trafficontrol/tracker.go || true
           fi
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ needs.init.outputs.go_version }}
-          cache: true
-          cache-dependency-path: sing-box/go.sum
 
       - name: Configure Tags and CGO
         id: env
         run: |
           if [[ "${{ matrix.target.repo }}" == *"reF1nd"* ]]; then
-            FINAL_TAGS="${{ env.TAGS_REF1ND }}"
+            BASE_TAGS="${{ env.TAGS_REF1ND_BASE }}"
           elif [[ "${{ matrix.target.repo }}" == *"PuerNya"* ]]; then
-            FINAL_TAGS="${{ env.TAGS_PUERNYA }}"
+            BASE_TAGS="${{ env.TAGS_PUERNYA }}"
           else
-            FINAL_TAGS="${{ env.TAGS_SAGERNET }}"
+            BASE_TAGS="${{ env.TAGS_SAGERNET_BASE }}"
           fi
           
+          if [[ "${{ matrix.target.branch }}" == *"testing"* ]] || [[ "${{ matrix.target.repo }}" == *"reF1nd"* ]] || [[ "${{ matrix.target.repo }}" == *"PuerNya"* ]]; then
+            BASE_TAGS="${BASE_TAGS},${{ env.TAGS_NEW }}"
+          fi
+          FINAL_TAGS="${BASE_TAGS}"
+          
+          CGO_VAL="0"
           ARCHIVE_SUFFIX=""
           if [ "${{ github.event.inputs.enable_naive }}" = "true" ]; then
             FINAL_TAGS="${FINAL_TAGS},with_naive_outbound"
             if [ "${{ matrix.platform.goos }}" = "windows" ]; then
               FINAL_TAGS="${FINAL_TAGS},with_purego"
             elif [ "${{ matrix.platform.goos }}" = "linux" ]; then
-              echo "CGO_ENABLED=1" >> $GITHUB_ENV
+              CGO_VAL="1"
               ARCHIVE_SUFFIX="-glibc"
             fi
           fi
           echo "tags=${FINAL_TAGS}" >> $GITHUB_OUTPUT
           echo "suffix=${ARCHIVE_SUFFIX}" >> $GITHUB_OUTPUT
+          echo "cgo_val=${CGO_VAL}" >> $GITHUB_OUTPUT
 
-      - name: Apply patches (reF1nd only)
+      - name: Apply patches
         if: contains(matrix.target.repo, 'reF1nd')
         run: |
+          set -euo pipefail
           cd sing-box
-          if [ -f "../metadata/.github/patch_hashes.sh" ]; then
-            source ../metadata/.github/patch_hashes.sh
-          else
-            echo "::error::Patch hashes missing!"
-            exit 1
-          fi
+          source ../metadata/.github/patch_hashes.sh || true
           
+          PATCH_FAILED=false
           for patch in concurrent_dial make_log_better fix_interrupt_connections; do
             url="https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box/${patch}.patch"
-            content=$(curl -sfL "$url" || echo "")
-            
-            if [ -z "$content" ]; then
-              echo "::warning::Failed to download ${patch}"
-              continue
-            fi
+            content=$(curl -m ${CURL_TIMEOUT} -sfL "$url" || echo "")
+            if [ -z "$content" ]; then continue; fi
             
             actual_sha=$(echo "$content" | sha256sum | awk '{print $1}')
-            expected_sha="${EXPECTED_SHA256[$patch]}"
+            expected_sha="${EXPECTED_SHA256[$patch]:-}"
             
             if [ -n "$expected_sha" ] && [ "$actual_sha" = "$expected_sha" ]; then
-              echo "$content" | git apply -v --whitespace=fix || echo "::warning::${patch} failed to apply"
+              echo "$content" | git apply -v --whitespace=fix || PATCH_FAILED=true
             elif [ -z "$expected_sha" ]; then
-              echo "::warning::No cached hash for ${patch}, applying without verification"
-              echo "$content" | git apply -v --whitespace=fix || echo "::warning::${patch} failed to apply"
+              echo "$content" | git apply -v --whitespace=fix || PATCH_FAILED=true
             else
-              echo "::error::SHA256 mismatch for ${patch}! Expected: $expected_sha Got: $actual_sha"
-              exit 1
+              echo "::error::Patch $patch SHA256 mismatch!"
+              PATCH_FAILED=true
             fi
           done
+          
+          if [ "$PATCH_FAILED" = "true" ]; then
+            echo "::error::Critical patch failed!"
+            exit 1
+          fi
 
-      - name: Clone cronet-go for Naive
+      - name: Setup ccache
+        if: github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: ${{ runner.os }}-cgo-${{ matrix.platform.goarch }}
+
+      - name: Cache cronet-go
         if: github.event.inputs.enable_naive == 'true'
-        timeout-minutes: 30
+        uses: actions/cache@v5
+        with:
+          path: ~/cronet-go
+          key: cronet-${{ runner.os }}-${{ matrix.platform.goarch }}-${{ hashFiles('sing-box/.github/CRONET_GO_VERSION') }}
+
+      - name: Setup cronet-go
+        if: github.event.inputs.enable_naive == 'true'
+        timeout-minutes: 15
         run: |
-          CRONET_GO_VERSION=$(cat sing-box/.github/CRONET_GO_VERSION 2>/dev/null || echo "main")
-          git init ~/cronet-go
-          git -C ~/cronet-go remote add origin https://github.com/sagernet/cronet-go.git
-          git -C ~/cronet-go fetch --depth=1 origin "$CRONET_GO_VERSION"
-          git -C ~/cronet-go checkout FETCH_HEAD
+          set -euo pipefail
+          if [ ! -d "$HOME/cronet-go/.git" ]; then
+            rm -rf "$HOME/cronet-go" || true
+            CRONET_GO_VERSION=$(cat sing-box/.github/CRONET_GO_VERSION 2>/dev/null || echo "main")
+            git init "$HOME/cronet-go"
+            git -C "$HOME/cronet-go" remote add origin https://github.com/sagernet/cronet-go.git
+            git -C "$HOME/cronet-go" fetch --depth=1 origin "$CRONET_GO_VERSION"
+            git -C "$HOME/cronet-go" checkout FETCH_HEAD
+          fi
           
           TARGET="${{ matrix.platform.goos }}/${{ matrix.platform.goarch }}"
           [ -n "${{ matrix.platform.goamd64 }}" ] && TARGET="${TARGET}/${{ matrix.platform.goamd64 }}"
           
           if [ "${{ matrix.platform.goos }}" = "linux" ]; then
-            git -C ~/cronet-go submodule update --init --recursive --depth=1 2>/dev/null || true
-            rm -f ~/cronet-go/naiveproxy/src/build/linux/sysroot_scripts/keyring.gpg 2>/dev/null || true
-            cd ~/cronet-go
+            git -C "$HOME/cronet-go" submodule update --init --recursive --depth=1 2>/dev/null || true
+            rm -f "$HOME/cronet-go/naiveproxy/src/build/linux/sysroot_scripts/keyring.gpg" 2>/dev/null || true
+            cd "$HOME/cronet-go"
             GPG_TTY=/dev/null ./naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh 2>/dev/null || true
-            cd ~/cronet-go
-            go run ./cmd/build-naive --target="$TARGET" download-toolchain 2>/dev/null || { echo "::warning::Failed to download Chromium toolchain for naive proxy"; exit 0; }
-            go run ./cmd/build-naive --target="$TARGET" env >> $GITHUB_ENV 2>/dev/null || true
+            go run ./cmd/build-naive --target="$TARGET" download-toolchain || exit 1
+            go run ./cmd/build-naive --target="$TARGET" env >> $GITHUB_ENV
           elif [ "${{ matrix.platform.goos }}" = "windows" ]; then
-            cd ~/cronet-go
-            CGO_ENABLED=0 go run -v ./cmd/build-naive extract-lib --target="$TARGET" -o "$GITHUB_WORKSPACE/sing-box/dist" 2>/dev/null || true
+            cd "$HOME/cronet-go"
+            CGO_ENABLED=0 go run -v ./cmd/build-naive extract-lib --target="windows/${{ matrix.platform.goarch }}" -o "$GITHUB_WORKSPACE/sing-box/dist" || exit 1
           fi
 
       - name: Build Core
+        env:
+          CGO_ENABLED: ${{ steps.env.outputs.cgo_val || '0' }}
         run: |
+          set -euo pipefail
           cd sing-box
           mkdir -p dist
-          go build -v -trimpath -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid= -checklinkname=0" -tags "${{ steps.env.outputs.tags }}" -o "dist/sing-box" ./cmd/sing-box
+          cp LICENSE dist/ 2>/dev/null || true
+          go build -v -trimpath -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0" -tags "${{ steps.env.outputs.tags }}" -o "dist/sing-box" ./cmd/sing-box
+          
+          if [ ! -f "dist/sing-box" ] && [ ! -f "dist/sing-box.exe" ]; then
+            echo "::error::Build failed - no output file found"
+            exit 1
+          fi
+
+      - name: Verify Binary Integrity
+        run: |
+          set -euo pipefail
+          cd sing-box/dist || exit 1
+          BIN_NAME="sing-box"
+          [ "${{ matrix.platform.goos }}" = "windows" ] && BIN_NAME="sing-box.exe"
+          
+          if [ ! -f "$BIN_NAME" ]; then exit 1; fi
+          chmod +x "$BIN_NAME" 2>/dev/null || true
+          
+          BIN_SIZE=$(stat -c%s "$BIN_NAME" 2>/dev/null || stat -f%z "$BIN_NAME" 2>/dev/null || echo 0)
+          if [ "$BIN_SIZE" -lt 1000000 ]; then exit 1; fi
+          
+          if [ "${{ matrix.platform.goos }}" = "linux" ] && [ "${{ matrix.platform.goarch }}" = "amd64" ]; then
+            ./"$BIN_NAME" version || exit 1
+          fi
+
+      - name: Generate Core Build Summary
+        if: always()
+        run: |
+          echo "### Core Build Matrix" >> $GITHUB_STEP_SUMMARY
+          echo "| Target | Platform | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ${{ matrix.target.id }} | ${{ matrix.platform.name }} | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Core
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: core-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}-${{ github.run_number }}
+          name: core-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
           path: sing-box/dist/*
 
   build_android:
     needs: [init, check]
-    if: needs.check.outputs.has_update == 'true' && needs.check.outputs.matrix != '[]' && needs.check.outputs.matrix != ''
+    timeout-minutes: 45
+    if: >-
+      needs.check.outputs.has_update == 'true' &&
+      needs.check.outputs.matrix != '[]' &&
+      needs.check.outputs.matrix != '' &&
+      needs.init.outputs.android_secrets_valid == 'true'
     strategy:
       fail-fast: false
       matrix:
         target: ${{ fromJson(needs.check.outputs.matrix) }}
+        android_arch:
+          - { GOARCH: arm64, ABI: arm64-v8a }
     runs-on: ubuntu-latest
     steps:
       - name: Check if SFA branch exists
@@ -416,13 +527,9 @@ jobs:
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Android Naive Warning
-        if: steps.sfa_check.outputs.exists == 'true' && github.event.inputs.enable_naive == 'true'
-        run: echo "::warning::⚠️ Android builds will NOT include naive proxy support."
-
       - name: Checkout Core
         if: steps.sfa_check.outputs.exists == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ matrix.target.repo }}
           ref: ${{ matrix.target.branch }}
@@ -430,7 +537,7 @@ jobs:
 
       - name: Checkout SFA
         if: steps.sfa_check.outputs.exists == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ matrix.target.sfa_repo }}
           ref: ${{ matrix.target.sfa_branch }}
@@ -438,11 +545,20 @@ jobs:
 
       - name: Setup Go
         if: steps.sfa_check.outputs.exists == 'true'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ needs.init.outputs.go_version }}
-          cache: true
-          cache-dependency-path: sing-box/go.sum
+          
+      - name: Go Build Cache
+        if: steps.sfa_check.outputs.exists == 'true'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-android-${{ hashFiles('sing-box/go.sum') }}
+          restore-keys: |
+            go-${{ runner.os }}-android-
 
       - name: Setup Android NDK
         if: steps.sfa_check.outputs.exists == 'true'
@@ -451,40 +567,58 @@ jobs:
         with:
           ndk-version: r28
 
-      - name: Export NDK path to global env
+      - name: Verify NDK
         if: steps.sfa_check.outputs.exists == 'true'
-        run: echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
-
-      - name: Verify NDK installation
-        if: steps.sfa_check.outputs.exists == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          if [ -z "$ANDROID_NDK_HOME" ]; then
-            echo "::error::ANDROID_NDK_HOME is not set"
+          if [ -z "$ANDROID_NDK_HOME" ] || [ ! -f "$ANDROID_NDK_HOME/ndk-build" ]; then
             exit 1
           fi
-          if [ ! -f "$ANDROID_NDK_HOME/ndk-build" ]; then
-            echo "::error::NDK not found at $ANDROID_NDK_HOME"
-            exit 1
-          fi
-          echo "NDK verified at $ANDROID_NDK_HOME"
 
-      - name: Setup OpenJDK & Gradle Cache
+      - name: Setup OpenJDK
         if: steps.sfa_check.outputs.exists == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
-          cache: 'gradle'
+
+      - name: Custom Gradle Cache
+        if: steps.sfa_check.outputs.exists == 'true'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('sing-box-for-android/**/*.gradle*', 'sing-box-for-android/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
 
       - name: Calculate Version Code
         if: steps.sfa_check.outputs.exists == 'true'
         id: version_code
         run: VERSION_CODE=$(( ($(date +%s) - 1735689600) / 60 )) && echo "code=${VERSION_CODE}" >> $GITHUB_OUTPUT
 
-      - name: Apply Streamline & Tweaks
+      - name: Streamline "Update" module & Apply Tweaks
         if: steps.sfa_check.outputs.exists == 'true'
         run: |
+          set -euo pipefail
           cd sing-box-for-android
+          
+          if [[ "${{ matrix.target.repo }}" == *"reF1nd"* ]]; then
+            if [ -f "../.github/patches/streamline-update.patch" ]; then
+              git apply ../.github/patches/streamline-update.patch 2>/dev/null || echo "::warning::Streamline patch failed"
+            else
+              cat << 'EOF' | base64 -d > /tmp/patch.diff
+              RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQKCi0g6ZqQ6JeP6K6+572u6aG16Z2i5Lit5bqU55So5Y2h54mH77yM5LiN5Yig6Zmk5Luj56CB5LuF5bGP6JS95YWl5Y+jCi0g56aB55So5omL5Yqo5qOA5p+l5pu05paw5oyJ6ZKu5ZKM6Ieq5Yqo5pu05paw5byA5YWzCi0g56aB55So5bqU55So5ZCv5Yqo5pe255qE6Ieq5Yqo5pu05paw5qOA5p+lCi0tLQogLi4uL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IHwgMTMgKysrKysrKysrKysrKwogLi4uL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0ICAgIHwgIDggKysrLS0tLS0KIC4uLi9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QgICB8ICA3IC0tLS0tLS0KIDMgZmlsZXMgY2hhbmdlZCwgMTYgaW5zZXJ0aW9ucygrKSwgMTIgZGVsZXRpb25zKC0pCgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0CmluZGV4IDU3NDQyMmIuLjFiMWI2YzkgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9NYWluQWN0aXZpdHkua3QKQEAgLTE5MSw2ICsxOTEsMTUgQEAgY2xhc3MgTWFpbkFjdGl2aXR5IDoKCiAgICAgICAgIGNvbm5lY3Rpb24ucmVjb25uZWN0KCkKCisgICAgICAgIC8vIOW8uuWItuemgeeUqOiHquWKqOabtOaWsOWKn+iDvQorICAgICAgICBTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQgPSBmYWxzZQorICAgICAgICAvLyDmoIforrDkuLrlt7Lmj5DnpLrov4fvvIzpmLLmraLmmL7npLrpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xlr7nor53moYYKKyAgICAgICAgU2V0dGluZ3MudXBkYXRlQ2hlY2tQcm9tcHRlZCA9IHRydWUKKyAgICAgICAgLy8g5riF6Zmk5Lu75L2V57yT5a2Y55qE5pu05paw54q25oCBCisgICAgICAgIFVwZGF0ZVN0YXRlLmNsZWFyKCkKKworICAgICAgICAvLyDoh6rliqjmm7TmlrDmo4Dmn6Xlt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgVXBkYXRlU3RhdGUubG9hZEZyb21DYWNoZSgpCiAgICAgICAgIGlmIChTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQpIHsKICAgICAgICAgICAgIGxpZmVjeWNsZVNjb3BlLmxhdW5jaChEaXNwYXRjaGVycy5JTykgewpAQCAtMjAyLDYgKzIxMSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgfQogICAgICAgICB9CisgICAgICAgICovCgogICAgICAgICBoYW5kbGVJbnRlbnQoaW50ZW50KQoKQEAgLTQ2NSw2ICs0NzUsOCBAQCBjbGFzcyBNYWluQWN0aXZpdHkgOgogICAgICAgICAgICAgKQogICAgICAgICB9CgorICAgICAgICAvLyDpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xmj5DnpLrlr7nor53moYblt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBjaGVjayBwcm9tcHQgZGlhbG9nIChzaG93biBvbmx5IG9uY2Ugb24gZmlyc3QgbGF1bmNoKQogICAgICAgICB2YXIgc2hvd1VwZGF0ZUNoZWNrUHJvbXB0IGJ5IHJlbWVtYmVyIHsgbXV0YWJsZVN0YXRlT2YoIVNldHRpbmdzLnVwZGF0ZUNoZWNrUHJvbXB0ZWQpIH0KICAgICAgICAgaWYgKHNob3dVcGRhdGVDaGVja1Byb21wdCkgewpAQCAtNTEzLDYgKzUyNSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICkKICAgICAgICAgfQorICAgICAgICAqLwoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBhdmFpbGFibGUgZGlhbG9nCiAgICAgICAgIHZhbCB1cGRhdGVJbmZvIGJ5IFVwZGF0ZVN0YXRlLnVwZGF0ZUluZm8KZGlmZiAtLWdpdCBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdAppbmRleCA4YWE2ZDIxLi4xYzJmNzlhIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvQXBwU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0CkBAIC00MDEsMTEgKzQwMSw2IEBAIGZ1biBBcHBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KSB7IFRleHQoIk5ldyIpIH0KLSAgICAgICAgICAgICAgICAgICAgICAgIH0KLSAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgbW9kaWZpZXIgPQogICAgICAgICAgICAgICAgICAgICBNb2RpZmllcgogICAgICAgICAgICAgICAgICAgICAgICAgLmNsaXAoUm91bmRlZENvcm5lclNoYXBlKHRvcFN0YXJ0ID0gMTIuZHAsIHRvcEVuZCA9IDEyLmRwKSksCkBAIC01MzUsNiArNTMwLDggQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgIH0KICAgICAgICAgfQoKKyAgICAgICAgLy8g5bey6ZqQ6JeP5pu05paw6K6+572u5ZKM5pON5L2c5Y2h54mHCisgICAgICAgIC8qCiAgICAgICAgIFNwYWNlcihtb2RpZmllciA9IE1vZGlmaWVyLmhlaWdodCg4LmRwKSkKCiAgICAgICAgIFRleHQoCkBAIC05OTUsNiArOTkyLDcgQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICB9CiAgICAgICAgIH0KKyAgICAgICAgKi8KICAgICB9CiB9CgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0CmluZGV4IGY0NjhmNTEuLjJhMzUzMTIgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QKQEAgLTUxLDcgKzUxLDYgQEAgaW1wb3J0IGFuZHJvaWR4Lm5hdmlnYXRpb24uTmF2Q29udHJvbGxlcgogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS5SCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLmNvbXBvc2UudG9wYmFyLk92ZXJyaWRlVG9wQmFyCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLmRhdGFiYXNlLlNldHRpbmdzCi1pbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLnVwZGF0ZS5VcGRhdGVTdGF0ZQogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS51dGlscy5Ib29rTW9kdWxlVXBkYXRlTm90aWZpZXIKIGltcG9ydCBpby5uZWtvaGFzZWthaS5zZmEudXRpbHMuSG9va1N0YXR1c0NsaWVudAoKQEAgLTY2LDcgKzY1LDYgQEAgZnVuIFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKCiAgICAgdmFsIGNvbnRleHQgPSBMb2NhbENvbnRleHQuY3VycmVudAogICAgIHZhbCBzY29wZSA9IHJlbWVtYmVyQ29yb3V0aW5lU2NvcGUoKQotICAgIHZhbCBoYXNVcGRhdGUgYnkgVXBkYXRlU3RhdGUuaGFzVXBkYXRlCiAgICAgdmFsIGhvb2tTdGF0dXMgYnkgSG9va1N0YXR1c0NsaWVudC5zdGF0dXMuY29sbGVjdEFzU3RhdGUoKQogICAgIHZhbCBoYXNQZW5kaW5nUHJpdmlsZWdlRG93bmdyYWRlID0gSG9va01vZHVsZVVwZGF0ZU5vdGlmaWVyLmlzRG93bmdyYWRlKGhvb2tTdGF0dXMpCiAgICAgdmFsIGhhc1BlbmRpbmdQcml2aWxlZ2VVcGRhdGUgPSBIb29rTW9kdWxlVXBkYXRlTm90aWZpZXIuaXNVcGdyYWRlKGhvb2tTdGF0dXMpCkBAIC0xMTUsMTEgKzExMyw2IEBAIGZ1biBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KSB7IFRleHQoIk5ldyIpIH0KLSAgICAgICAgICAgICAgICAgICAgICAgIH0KLSAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgbW9kaWZpZXIgPQogICAgICAgICAgICAgICAgICAgICBNb2RpZmllcgogICAgICAgICAgICAgICAgICAgICAgICAgLmNsaXAoUm91bmRlZENvcm5lclNoYXBlKHRvcFN0YXJ0ID0gMTIuZHAsIHRvcEVuZCA9IDEyLmRwKSksCi0tCjIuNTAuMSAoQXBwbGUgR2l0LTE1NSkK
+EOF
+              if [ -s /tmp/patch.diff ]; then
+                git apply /tmp/patch.diff 2>/dev/null || echo "::warning::Streamline patch failed"
+              fi
+              rm -f /tmp/patch.diff
+            fi
+          fi
+
           echo "VERSION_CODE=${{ steps.version_code.outputs.code }}" > version.properties
           echo "VERSION_NAME=${{ matrix.target.ver }}" >> version.properties
           echo "GO_VERSION=${{ needs.init.outputs.go_version }}" >> version.properties
@@ -503,41 +637,52 @@ jobs:
             sed -i "s|SagerNet/sing-box|${{ github.repository }}|g" "$UPDATE_FILE"
           fi
 
-          if [[ "${{ matrix.target.repo }}" != *"PuerNya"* ]]; then
-            echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQKCi0g6ZqQ6JeP6K6+572u6aG16Z2i5Lit5bqU55So5Y2h54mH77yM5LiN5Yig6Zmk5Luj56CB5LuF5bGP6JS95YWl5Y+jCi0g56aB55So5omL5Yqo5qOA5p+l5pu05paw5oyJ6ZKu5ZKM6Ieq5Yqo5pu05paw5byA5YWzCi0g56aB55So5bqU55So5ZCv5Yqo5pe255qE6Ieq5Yqo5pu05paw5qOA5p+lCi0tLQogLi4uL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IHwgMTMgKysrKysrKysrKysrKwogLi4uL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0ICAgIHwgIDggKysrLS0tLS0KIC4uLi9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QgICB8ICA3IC0tLS0tLS0KIDMgZmlsZXMgY2hhbmdlZCwgMTYgaW5zZXJ0aW9ucygrKSwgMTIgZGVsZXRpb25zKC0pCgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdAppbmRleCA1NzQ0MjJiLi4xYjFiNmM5IDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9NYWluQWN0aXZpdHkua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdApBQEAtLTE5MSw2ICsxOTEsMTUgQEAgY2xhc3MgTWFpbkFjdGl2aXR5IDoKCiAgICAgICAgIGNvbm5lY3Rpb24ucmVjb25uZWN0KCkKCisgICAgICAgIC8vIOW8uuWItuemgeeUqOiHquWKqOabtOaWsOWKn+iDvQorICAgICAgICBTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQgPSBmYWxzZQorICAgICAgICAvLyDmoIforrDkuLrlt7Lmj5DnpLrov4fvvIzpmLLmraLmmL7npLrpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xlr7nor53moYYKKyAgICAgICAgU2V0dGluZ3MudXBkYXRlQ2hlY2tQcm9tcHRlZCA9IHRydWUKKyAgICAgICAgLy8g5riF6Zmk5Lu75L2V57yT5a2Y55qE5pu05paw54q25oCBCisgICAgICAgIFVwZGF0ZVN0YXRlLmNsZWFyKCkKKworICAgICAgICAvLyDoh6rliqjmm7TmlrDmo4Dmn6Xlt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgVXBkYXRlU3RhdGUubG9hZEZyb21DYWNoZSgpCiAgICAgICAgIGlmIChTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQpIHsKICAgICAgICAgICAgIGxpZmVjeWNsZVNjb3BlLmxhdW5jaChEaXNwYXRjaGVycy5JTykgewpAQCAtMjAyLDYgKzIxMSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgfQogICAgICAgICB9CisgICAgICAgICovCgogICAgICAgICBoYW5kbGVJbnRlbnQoaW50ZW50KQoKQEAtNDY1LDYgKzQ3NSw4IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgKQogICAgICAgICB9CgorICAgICAgICAvLyDpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xmj5DnpLrlr7nor53moYblt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBjaGVjayBwcm9tcHQgZGlhbG9nIChzaG93biBvbmx5IG9uY2Ugb24gZmlyc3QgbGF1bmNoKQogICAgICAgICB2YXIgc2hvd1VwZGF0ZUNoZWNrUHJvbXB0IGJ5IHJlbWVtYmVyIHsgbXV0YWJsZVN0YXRlT2YoIVNldHRpbmdzLnVwZGF0ZUNoZWNrUHJvbXB0ZWQpIH0KICAgICAgICAgaWYgKHNob3dVcGRhdGVDaGVja1Byb21wdCkgewpAQCAtNTEzLDYgKzUyNSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICApCiAgICAgICAgICB9CisgICAgICAgICAqLwoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBhdmFpbGFibGUgZGlhbG9nCiAgICAgICAgIHZhbCB1cGRhdGVJbmZvIGJ5IFVwZGF0ZVN0YXRlLnVwZGF0ZUluZm8KZGlmZiAtLWdpdCBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdAppbmRleCA4YWE2ZDIxLi4xYzJmNzlhIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvQXBwU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdApBQCAtNDAxLDExICs0MDEsNiBAIGZ1biBBcHBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAic3RhdHVzIjogJCBoYXNVcGRhdGUgPyAiTmV3IiA6ICIiLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KSB7IFRleHQoIk5ldyIpIH0KLSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgfQotICAgICAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgbW9kaWZpZXIgPQogICAgICAgICAgICAgICAgICAgICBNb2RpZmllcgogICAgICAgICAgICAgICAgICAgICAgICAgLmNsaXAoUm91bmRlZENvcm5lclNoYXBlKHRvcFN0YXJ0ID0gMTIuZHAsIHRvcEVuZCA9IDEyLmRwKSksCkBAIC01MzUsNiArNTMwLDggQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgIH0KICAgICAgICAgfQoKKyAgICAgICAgLy8g5bey6ZqQ6JeP5pu05paw6K6+572u5ZKM5pON5L2c5Y2h54mHCisgICAgICAgIC8qCiAgICAgICAgIFNwYWNlcihtb2RpZmllciA9IE1vZGlmaWVyLmhlaWdodCg4LmRwKSkKCiAgICAgICAgIFRleHQoCkBAIC05OTUsNiArOTkyLDcgQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICB9CiAgICAgICAgIH0KKyAgICAgICAgKi8KICAgICB9CiB9CgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdAppbmRleCBmNDY4ZjUxLi4yYTM1MzEyIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdApBQCAtNTEsNyArNTEsNiBAIGltcG9ydCBhbmRyb2lkLm5hdmlnYXRpb24uTmF2Q29udHJvbGxlcgoKaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS5SCmltcG9ydCBpby5uZWtvaGFzZWthaS5zZmEuY29tcG9zZS50b3BiYXIuT3ZlcnJpZGVUb3BCYXIKaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS5kYXRhYmFzZS5TZXR0aW5ncwotaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS51cGRhdGUuVXBkYXRlU3RhdGUKaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS51dGlscy5Ib29rTW9kdWxlVXBkYXRlTm90aWZpZXIKCkBAIC02Niw3ICs2NSw2IEBAIGZ1biBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7Cg==" | base64 -d > patch.diff
-            git apply patch.diff || true
-          fi
-
       - name: Build libbox.aar
         if: steps.sfa_check.outputs.exists == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
+          set -euo pipefail
           cd sing-box
           make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
           
           if [[ "${{ matrix.target.repo }}" == *"reF1nd"* ]]; then
-            FINAL_TAGS="${{ env.TAGS_REF1ND }}"
+            BASE_TAGS="${{ env.TAGS_REF1ND_BASE }}"
           elif [[ "${{ matrix.target.repo }}" == *"PuerNya"* ]]; then
-            FINAL_TAGS="${{ env.TAGS_PUERNYA }}"
+            BASE_TAGS="${{ env.TAGS_PUERNYA }}"
           else
-            FINAL_TAGS="${{ env.TAGS_SAGERNET }}"
+            BASE_TAGS="${{ env.TAGS_SAGERNET_BASE }}"
           fi
           
-          FINAL_TAGS="${FINAL_TAGS},${{ env.TAGS_ANDROID_EXTRA }}"
+          if [[ "${{ matrix.target.branch }}" == *"testing"* ]] || [[ "${{ matrix.target.repo }}" == *"reF1nd"* ]] || [[ "${{ matrix.target.repo }}" == *"PuerNya"* ]]; then
+            BASE_TAGS="${BASE_TAGS},${{ env.TAGS_NEW }}"
+          fi
           
-          gomobile bind -v -o libbox.aar -target android/arm64 -androidapi 23 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false -tags="${FINAL_TAGS}" -ldflags="-X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -s -w -buildid= -checklinkname=0" ./experimental/libbox
+          FINAL_TAGS="${BASE_TAGS},${{ env.TAGS_ANDROID_EXTRA }}"
+          echo "FINAL_TAGS_EXPORT=${FINAL_TAGS}" >> $GITHUB_ENV
+          
+          CGO_ENABLED=0 gomobile bind -v -o libbox.aar -target android/${{ matrix.android_arch.GOARCH }} -androidapi 23 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false -tags="${FINAL_TAGS}" -ldflags="-X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0" ./experimental/libbox
 
       - name: Verify libbox.aar
         if: steps.sfa_check.outputs.exists == 'true'
         run: |
           if [ ! -f "sing-box/libbox.aar" ]; then
-            echo "::error::libbox.aar not found! Build failed."
+            echo "::error::libbox.aar not found!"
             exit 1
           fi
 
       - name: Decode Keystore & Build APK
         if: steps.sfa_check.outputs.exists == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
+          set -euo pipefail
+          
+          if [ -z "${FINAL_TAGS_EXPORT:-}" ]; then
+            FINAL_TAGS_EXPORT="unknown"
+          fi
+          
           echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > ./sing-box-for-android/app/release.keystore
           mkdir -p sing-box-for-android/app/libs
           cp sing-box/libbox.aar sing-box-for-android/app/libs/
@@ -551,88 +696,163 @@ jobs:
             -Pandroid.injected.signing.key.password="${{ secrets.ALIAS_PASS }}"
           
           mkdir -p ../apks
+          find app/build/outputs/apk/other/release -type f -name "*.apk" ! -name "*arm64-v8a*" -delete 2>/dev/null || true
           for file in app/build/outputs/apk/other/release/*.apk; do
             if [ -f "$file" ]; then
               basename_file=$(basename "$file")
-              mv -f "$file" "../apks/SFA-${{ matrix.target.id }}-${basename_file}"
-              printf '{\n  "version_code": %s,\n  "version_name": "%s",\n  "build_time": "%s",\n  "workflow_run_id": "%s",\n  "naive_enabled": %s\n}\n' "${{ steps.version_code.outputs.code }}" "${{ matrix.target.ver }}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${{ github.run_id }}" "${{ github.event.inputs.enable_naive }}" > "../apks/SFA-${{ matrix.target.id }}-metadata.json"
+              mv -f "$file" "../apks/SFA-${{ matrix.target.id }}-${{ matrix.android_arch.ABI }}-${basename_file}"
+              
+              jq -n \
+                --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                --arg run_id "${{ github.run_id }}" \
+                --argjson naive_enabled "${{ github.event.inputs.enable_naive }}" \
+                --arg version_code "${{ steps.version_code.outputs.code }}" \
+                --arg version_name "${{ matrix.target.ver }}" \
+                --arg target_repo "${{ matrix.target.repo }}" \
+                --arg branch "${{ matrix.target.branch }}" \
+                --arg build_tags "${FINAL_TAGS_EXPORT}" \
+                '{version_code: $version_code|tonumber, version_name: $version_name, build_time: $built_at, workflow_run_id: $run_id, naive_enabled: $naive_enabled, target_repo: $target_repo, branch: $branch, build_tags: $build_tags}' \
+                > "../apks/SFA-${{ matrix.target.id }}-${{ matrix.android_arch.ABI }}-metadata.json"
             fi
           done
 
       - name: Verify APK Signature
         if: steps.sfa_check.outputs.exists == 'true'
         run: |
-          APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner -type f -executable | sort -r | head -n 1)
-          if [ -n "$APKSIGNER" ] && ls apks/*.apk >/dev/null 2>&1; then
-            $APKSIGNER verify --print-certs -v apks/*.apk || echo "::warning::APK signature verification failed"
-          else
-            echo "::warning::apksigner not found in SDK path or no APKs to verify"
-          fi
+          set -euo pipefail
+          APKSIGNER="$(find $ANDROID_HOME/build-tools -name 'apksigner' -type f 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$APKSIGNER" ] || [ ! -f "$APKSIGNER" ]; then exit 1; fi
+          for apk in apks/*.apk; do
+            if [ -f "$apk" ]; then $APKSIGNER verify -v "$apk" || exit 1; fi
+          done
 
-      - name: Upload APK and Metadata
+      - name: Upload APK
         if: steps.sfa_check.outputs.exists == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: apk-${{ matrix.target.id }}-${{ github.run_number }}
+          name: apk-${{ matrix.target.id }}-${{ matrix.android_arch.ABI }}
           path: apks/*
 
   publish:
     needs: [init, check, build_core, build_android]
-    if: always() && needs.check.outputs.has_update == 'true'
+    if: >-
+      always() &&
+      needs.init.result == 'success' &&
+      needs.init.result != 'cancelled' &&
+      needs.check.result == 'success' &&
+      needs.check.result != 'cancelled' &&
+      needs.check.outputs.has_update == 'true' &&
+      (needs.build_core.result == 'success' || needs.build_android.result == 'success')
     runs-on: ubuntu-latest
     steps:
+      - name: Generate Build Summary
+        if: always()
+        run: |
+          echo "## 📊 Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Target | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| init | ${{ needs.init.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| check | ${{ needs.check.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| build_core | ${{ needs.build_core.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| build_android | ${{ needs.build_android.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔧 Build Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Go Version**: ${{ needs.init.outputs.go_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Force Build**: ${{ github.event.inputs.force_build || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Naive Proxy**: ${{ github.event.inputs.enable_naive || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.build_core.result }}" = "failure" ]; then
+             echo "### ❌ Core Build Failure Detected" >> $GITHUB_STEP_SUMMARY
+             echo "Please check individual job logs for \`build_core\` to investigate compilation errors." >> $GITHUB_STEP_SUMMARY
+          fi
+
       - name: Setup UPX
-        uses: crazy-max/ghaction-upx@v3
+        uses: crazy-max/ghaction-upx@v4
         with:
           install-only: true
 
+      - name: Clean temp dir
+        run: rm -rf ./tmp/* || true
+
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ./tmp/
+          merge-multiple: true
 
       - name: Process, Compress & Package
         run: |
           mkdir -p ./release_files
           
+          package_windows() {
+            local dir="$1"
+            local base="$2"
+            mv "$dir"/*sing-box* "sing-box.exe" 2>/dev/null || true
+            if [ -f "sing-box.exe" ]; then
+              cp "sing-box.exe" "sing-box-original.exe"
+              case "$base" in
+                *amd64-v3*|*arm64*) upx -9 "sing-box.exe" 2>/dev/null || true ;;
+                *amd64-v1*) upx -5 "sing-box.exe" 2>/dev/null || true ;;
+              esac
+              
+              [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" . 2>/dev/null || true
+
+              if [ -f "$dir/libcronet.dll" ]; then
+                mv "$dir/libcronet.dll" .
+                zip -q9 "release_files/sing-box-${base}.zip" "sing-box.exe" "libcronet.dll" "LICENSE" 2>/dev/null || true
+                zip -q9 "release_files/sing-box-${base}-original.zip" "sing-box-original.exe" "libcronet.dll" "LICENSE" 2>/dev/null || true
+                rm -f libcronet.dll
+              else
+                zip -q9 "release_files/sing-box-${base}.zip" "sing-box.exe" "LICENSE" 2>/dev/null || true
+                zip -q9 "release_files/sing-box-${base}-original.zip" "sing-box-original.exe" "LICENSE" 2>/dev/null || true
+              fi
+              rm -f "sing-box.exe" "sing-box-original.exe" "LICENSE"
+            fi
+          }
+          
+          package_linux() {
+            local dir="$1"
+            local base="$2"
+            mv "$dir"/*sing-box* "sing-box" 2>/dev/null || true
+            if [ -f "sing-box" ]; then
+              chmod +x "sing-box"
+              cp "sing-box" "sing-box-original"
+              
+              if [[ "$base" != *"mips"* ]] && [[ "$base" != *"armv5"* ]] && [[ "$base" != *"armv6"* ]]; then
+                case "$base" in
+                  *amd64-v3*|*arm64*|*armv7*) upx -9 "sing-box" 2>/dev/null || true ;;
+                  *amd64-v1*) upx -5 "sing-box" 2>/dev/null || true ;;
+                esac
+                
+                mkdir -p pkg_dir pkg_orig_dir
+                cp "sing-box" pkg_dir/
+                cp "sing-box-original" pkg_orig_dir/sing-box
+                if [ -f "$dir/LICENSE" ]; then 
+                  cp "$dir/LICENSE" pkg_dir/ 2>/dev/null || true
+                  cp "$dir/LICENSE" pkg_orig_dir/ 2>/dev/null || true
+                fi
+
+                tar --no-same-owner -czf "release_files/sing-box-${base}.tar.gz" -C pkg_dir .
+                tar --no-same-owner -czf "release_files/sing-box-${base}-original.tar.gz" -C pkg_orig_dir .
+                rm -rf pkg_dir pkg_orig_dir
+              else
+                mkdir -p pkg_dir
+                cp "sing-box" pkg_dir/
+                if [ -f "$dir/LICENSE" ]; then cp "$dir/LICENSE" pkg_dir/ 2>/dev/null || true; fi
+                tar --no-same-owner -czf "release_files/sing-box-${base}.tar.gz" -C pkg_dir .
+                rm -rf pkg_dir
+              fi
+              rm -f "sing-box" "sing-box-original" "LICENSE"
+            fi
+          }
+
           for dir in ./tmp/core-*; do
             if [[ -d "$dir" ]]; then
               base=$(basename "$dir" | sed 's/core-//' | sed 's/-[0-9]*$//')
               if [[ "$base" == *"windows"* ]]; then
-                mv "$dir"/sing-box* "sing-box.exe" 2>/dev/null || mv "$dir"/*sing-box* "sing-box.exe" 2>/dev/null || true
-                if [ -f "sing-box.exe" ]; then
-                  cp "sing-box.exe" "sing-box-original.exe"
-                  if [[ "$base" == *"amd64-v3"* ]]; then
-                    upx --best --lzma "sing-box.exe" || true
-                  fi
-                  if [ -f "$dir/libcronet.dll" ]; then
-                    mv "$dir"/libcronet.dll .
-                    zip -q9 "release_files/sing-box-${base}.zip" "sing-box.exe" "libcronet.dll"
-                    zip -q9 "release_files/sing-box-${base}-original.zip" "sing-box-original.exe" "libcronet.dll"
-                    rm -f libcronet.dll
-                  else
-                    zip -q9 "release_files/sing-box-${base}.zip" "sing-box.exe"
-                    zip -q9 "release_files/sing-box-${base}-original.zip" "sing-box-original.exe"
-                  fi
-                  rm -f "sing-box.exe" "sing-box-original.exe"
-                fi
-              elif [[ "$base" != *"mips"* ]] && [[ "$base" != *"armv5"* ]] && [[ "$base" != *"armv6"* ]]; then
-                mv "$dir"/sing-box* "sing-box" 2>/dev/null || mv "$dir"/*sing-box* "sing-box" 2>/dev/null || true
-                if [ -f "sing-box" ]; then
-                  chmod +x "sing-box"
-                  cp "sing-box" "sing-box-original"
-                  upx --best --lzma "sing-box" || true
-                  tar --no-same-owner -czf "release_files/sing-box-${base}.tar.gz" "sing-box"
-                  tar --no-same-owner -czf "release_files/sing-box-${base}-original.tar.gz" "sing-box-original"
-                  rm -f "sing-box" "sing-box-original"
-                fi
+                package_windows "$dir" "$base"
               else
-                mv "$dir"/sing-box* "sing-box" 2>/dev/null || mv "$dir"/*sing-box* "sing-box" 2>/dev/null || true
-                if [ -f "sing-box" ]; then
-                  chmod +x "sing-box"
-                  tar --no-same-owner -czf "release_files/sing-box-${base}.tar.gz" "sing-box"
-                  rm -f "sing-box"
-                fi
+                package_linux "$dir" "$base"
               fi
             fi
           done
@@ -641,16 +861,32 @@ jobs:
             if [[ -d "$dir" ]]; then mv "$dir"/* release_files/ 2>/dev/null || true; fi
           done
 
+          jq -n \
+            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg run_id "${{ github.run_id }}" \
+            --argjson naive_enabled "${{ github.event.inputs.enable_naive }}" \
+            '{built_at: $built_at, run_id: $run_id, naive_enabled: $naive_enabled}' \
+            > release_files/build-info.json
+
           echo -e "# 🚀 sing-box 自動編譯\n\n## 📦 本次更新內容\n" > release_body.txt
           if [ -f "./tmp/workflow-metadata/release_notes.txt" ]; then cat ./tmp/workflow-metadata/release_notes.txt >> release_body.txt; fi
           
           echo "" >> release_body.txt
+          echo "### 🔨 構建狀態" >> release_body.txt
+          echo "| 目標 | 狀態 |" >> release_body.txt
+          echo "|------|------|" >> release_body.txt
+          echo "| 核心編譯 (Core) | ${{ needs.build_core.result }} |" >> release_body.txt
+          echo "| 安卓編譯 (Android) | ${{ needs.build_android.result }} |" >> release_body.txt
+          
+          echo "" >> release_body.txt
           echo "### ⏱️ 構建時間統計" >> release_body.txt
-          echo "- **開始時間**: ${{ needs.init.outputs.start_time }}" >> release_body.txt
-          END_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          ACTUAL_START="${{ needs.init.outputs.start_time }}"
+          if [ -z "$ACTUAL_START" ]; then ACTUAL_START=$(date -u '+%Y-%m-%dT%H:%M:%SZ'); fi
+          echo "- **開始時間**: $ACTUAL_START" >> release_body.txt
+          END_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
           echo "- **結束時間**: $END_TIME" >> release_body.txt
           
-          START_EPOCH=$(date -d "${{ needs.init.outputs.start_time }}" +%s 2>/dev/null || echo "")
+          START_EPOCH=$(date -d "$ACTUAL_START" +%s 2>/dev/null || date -u -d "$ACTUAL_START" +%s 2>/dev/null || echo "")
           END_EPOCH=$(date -d "$END_TIME" +%s 2>/dev/null || echo "")
           if [ -n "$START_EPOCH" ] && [ -n "$END_EPOCH" ]; then
             DURATION=$((END_EPOCH - START_EPOCH))
@@ -659,54 +895,75 @@ jobs:
             echo "- **總耗時**: ${MINUTES} 分 ${SECONDS} 秒" >> release_body.txt
           fi
 
+      - name: Verify post-UPX integrity
+        run: |
+          for f in release_files/*.tar.gz; do
+            if [ -f "$f" ]; then tar xzf "$f" -O > /dev/null 2>&1 || exit 1; fi
+          done
+
       - name: Check if release files exist
         id: check_files
         run: |
           if ls ./release_files/* >/dev/null 2>&1; then
             echo "files_exist=true" >> $GITHUB_OUTPUT
-            echo "Found $(ls ./release_files/* | wc -l) files to release"
           else
-            echo "::error::No files found to release. Build might have failed entirely."
             echo "files_exist=false" >> $GITHUB_OUTPUT
             exit 1
           fi
 
+      - name: Read release body
+        id: body
+        if: steps.check_files.outputs.files_exist == 'true'
+        run: |
+          EOF="RELEASE_BODY_EOF_MARKER"
+          echo "content<<$EOF" >> $GITHUB_OUTPUT
+          cat release_body.txt >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
+
+      - name: Upload Release Files for TG
+        if: steps.check_files.outputs.files_exist == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-packages-${{ github.run_id }}
+          path: ./release_files/*
+          retention-days: 1
+
       - name: Publish Release
         if: steps.check_files.outputs.files_exist == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: svenstaro/upload-release-action@v2
         with:
-          tag_name: sing-box
-          name: sing-box
-          body_path: release_body.txt
-          files: ./release_files/*
           repo_token: ${{ secrets.GITHUB_TOKEN }}
+          release_name: sing-box
+          tag: sing-box
+          overwrite: true
+          file_glob: true
+          file: ./release_files/*
+          body: ${{ steps.body.outputs.content }}
+
+      - name: Clean old releases
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          KEEP=3
+          gh release list --repo "${{ github.repository }}" --limit 100 --json tagName --jq '.[].tagName' | \
+          tail -n +$((KEEP + 1)) | while read -r tag; do
+            [ -n "$tag" ] && gh release delete "$tag" --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+          done
 
       - name: Delete old workflow runs
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Cleaning up old workflow runs (keeping latest 5)..."
           CURRENT_RUN="${{ github.run_id }}"
           ALL_RUNS=$(gh api --paginate "repos/${{ github.repository }}/actions/runs?per_page=100" --jq ".workflow_runs[] | select(.id != $CURRENT_RUN) | .id" 2>/dev/null || echo "")
           TOTAL=$(echo "$ALL_RUNS" | grep -c '[0-9]' || echo "0")
           KEEP=5
           if [ "$TOTAL" -gt "$KEEP" ]; then
             echo "$ALL_RUNS" | tail -n +$((KEEP + 1)) | while read run_id; do
-              [ -n "$run_id" ] && gh api -X DELETE "repos/${{ github.repository }}/actions/runs/$run_id" 2>/dev/null && echo "Deleted old run: $run_id" || true
-            done
-          fi
-
-      - name: Clean old releases
-        if: github.event.inputs.force_build == 'true'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          RELEASE_COUNT=$(gh release list --repo "${{ github.repository }}" --json tagName -q '.[] | .tagName' 2>/dev/null | wc -l || echo "0")
-          if [ "$RELEASE_COUNT" -gt 3 ]; then
-            gh release list --repo "${{ github.repository }}" --json tagName -q '.[] | .tagName' 2>/dev/null | tail -n +4 | while read -r tag; do
-              [ -n "$tag" ] && gh release delete "$tag" --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+              [ -n "$run_id" ] && gh api -X DELETE "repos/${{ github.repository }}/actions/runs/$run_id" 2>/dev/null || true
             done
           fi
 
@@ -718,39 +975,62 @@ jobs:
       - name: Generate Telegram Message
         id: status
         run: |
-          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          {
-            echo "TG_MESSAGE<<$EOF"
-            if [ "${{ needs.build_core.result }}" = "failure" ] || [ "${{ needs.build_android.result }}" = "failure" ] || [ "${{ needs.publish.result }}" = "failure" ]; then
-              echo "❌ **sing-box 自動編譯失敗**"
-              echo ""
-              echo "部分構建任務發生錯誤，請前往 GitHub Actions 頁面查看詳細錯誤日誌。"
-              echo ""
-              echo "**失敗任務:**"
-              [ "${{ needs.build_core.result }}" = "failure" ] && echo "- build_core: ❌"
-              [ "${{ needs.build_android.result }}" = "failure" ] && echo "- build_android: ❌"
-              [ "${{ needs.publish.result }}" = "failure" ] && echo "- publish: ❌"
-            else
-              echo "🚀 **sing-box 自動編譯完成**"
-              echo ""
-              echo "已檢測到代碼更新或觸發強制編譯，最新內核與 Android APK 已經打包完畢。"
-              echo ""
-              echo "📎 **附件為部分最新核心文件**"
-              echo "[👉 點擊前往 GitHub 獲取全平台文件](https://github.com/${{ github.repository }}/releases/tag/sing-box)"
+          TG_STATUS="success"
+          declare -a STATUS_LINES
+          
+          for job in build_core build_android publish; do
+            RESULT=""
+            if [ "$job" = "build_core" ]; then RESULT="${{ needs.build_core.result }}"
+            elif [ "$job" = "build_android" ]; then RESULT="${{ needs.build_android.result }}"
+            elif [ "$job" = "publish" ]; then RESULT="${{ needs.publish.result }}"
             fi
-            echo "$EOF"
+            
+            case "$RESULT" in
+              success) STATUS_LINES+=("✅ ${job}: success") ;;
+              failure) TG_STATUS="failed"; STATUS_LINES+=("❌ ${job}: failure") ;;
+              skipped) STATUS_LINES+=("⏭️ ${job}: skipped") ;;
+              *) STATUS_LINES+=("❓ ${job}: ${RESULT}") ;;
+            esac
+          done
+          
+          TG_DETAILS=$(IFS=$'\n'; echo "${STATUS_LINES[*]}")
+          
+          {
+            echo "TG_MESSAGE<<XEOF"
+            if [ "$TG_STATUS" = "failed" ]; then
+              cat << EOF
+          ❌ *sing-box 自動編譯失敗*
+          
+          *構建詳情：*
+          ${TG_DETAILS}
+          
+          *建議操作：*
+          1. 前往 Actions頁面查看日誌
+          2. 檢查是否有 GitHub API限流
+          3. 嘗試手動觸發 \`force_build: true\`
+          EOF
+            else
+              cat << EOF
+          🚀 *sing-box 自動編譯完成*
+          
+          已檢測到代碼更新或觸發強制編譯，最新內核與 Android APK 已經打包完畢。
+          
+          *構建詳情：*
+          ${TG_DETAILS}
+          
+          📥 [點擊前往 GitHub下載全平台文件](https://github.com/${{ github.repository }}/releases/tag/sing-box)
+          EOF
+            fi
+            echo "XEOF"
           } >> "$GITHUB_ENV"
           
-          if [ "${{ needs.build_core.result }}" = "failure" ] || [ "${{ needs.build_android.result }}" = "failure" ] || [ "${{ needs.publish.result }}" = "failure" ]; then
-            echo "status=failed" >> $GITHUB_OUTPUT
-          else
-            echo "status=success" >> $GITHUB_OUTPUT
-          fi
+          echo "status=$TG_STATUS" >> $GITHUB_OUTPUT
 
-      - name: Download artifacts for TG
+      - name: Download release packages for TG
         if: steps.status.outputs.status == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
+          pattern: release-packages-*
           path: dist
           merge-multiple: true
 
@@ -758,11 +1038,16 @@ jobs:
         if: steps.status.outputs.status == 'success'
         id: find_files
         run: |
+          find_latest_file() {
+            local pattern=$1
+            find dist -type f -name "$pattern" ! -name "*-original*" 2>/dev/null | sort -V | tail -n 1
+          }
+          
           ANDROID_APK=$(find dist -name "*.apk" -type f 2>/dev/null | head -n 1)
-          LINUX_TAR=$(find dist -name "*linux-amd64-v3*.tar.gz" ! -name "*-original*" -type f 2>/dev/null | head -n 1)
-          if [ -z "$LINUX_TAR" ]; then LINUX_TAR=$(find dist -name "*linux-amd64*v3*glibc*.tar.gz" -type f 2>/dev/null | head -n 1); fi
-          if [ -z "$LINUX_TAR" ]; then LINUX_TAR=$(find dist -name "*linux-amd64*v3*.tar.gz" -type f 2>/dev/null | head -n 1); fi
-          WINDOWS_ZIP=$(find dist -name "*windows-amd64-v3*.zip" ! -name "*-original*" -type f 2>/dev/null | head -n 1)
+          LINUX_TAR=$(find_latest_file '*linux*amd64*v3*.tar.gz')
+          [ -z "$LINUX_TAR" ] && LINUX_TAR=$(find_latest_file '*linux*amd64*v3*glibc*.tar.gz')
+          WINDOWS_ZIP=$(find_latest_file '*windows*amd64*v3*.zip')
+          
           FILES=""
           [ -n "$ANDROID_APK" ] && FILES="$FILES%0A$ANDROID_APK"
           [ -n "$LINUX_TAR" ] && FILES="$FILES%0A$LINUX_TAR"
@@ -787,12 +1072,15 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Clean temp dir
+        run: rm -rf ./metadata/* || true
+
       - name: Download Metadata
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: workflow-metadata
           path: ./metadata/
@@ -850,16 +1138,3 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add README.md
           git diff --cached --quiet || git commit -m "docs: update README with latest build info" && git push
-
-      - name: Backup patch hashes
-        continue-on-error: true
-        run: |
-          if [ -f "./metadata/.github/patch_hashes.sh" ]; then
-            git checkout --orphan patches-backup
-            git rm -rf .
-            mkdir -p .github
-            cp ./metadata/.github/patch_hashes.sh .github/
-            git add .github/patch_hashes.sh
-            git commit -m "chore: backup patch hashes for run ${{ github.run_number }}"
-            git push --force origin patches-backup
-          fi
