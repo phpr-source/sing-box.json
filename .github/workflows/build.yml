@@ -94,8 +94,7 @@ jobs:
       - name: Get Go latest version
         id: go
         run: |
-          VERSION=$(curl -m ${CURL_TIMEOUT_API} -sSL https://raw.githubusercontent.com/actions/go-versions/main/versions-manifest.json | jq -r '[.[] | select(.version | startswith("1.24") and (test("-") | not))][0].version')
-          [ -z "$VERSION" ] && VERSION=$(curl -m ${CURL_TIMEOUT_API} -sSL https://raw.githubusercontent.com/actions/go-versions/main/versions-manifest.json | jq -r '[.[] | select(.version | test("-") | not)][0].version')
+          VERSION=$(curl -m ${CURL_TIMEOUT_API} -sSL https://raw.githubusercontent.com/actions/go-versions/main/versions-manifest.json | jq -r '[.[] | select(.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))][0].version')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Validate Secrets
@@ -198,18 +197,15 @@ jobs:
           set -euo pipefail
           
           api_call_with_retry() {
-            local url="$1"
-            local retry_count=0 max_retries=3
-            while [ $retry_count -lt $max_retries ]; do
-              http_code=$(curl -m ${CURL_TIMEOUT_API} -sSL -w "%{http_code}" -H "Authorization: Bearer $GH_TOKEN" "$url" -o /tmp/api_response.json 2>/dev/null)
-              if [ "$http_code" = "200" ] && [ -s /tmp/api_response.json ]; then
-                if jq empty /tmp/api_response.json >/dev/null 2>&1; then
-                  cat /tmp/api_response.json
-                  return 0
-                fi
+            local url="$1" retry=0 max_retries=3
+            while [ $retry -lt $max_retries ]; do
+              rm -f /tmp/api_retry.json
+              http_code=$(curl -sSL -o /tmp/api_retry.json -w "%{http_code}" -m ${CURL_TIMEOUT_API} -H "Authorization: Bearer $GH_TOKEN" "$url" 2>/dev/null)
+              if [[ "$http_code" == "200" && -s /tmp/api_retry.json ]]; then
+                jq empty /tmp/api_retry.json 2>/dev/null && { cat /tmp/api_retry.json; return 0; }
               fi
-              retry_count=$((retry_count + 1))
-              sleep $((2 ** retry_count))
+              retry=$((retry + 1))
+              sleep $((2 ** retry))
             done
             return 1
           }
@@ -230,11 +226,7 @@ jobs:
           rm -f /tmp/has_update_flag
 
           check_branch() {
-            local id="${1:-}"
-            local repo="${2:-}"
-            local branch="${3:-}"
-            local sfa_repo="${4:-}"
-            local sfa_branch="${5:-}"
+            local id="${1:-}" repo="${2:-}" branch="${3:-}" sfa_repo="${4:-}" sfa_branch="${5:-}"
             
             if [ -n "$TARGET_FILTER" ] && [ "$TARGET_FILTER" != "$id" ]; then
               return 0
@@ -694,37 +686,6 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Cache go-mobile dependencies
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/gomobile
-            ~/go/pkg/mod/golang.org/x
-          key: gomobile-${{ runner.os }}-${{ hashFiles('sing-box/go.sum') }}
-          restore-keys: |
-            gomobile-${{ runner.os }}-
-
-      - name: Init gomobile & Verify SDK
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        run: |
-          set -euo pipefail
-          export ANDROID_HOME=/usr/local/lib/android/sdk
-          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          export PATH="$PATH:$(go env GOPATH)/bin"
-          
-          if ! gomobile init 2>&1 | tee /tmp/gomobile.log; then
-            if grep -q "SDK not found" /tmp/gomobile.log; then
-              echo "::warning::gomobile init failed: SDK not found. Check ANDROID_HOME."
-            else
-              echo "::error::gomobile init failed with unexpected error:"
-              cat /tmp/gomobile.log
-              exit 1
-            fi
-          fi
-
       - name: Custom Gradle Cache
         if: ${{ matrix.target.sfa_repo != 'none' }}
         uses: actions/cache@v4
@@ -824,8 +785,13 @@ jobs:
             exit 1
           fi
           
-          sed -Ei 's/(applicationId\s*)[=\(\s]*"[^"]+"[\)\s]*/\1= "com.android.internal.net"/' "$GRADLE_FILE"
-          sed -Ei 's/(namespace\s*)[=\(\s]*"[^"]+"[\)\s]*/\1= "com.android.internal.net"/' "$GRADLE_FILE"
+          if grep -q 'applicationId *(' "$GRADLE_FILE"; then
+            sed -i 's/applicationId *(".*")/applicationId ("com.android.internal.net")/' "$GRADLE_FILE"
+            sed -i 's/namespace *(".*")/namespace ("com.android.internal.net")/' "$GRADLE_FILE" || true
+          else
+            sed -i 's/applicationId *= *"[^"]*"/applicationId = "com.android.internal.net"/' "$GRADLE_FILE"
+            sed -i 's/namespace *= *"[^"]*"/namespace = "com.android.internal.net"/' "$GRADLE_FILE" || true
+          fi
 
       - name: Build libbox.aar
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -1187,12 +1153,22 @@ jobs:
           TAG="sing-box"
           ARCH=$(uname -m)
           case "$ARCH" in
-            x86_64) FILE_ARCH="amd64-v3" ;;
-            aarch64) FILE_ARCH="arm64" ;;
+            x86_64|amd64) FILE_ARCH="amd64-v3" ;;
+            aarch64|arm64) FILE_ARCH="arm64" ;;
+            armv7l) FILE_ARCH="armv7" ;;
+            armv6l) FILE_ARCH="armv6" ;;
+            mips*) FILE_ARCH="mips" ;;
             *) echo "Unsupported arch: $ARCH"; exit 1 ;;
           esac
           echo "Fetching latest release for $FILE_ARCH..."
-          ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | jq -r --arg arch "$FILE_ARCH" '.assets[].browser_download_url | select(test($arch) and test("tar\\.gz$") and (test("original") | not))' | head -1)
+          
+          ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | jq -r --arg arch "$FILE_ARCH" '.assets[] | select(.name | test($arch) and test("tar\\.gz$") and (test("original") | not)) | .browser_download_url' | head -1)
+          
+          if [ -z "$ASSET_URL" ]; then
+            echo "Standard package not found, looking for original uncompressed variant..."
+            ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | jq -r --arg arch "$FILE_ARCH" '.assets[] | select(.name | test($arch) and test("tar\\.gz$") and test("original")) | .browser_download_url' | head -1)
+          fi
+          
           [ -z "$ASSET_URL" ] && { echo "❌ No release found for $FILE_ARCH"; exit 1; }
           echo "Downloading $ASSET_URL ..."
           curl -fLO "$ASSET_URL" || { echo "❌ Download failed"; exit 1; }
@@ -1311,11 +1287,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 清理 Stable 版本（保留 3 個）
           gh release list --repo "${{ github.repository }}" --limit 50 --json tagName,isPrerelease --jq '.[] | select(.isPrerelease == false) | .tagName' | \
             tail -n +4 | xargs -r -I {} gh release delete {} --yes --cleanup-tag 2>/dev/null || true
           
-          # 清理 Pre-release 版本（保留 5 個）
           gh release list --repo "${{ github.repository }}" --limit 50 --json tagName,isPrerelease --jq '.[] | select(.isPrerelease == true) | .tagName' | \
             tail -n +6 | xargs -r -I {} gh release delete {} --yes --cleanup-tag 2>/dev/null || true
 
@@ -1377,7 +1351,10 @@ jobs:
           TG_DETAILS=$(IFS=$'\n'; echo "${STATUS_LINES[*]}")
           
           escape_tg_markdown() {
-            echo "$1" | perl -pe 's/([_*\[\]()~`>#\+\-=|{}.!\\\/])/\\$1/g; s/\n/\\\n/g'
+            echo "$1" | sed -e 's/_/\\_/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' \
+                            -e 's/~/\\~/g' -e 's/`/\\`/g' -e 's/>/\\>/g' -e 's/#/\\#/g' \
+                            -e 's/+/\\+/g' -e 's/-/\\-/g' -e 's/=/\\=/g' -e 's/|/\\|/g' \
+                            -e 's/{/\\{/g' -e 's/}/\\}/g' -e 's/!/\\!/g' -e 's/\\//\\\\\//g'
           }
           
           TG_DETAILS_SAFE=$(escape_tg_markdown "$TG_DETAILS")
