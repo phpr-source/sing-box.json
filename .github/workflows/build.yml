@@ -409,13 +409,6 @@ jobs:
           cache: true
           cache-dependency-path: 'sing-box/go.sum'
 
-      - name: Verify Go modules
-        if: steps.check_naive.outputs.skip != 'true'
-        run: |
-          cd sing-box
-          go mod tidy -e
-          go mod download -x
-
       - name: Fix sniff
         if: steps.check_naive.outputs.skip != 'true' && contains(matrix.target.repo, 'PuerNya')
         run: |
@@ -805,6 +798,14 @@ jobs:
           sed -Ei 's/(compileSdk|compileSdkVersion)\s*[=:]\s*[0-9]+/\1 = 34/' "$GRADLE_FILE"
           sed -Ei 's/(targetSdk|targetSdkVersion)\s*[=:]\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" 2>/dev/null || true
 
+      - name: Sync Gradle Wrapper Version
+        run: |
+          cd sing-box-for-android
+          GRADLE_VERS=$(grep distributionUrl gradle/wrapper/gradle-wrapper.properties 2>/dev/null | sed 's/.*gradle-\(.*\)-all\.zip/\1/' || echo "")
+          if [ -n "$GRADLE_VERS" ]; then
+            ./gradlew wrapper --gradle-version "$GRADLE_VERS" --console=plain || true
+          fi
+
       - name: Build libbox.aar
         if: ${{ matrix.target.sfa_repo != 'none' }}
         env:
@@ -823,7 +824,7 @@ jobs:
           FINAL_TAGS=$(echo "${FINAL_TAGS}" | tr ',' '\n' | sort -u | paste -sd,)
           echo "FINAL_TAGS_EXPORT=${FINAL_TAGS}" >> $GITHUB_ENV
           
-          gomobile bind -v -target android/${{ matrix.android_arch.GOARCH }} -androidapi 23 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false -tags="${FINAL_TAGS}" -ldflags="-checklinkname=0 -s -w -buildid=" ./experimental/libbox
+          gomobile bind -v -target android/${{ matrix.android_arch.GOARCH }} -androidapi 23 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false -tags="${FINAL_TAGS}" -ldflags="-checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -s -w -buildid=" ./experimental/libbox
 
       - name: Verify libbox.aar
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -873,11 +874,6 @@ jobs:
           cp sing-box/libbox.aar sing-box-for-android/app/libs/
           
           cd sing-box-for-android
-          
-          WRAPPER_VER=$(grep distributionUrl gradle/wrapper/gradle-wrapper.properties 2>/dev/null | sed 's/.*gradle-\(.*\)-all.zip/\1/' || echo "")
-          if [ -n "$WRAPPER_VER" ]; then
-            ./gradlew wrapper --gradle-version "$WRAPPER_VER" --no-daemon || true
-          fi
           ./gradlew --version --console=plain >/dev/null 2>&1 || true
           chmod +x gradlew
           
@@ -1270,6 +1266,7 @@ jobs:
           [ "$HAS_TESTING" = "true" ] && RELEASE_FLAG="--prerelease"
           
           gh release delete sing-box --yes --cleanup-tag 2>/dev/null || true
+          sleep 3
           gh release create sing-box --title "sing-box" --notes-file release_body.txt $RELEASE_FLAG ./release_files/*
 
       - name: Generate Build Provenance
@@ -1282,8 +1279,6 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          git fetch origin patches 2>/dev/null || true
-          git checkout patches 2>/dev/null || git checkout -b patches
           git checkout --orphan temp_patches
           git add -A
           git commit -m "chore: squash patches history [skip ci]" || true
@@ -1491,6 +1486,10 @@ jobs:
       needs.check.result == 'success' && 
       needs.check.outputs.has_update == 'true'
     steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Clean temp dir
         run: rm -rf ./metadata/* || true
 
