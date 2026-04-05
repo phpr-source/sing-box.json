@@ -281,7 +281,7 @@ jobs:
             fi
 
             if [[ "$sfa_repo" != "none" ]]; then
-              if ! git ls-remote --heads "https://github.com/${sfa_repo}.git" "$sfa_branch" 2>/dev/null | grep -qw "$sfa_branch"; then
+              if ! timeout 10 git ls-remote --heads "https://github.com/${sfa_repo}.git" "$sfa_branch" 2>/dev/null | grep -qw "$sfa_branch"; then
                 echo "::warning::[$id] Android branch $sfa_repo/$sfa_branch not found. Disabling Android."
                 sfa_repo="none"
                 sfa_branch="none"
@@ -647,6 +647,7 @@ jobs:
           repository: ${{ matrix.target.repo }}
           ref: ${{ steps.resolve.outputs.ref }}
           path: sing-box
+          fetch-depth: 0
 
       - name: Checkout SFA
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -686,6 +687,18 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Cache gomobile & Android SDK
+        if: ${{ matrix.target.sfa_repo != 'none' }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/gomobile
+            ~/.android/sdk
+            ~/go/pkg/mod/golang.org/x
+          key: gomobile-${{ runner.os }}-${{ hashFiles('sing-box/go.sum') }}
+          restore-keys: |
+            gomobile-${{ runner.os }}-
+
       - name: Custom Gradle Cache
         if: ${{ matrix.target.sfa_repo != 'none' }}
         uses: actions/cache@v4
@@ -700,6 +713,7 @@ jobs:
       - name: Fetch and Apply Core patches atomically
         if: ${{ matrix.target.sfa_repo != 'none' && contains(matrix.target.repo, 'reF1nd') }}
         working-directory: sing-box
+        continue-on-error: true
         run: |
           set -euo pipefail
           
@@ -785,13 +799,7 @@ jobs:
             exit 1
           fi
           
-          if grep -q 'applicationId *(' "$GRADLE_FILE"; then
-            sed -i 's/applicationId *(".*")/applicationId ("com.android.internal.net")/' "$GRADLE_FILE"
-            sed -i 's/namespace *(".*")/namespace ("com.android.internal.net")/' "$GRADLE_FILE" || true
-          else
-            sed -i 's/applicationId *= *"[^"]*"/applicationId = "com.android.internal.net"/' "$GRADLE_FILE"
-            sed -i 's/namespace *= *"[^"]*"/namespace = "com.android.internal.net"/' "$GRADLE_FILE" || true
-          fi
+          sed -Ei 's/(applicationId|namespace)\s*[=\(]\s*"([^"]+)"[\)\s]*/\1 = "com.android.internal.net"/' "$GRADLE_FILE"
 
       - name: Build libbox.aar
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -1223,23 +1231,8 @@ jobs:
           RELEASE_FLAG=""
           [ "$HAS_TESTING" = "true" ] && RELEASE_FLAG="--prerelease"
           
-          if gh release view sing-box &>/dev/null; then
-            gh release edit sing-box --notes-file release_body.txt $RELEASE_FLAG
-          else
-            gh release create sing-box --title "sing-box" --notes-file release_body.txt $RELEASE_FLAG
-          fi
-          
-          shopt -s nullglob
-          FILES=(./release_files/*)
-          if [ ${#FILES[@]} -eq 0 ]; then
-            echo "::error::No files in release_files directory!"
-            exit 1
-          fi
-          
-          gh release upload sing-box --clobber ./release_files/* || {
-            echo "::error::Asset upload failed. Check API rate limits or file sizes."
-            exit 1
-          }
+          gh release delete sing-box --yes --cleanup-tag 2>/dev/null || true
+          gh release create sing-box --title "sing-box" --notes-file release_body.txt $RELEASE_FLAG ./release_files/*
 
       - name: Generate Build Provenance
         if: steps.check_files.outputs.files_exist == 'true'
@@ -1351,10 +1344,10 @@ jobs:
           TG_DETAILS=$(IFS=$'\n'; echo "${STATUS_LINES[*]}")
           
           escape_tg_markdown() {
-            echo "$1" | sed -e 's/_/\\_/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' \
+            echo "$1" | sed -e 's/\\/\\\\/g' -e 's/_/\\_/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' \
                             -e 's/~/\\~/g' -e 's/`/\\`/g' -e 's/>/\\>/g' -e 's/#/\\#/g' \
                             -e 's/+/\\+/g' -e 's/-/\\-/g' -e 's/=/\\=/g' -e 's/|/\\|/g' \
-                            -e 's/{/\\{/g' -e 's/}/\\}/g' -e 's/!/\\!/g' -e 's/\\//\\\\\//g'
+                            -e 's/{/\\{/g' -e 's/}/\\}/g' -e 's/!/\\!/g'
           }
           
           TG_DETAILS_SAFE=$(escape_tg_markdown "$TG_DETAILS")
