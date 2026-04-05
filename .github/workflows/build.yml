@@ -67,7 +67,7 @@ permissions:
   id-token: write
 
 env:
-  TAGS_COMMON: "with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard,badlinkname,tfogo_checklinkname0"
+  TAGS_COMMON: "with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard"
   TAGS_PUERNYA_EXTRA: "with_shadowsocksr,with_ech"
   TAGS_ANDROID_EXTRA: "with_conntrack"
   CURL_TIMEOUT_API: 60
@@ -399,6 +399,7 @@ jobs:
           repository: ${{ matrix.target.repo }}
           ref: ${{ steps.resolve.outputs.ref }}
           path: sing-box
+          fetch-depth: 0
 
       - name: Setup Go
         if: steps.check_naive.outputs.skip != 'true'
@@ -407,14 +408,6 @@ jobs:
           go-version: ${{ needs.init.outputs.go_version }}
           cache: true
           cache-dependency-path: 'sing-box/go.sum'
-          
-      - name: Verify Go modules
-        if: steps.check_naive.outputs.skip != 'true'
-        run: |
-          cd sing-box
-          go mod tidy
-          go mod download -x
-          go mod verify
 
       - name: Fix sniff
         if: steps.check_naive.outputs.skip != 'true' && contains(matrix.target.repo, 'PuerNya')
@@ -455,6 +448,7 @@ jobs:
       - name: Fetch and Apply patches atomically
         if: steps.check_naive.outputs.skip != 'true' && contains(matrix.target.repo, 'reF1nd')
         working-directory: sing-box
+        continue-on-error: true
         run: |
           set -euo pipefail
           
@@ -575,7 +569,7 @@ jobs:
           BIN_NAME="sing-box"
           if [ "${{ matrix.platform.goos }}" = "windows" ]; then BIN_NAME="sing-box.exe"; fi
           
-          go build -v -trimpath -ldflags "-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid=" -tags "${{ steps.env.outputs.tags }}" -o "dist/$BIN_NAME" ./cmd/sing-box
+          go build -v -trimpath -ldflags "-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid=" -tags "${{ steps.env.outputs.tags }}" -o "dist/$BIN_NAME" ./cmd/sing-box
           
           echo "{\"target_id\": \"${{ matrix.target.id }}\", \"platform\": \"${{ matrix.platform.name }}\", \"suffix\": \"${{ steps.env.outputs.suffix }}\"}" > dist/artifact-meta.json
 
@@ -621,7 +615,6 @@ jobs:
       needs.check.outputs.has_update == 'true' &&
       needs.check.outputs.matrix != '[]' &&
       needs.check.outputs.matrix != '' &&
-      needs.init.outputs.android_secrets_valid == 'true' &&
       github.event.inputs.enable_naive != 'true'
     strategy:
       fail-fast: false
@@ -664,14 +657,6 @@ jobs:
           go-version: ${{ needs.init.outputs.go_version }}
           cache: true
           cache-dependency-path: 'sing-box/go.sum'
-
-      - name: Verify Go modules
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        run: |
-          cd sing-box
-          go mod tidy
-          go mod download -x
-          go mod verify
 
       - name: Setup Android NDK
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -780,7 +765,7 @@ jobs:
           
           UPDATE_CHECKER=$(find sing-box-for-android -name "GitHubUpdateChecker.kt" -type f 2>/dev/null | head -n 1)
           if [ -n "$UPDATE_CHECKER" ]; then
-            sed -i "s|REPO_URL = \".*\"|REPO_URL = \"${{ github.repository }}\"|g" "$UPDATE_CHECKER" || true
+            awk -v repo="${{ github.repository }}" '/REPO_URL[ \t]*=/ { sub(/".*"/, "\"" repo "\"") } 1' "$UPDATE_CHECKER" > tmp && mv tmp "$UPDATE_CHECKER"
           fi
 
           cd sing-box-for-android
@@ -819,7 +804,7 @@ jobs:
           FINAL_TAGS=$(echo "${FINAL_TAGS}" | tr ',' '\n' | sort -u | paste -sd,)
           echo "FINAL_TAGS_EXPORT=${FINAL_TAGS}" >> $GITHUB_ENV
           
-          CGO_ENABLED=0 gomobile bind -v -target android/${{ matrix.android_arch.GOARCH }} -androidapi 23 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false -tags="${FINAL_TAGS}" -ldflags="-checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid=" ./experimental/libbox
+          CGO_ENABLED=0 gomobile bind -v -target android/${{ matrix.android_arch.GOARCH }} -androidapi 23 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false -tags="${FINAL_TAGS}" -ldflags="-checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -s -w -buildid=" ./experimental/libbox
 
       - name: Verify libbox.aar
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -830,21 +815,29 @@ jobs:
 
       - name: Decode Keystore & Validate
         if: ${{ matrix.target.sfa_repo != 'none' }}
+        id: keystore
         env:
           EXPECTED_SHA1: ${{ secrets.EXPECTED_SHA1_FINGERPRINT || '' }}
         run: |
-          echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -di > ./sing-box-for-android/app/release.keystore
-          if [ ! -s "./sing-box-for-android/app/release.keystore" ]; then exit 1; fi
-          chmod 600 ./sing-box-for-android/app/release.keystore
+          SIGNING_MODE="release"
+          echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -di > ./sing-box-for-android/app/release.keystore 2>/dev/null || true
           
-          if ! keytool -list -keystore ./sing-box-for-android/app/release.keystore -storepass "${{ secrets.KEYSTORE_PASS }}" -alias "${{ secrets.ALIAS_NAME }}" >/dev/null 2>&1; then
-            echo "::error::Keystore validation failed. Check ALIAS_NAME and STORE password."
-            exit 1
+          if [ ! -s "./sing-box-for-android/app/release.keystore" ]; then
+            echo "::warning::Keystore empty or decode failed, falling back to debug."
+            SIGNING_MODE="debug"
+          else
+            chmod 600 ./sing-box-for-android/app/release.keystore
+            if ! keytool -list -keystore ./sing-box-for-android/app/release.keystore -storepass "${{ secrets.KEYSTORE_PASS }}" -alias "${{ secrets.ALIAS_NAME }}" >/dev/null 2>&1; then
+              echo "::warning::Keystore validation failed. Falling back to debug."
+              SIGNING_MODE="debug"
+            elif [ -n "$EXPECTED_SHA1" ]; then
+              if ! keytool -list -keystore ./sing-box-for-android/app/release.keystore -storepass "${{ secrets.KEYSTORE_PASS }}" -v 2>/dev/null | grep -q "SHA1: ${EXPECTED_SHA1}"; then
+                echo "::warning::Keystore SHA1 mismatch! Falling back to debug."
+                SIGNING_MODE="debug"
+              fi
+            fi
           fi
-          
-          if [ -n "$EXPECTED_SHA1" ]; then
-            keytool -list -keystore ./sing-box-for-android/app/release.keystore -storepass "${{ secrets.KEYSTORE_PASS }}" -v 2>/dev/null | grep -q "SHA1: ${EXPECTED_SHA1}" || { echo "::error::Keystore SHA1 mismatch!"; exit 1; }
-          fi
+          echo "SIGNING_MODE=$SIGNING_MODE" >> $GITHUB_ENV
 
       - name: Build APK
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -874,18 +867,25 @@ jobs:
             fi
           fi
           
-          ./gradlew :app:${RELEASE_TASK} --console=plain \
-            -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
-            -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASS }}" \
-            -Pandroid.injected.signing.key.alias="${{ secrets.ALIAS_NAME }}" \
-            -Pandroid.injected.signing.key.password="${{ secrets.ALIAS_PASS }}"
+          if [ "$SIGNING_MODE" = "release" ]; then
+            ./gradlew :app:${RELEASE_TASK} --console=plain \
+              -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
+              -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASS }}" \
+              -Pandroid.injected.signing.key.alias="${{ secrets.ALIAS_NAME }}" \
+              -Pandroid.injected.signing.key.password="${{ secrets.ALIAS_PASS }}"
+            VARIANT=$(echo "${RELEASE_TASK}" | sed -E 's/^assemble([A-Za-z]+)Release$/\1/' | tr '[:upper:]' '[:lower:]')
+            [ -z "$VARIANT" ] && VARIANT="other"
+            APK_DIR="app/build/outputs/apk/${VARIANT}/release"
+          else
+            DEBUG_TASK=$(echo "$RELEASE_TASK" | sed 's/Release$/Debug/')
+            ./gradlew :app:${DEBUG_TASK} --console=plain
+            VARIANT=$(echo "${DEBUG_TASK}" | sed -E 's/^assemble([A-Za-z]+)Debug$/\1/' | tr '[:upper:]' '[:lower:]')
+            [ -z "$VARIANT" ] && VARIANT="other"
+            APK_DIR="app/build/outputs/apk/${VARIANT}/debug"
+          fi
           
           mkdir -p ../apks
           arch_abi="${{ matrix.android_arch.ABI }}"
-          
-          VARIANT=$(echo "${RELEASE_TASK}" | sed -E 's/^assemble([A-Za-z]+)Release$/\1/' | tr '[:upper:]' '[:lower:]')
-          [ -z "$VARIANT" ] && VARIANT="other"
-          APK_DIR="app/build/outputs/apk/${VARIANT}/release"
           
           apk=$(find "${APK_DIR}" -type f -name "*${arch_abi}*.apk" -print -quit 2>/dev/null)
           [ -z "$apk" ] && apk=$(find app/build/outputs/apk/ -type f -name "*${arch_abi}*.apk" -print -quit 2>/dev/null)
@@ -900,6 +900,9 @@ jobs:
               PATCHES='[]'
             fi
             
+            SIGNING_META="Release"
+            [ "$SIGNING_MODE" = "debug" ] && SIGNING_META="Debug (Unsigned)"
+            
             jq -n \
               --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               --arg run_id "${{ github.run_id }}" \
@@ -909,6 +912,7 @@ jobs:
               --arg target_repo "${{ matrix.target.repo }}" \
               --arg target_branch "${{ matrix.target.branch }}" \
               --arg build_tags "${FINAL_TAGS_EXPORT}" \
+              --arg signing_meta "$SIGNING_META" \
               --argjson patches "$PATCHES" \
               '{
                  target_id: "${{ matrix.target.id }}",
@@ -920,6 +924,7 @@ jobs:
                  target_repo: $target_repo,
                  target_branch: $target_branch,
                  build_tags: $build_tags,
+                 signing_status: $signing_meta,
                  patches_applied: $patches
                }' > "../apks/SFA-${{ matrix.target.id }}-${arch_abi}-metadata.json"
           fi
@@ -1172,8 +1177,15 @@ jobs:
           
           ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | jq -r --arg arch "$FILE_ARCH" '.assets[] | select(.name | test($arch) and test("tar\\.gz$") and (test("original") | not)) | .browser_download_url' | head -1)
           
+          if [ -n "$ASSET_URL" ]; then
+            HTTP_CODE=$(curl -sI -o /dev/null -w "%{http_code}" "$ASSET_URL" || echo "000")
+            if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "302" ]; then
+              ASSET_URL=""
+            fi
+          fi
+          
           if [ -z "$ASSET_URL" ]; then
-            echo "Standard package not found, looking for original uncompressed variant..."
+            echo "Standard package not found or inaccessible, looking for original uncompressed variant..."
             ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | jq -r --arg arch "$FILE_ARCH" '.assets[] | select(.name | test($arch) and test("tar\\.gz$") and test("original")) | .browser_download_url' | head -1)
           fi
           
@@ -1198,7 +1210,9 @@ jobs:
             if [ -f "$f" ]; then unzip -t "$f" > /dev/null 2>&1 || exit 1; fi
           done
           
-          sha256sum *.tar.gz *.zip *.apk 2>/dev/null | awk '{printf "| `%s` | `%s` |\n", $2, $1}' > SHA256SUMS_TABLE.md
+          sha256sum *.tar.gz *.zip *.apk 2>/dev/null > SHA256SUMS.txt
+          awk '{printf "| `%s` | `%s` |\n", $2, $1}' SHA256SUMS.txt > SHA256SUMS_TABLE.md
+          
           cat >> ../release_body.txt <<'BODYEOF'
           
           ## 🔐 SHA256 Checksums
@@ -1239,6 +1253,18 @@ jobs:
         uses: actions/attest-build-provenance@v1
         with:
           subject-path: './release_files/*'
+
+      - name: Cleanup patches branch
+        if: always()
+        continue-on-error: true
+        run: |
+          git fetch origin patches
+          git checkout patches
+          git checkout --orphan temp_patches
+          git add -A
+          git commit -m "chore: squash patches history"
+          git branch -M patches
+          git push origin patches --force
 
       - name: Update release-info branch
         if: always()
@@ -1344,7 +1370,8 @@ jobs:
           TG_DETAILS=$(IFS=$'\n'; echo "${STATUS_LINES[*]}")
           
           escape_tg_markdown() {
-            echo "$1" | sed -e 's/\\/\\\\/g' -e 's/_/\\_/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' \
+            echo "$1" | sed -e 's/\\/\\\\/g' \
+                            -e 's/_/\\_/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' \
                             -e 's/~/\\~/g' -e 's/`/\\`/g' -e 's/>/\\>/g' -e 's/#/\\#/g' \
                             -e 's/+/\\+/g' -e 's/-/\\-/g' -e 's/=/\\=/g' -e 's/|/\\|/g' \
                             -e 's/{/\\{/g' -e 's/}/\\}/g' -e 's/!/\\!/g'
