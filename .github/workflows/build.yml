@@ -220,7 +220,6 @@ jobs:
           TARGET_FILTER="${{ github.event.inputs.rebuild_target || '' }}"
           SKIP_CHECK="${{ github.event.inputs.skip_version_check || 'false' }}"
           
-          # 精準讀取 release-info 分支的構建元數據，徹底擺脫 Markdown 解析依賴
           LAST_BUILD_INFO="{}"
           if [ "$SKIP_CHECK" != "true" ]; then
             LAST_BUILD_INFO=$(curl -sSL -m ${CURL_TIMEOUT_API} "https://raw.githubusercontent.com/${{ github.repository }}/release-info/build-info.json" 2>/dev/null || echo "{}")
@@ -301,7 +300,6 @@ jobs:
             local marker="[${id} v${ver}]"
             local branch_url="https://github.com/$repo/tree/$branch"
             
-            # 使用機器讀取的歷史 JSON 比對版本
             LAST_VER=$(echo "$LAST_BUILD_INFO" | jq -r --arg id "$id" '.targets[]? | select(.target_id == $id) | .version_name // empty' 2>/dev/null | head -n 1)
             
             if [ "$FORCE_BUILD" = "true" ] || [ -n "$OVERRIDE_VERSION" ] || [ -n "$TARGET_FILTER" ] || [ "$SKIP_CHECK" = "true" ]; then
@@ -582,7 +580,6 @@ jobs:
           
           go build -v -trimpath -ldflags "-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid=" -tags "${{ steps.env.outputs.tags }}" -o "dist/$BIN_NAME" ./cmd/sing-box
           
-          # 寫入清單，防禦 GitHub Artifact 名稱漂移
           echo "{\"target_id\": \"${{ matrix.target.id }}\", \"platform\": \"${{ matrix.platform.name }}\", \"suffix\": \"${{ steps.env.outputs.suffix }}\"}" > dist/artifact-meta.json
 
       - name: Verify Binary Integrity
@@ -692,6 +689,17 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Cache go-mobile dependencies
+        if: ${{ matrix.target.sfa_repo != 'none' }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/gomobile
+            ~/go/pkg/mod/golang.org/x
+          key: gomobile-${{ runner.os }}-${{ hashFiles('sing-box/go.sum') }}
+          restore-keys: |
+            gomobile-${{ runner.os }}-
+
       - name: Init gomobile & Verify SDK
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
@@ -740,23 +748,21 @@ jobs:
             fi
             
             if [ ! -s "$PATCH_FILE" ]; then
-              echo "::warning::Patch $patch not found in local patches branch. Skipping."
-              continue
+              echo "::error::Failed to find critical patch in 'patches' branch: $patch"
+              exit 1
             fi
             
-            if [ -s "$PATCH_FILE" ]; then
-              git apply -v --whitespace=fix "$PATCH_FILE" || {
-                git apply -v --3way "$PATCH_FILE" && {
-                  if grep -rq "^<<<<<<< " ./; then
-                    echo "::error::Patch $patch left conflicts!"
-                    exit 1
-                  fi
-                } || {
-                  echo "::error::Patch $patch failed completely!"
+            git apply -v --whitespace=fix "$PATCH_FILE" || {
+              git apply -v --3way "$PATCH_FILE" && {
+                if grep -rq "^<<<<<<< " ./; then
+                  echo "::error::Patch $patch left conflicts!"
                   exit 1
-                }
+                fi
+              } || {
+                echo "::error::Patch $patch failed completely!"
+                exit 1
               }
-            fi
+            }
             rm -f "$PATCH_FILE"
           done
 
@@ -996,12 +1002,24 @@ jobs:
 
               if [ -f "$dir/libcronet.dll" ]; then
                 mv "$dir/libcronet.dll" .
-                zip -q9 "release_files/sing-box-${base}.zip" "sing-box.exe" "libcronet.dll" $([ -f "LICENSE" ] && echo "LICENSE")
-                zip -q9 "release_files/sing-box-${base}-original.zip" "sing-box-original.exe" "libcronet.dll" $([ -f "LICENSE" ] && echo "LICENSE")
+                
+                ZIP_ARGS=("sing-box.exe" "libcronet.dll")
+                [ -f "LICENSE" ] && ZIP_ARGS+=("LICENSE")
+                zip -q9 "release_files/sing-box-${base}.zip" "${ZIP_ARGS[@]}"
+                
+                ORIG_ZIP_ARGS=("sing-box-original.exe" "libcronet.dll")
+                [ -f "LICENSE" ] && ORIG_ZIP_ARGS+=("LICENSE")
+                zip -q9 "release_files/sing-box-${base}-original.zip" "${ORIG_ZIP_ARGS[@]}"
+                
                 rm -f libcronet.dll
               else
-                zip -q9 "release_files/sing-box-${base}.zip" "sing-box.exe" $([ -f "LICENSE" ] && echo "LICENSE")
-                zip -q9 "release_files/sing-box-${base}-original.zip" "sing-box-original.exe" $([ -f "LICENSE" ] && echo "LICENSE")
+                ZIP_ARGS=("sing-box.exe")
+                [ -f "LICENSE" ] && ZIP_ARGS+=("LICENSE")
+                zip -q9 "release_files/sing-box-${base}.zip" "${ZIP_ARGS[@]}"
+                
+                ORIG_ZIP_ARGS=("sing-box-original.exe")
+                [ -f "LICENSE" ] && ORIG_ZIP_ARGS+=("LICENSE")
+                zip -q9 "release_files/sing-box-${base}-original.zip" "${ORIG_ZIP_ARGS[@]}"
               fi
               
               if [ ! -f "release_files/sing-box-${base}.zip" ] || [ "$(stat -c%s "release_files/sing-box-${base}.zip" 2>/dev/null || stat -f%z "release_files/sing-box-${base}.zip" 2>/dev/null)" -lt 1024 ]; then
@@ -1066,7 +1084,12 @@ jobs:
               if [ -f "$dir/artifact-meta.json" ]; then
                 target_id=$(jq -r '.target_id' "$dir/artifact-meta.json")
                 platform=$(jq -r '.platform' "$dir/artifact-meta.json")
-                base="${target_id}-${platform}"
+                suffix=$(jq -r '.suffix' "$dir/artifact-meta.json")
+                if [ -z "$suffix" ] || [ "$suffix" == "null" ]; then
+                  base="${target_id}-${platform}"
+                else
+                  base="${target_id}-${platform}${suffix}"
+                fi
               else
                 base=$(basename "$dir" | sed 's/core-//' | sed 's/-[0-9]*$//')
               fi
@@ -1083,13 +1106,31 @@ jobs:
             if [[ -d "$dir" ]]; then mv "$dir"/* release_files/ 2>/dev/null || true; fi
           done
 
+          # 合併 APK 與動態生成 Core 元數據，確保 build-info.json 在僅 Core 更新時有效
           shopt -s nullglob
-          META_FILES=(./release_files/*-metadata.json)
-          if [ ${#META_FILES[@]} -gt 0 ]; then
-            jq -s --arg run_id "${{ github.run_id }}" --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{"global_run_id": $run_id, "built_at": $built_at, "targets": .}' "${META_FILES[@]}" > release_files/build-info.json
-          else
-            echo "{}" > release_files/build-info.json
-          fi
+          APK_META=(./release_files/*-metadata.json)
+          CORE_TARGETS=()
+          for f in release_files/sing-box-*.tar.gz release_files/sing-box-*.zip; do
+            if [[ "$f" == *"-original"* ]]; then continue; fi
+            base=$(basename "$f" | sed -E 's/\.tar\.gz$//' | sed -E 's/\.zip$//')
+            target_id=$(echo "$base" | sed 's/^sing-box-//')
+            ver_name=$(grep -oP 'v\K[^ ]+' ./tmp/workflow-metadata/release_notes.txt 2>/dev/null | head -1 || echo "unknown")
+            CORE_TARGETS+=("{\"target_id\":\"$target_id\", \"version_name\":\"$ver_name\", \"build_time\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}")
+          done
+
+          {
+            echo "{\"global_run_id\": \"${{ github.run_id }}\", \"built_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"targets\": ["
+            FIRST="true"
+            for meta in "${APK_META[@]}"; do
+              if [ "$FIRST" = "true" ]; then FIRST="false"; else echo ","; fi
+              cat "$meta"
+            done
+            for core in "${CORE_TARGETS[@]}"; do
+              if [ "$FIRST" = "true" ]; then FIRST="false"; else echo ","; fi
+              echo "$core"
+            done
+            echo "]}"
+          } | jq '.' > release_files/build-info.json || echo "{}" > release_files/build-info.json
 
           cat > release_body.txt <<'BODYEOF'
           # 🚀 sing-box 自動編譯
@@ -1125,6 +1166,7 @@ jobs:
           cat > release_files/install-linux.sh << 'EOF'
           #!/bin/bash
           set -euo pipefail
+          if [ "$(id -u)" -ne 0 ]; then SUDO_CMD="sudo"; else SUDO_CMD=""; fi
           REPO="${{ github.repository }}"
           TAG="sing-box"
           ARCH=$(uname -m)
@@ -1141,7 +1183,7 @@ jobs:
           FILE_NAME=$(basename "$ASSET_URL")
           tar -xzf "$FILE_NAME"
           chmod +x sing-box
-          sudo mv sing-box /usr/local/bin/
+          $SUDO_CMD mv sing-box /usr/local/bin/
           echo "✅ Installation complete."
           EOF
           chmod +x release_files/install-linux.sh
@@ -1254,14 +1296,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 清理 Stable 版本（保留 3 個）
-          gh release list --repo "${{ github.repository }}" --limit 50 --exclude-drafts | \
-            grep -iv "Pre-release" | awk '{print $1}' | tail -n +4 | \
-            xargs -r -I {} gh release delete {} --yes --cleanup-tag 2>/dev/null || true
+          gh release list --repo "${{ github.repository }}" --limit 50 --json tagName,isPrerelease --jq '.[] | select(.isPrerelease == false) | .tagName' | \
+            tail -n +4 | xargs -r -I {} gh release delete {} --yes --cleanup-tag 2>/dev/null || true
           
           # 清理 Pre-release 版本（保留 5 個）
-          gh release list --repo "${{ github.repository }}" --limit 50 --exclude-drafts | \
-            grep -i "Pre-release" | awk '{print $1}' | tail -n +6 | \
-            xargs -r -I {} gh release delete {} --yes --cleanup-tag 2>/dev/null || true
+          gh release list --repo "${{ github.repository }}" --limit 50 --json tagName,isPrerelease --jq '.[] | select(.isPrerelease == true) | .tagName' | \
+            tail -n +6 | xargs -r -I {} gh release delete {} --yes --cleanup-tag 2>/dev/null || true
 
       - name: Delete old workflow runs
         if: always()
@@ -1365,22 +1405,9 @@ jobs:
         if: ${{ steps.status.outputs.status == 'success' }}
         id: find_files
         run: |
-          find_latest_file() {
-            local pattern=$1
-            local result=$(find dist -type f -name "$pattern" ! -name "*-original*" -print -quit 2>/dev/null)
-            echo "$result"
-          }
-          
-          ANDROID_APK=$(find dist -name "*.apk" -type f -print -quit 2>/dev/null)
-          LINUX_TAR=$(find_latest_file '*linux*amd64-v3*.tar.gz')
-          [ -z "$LINUX_TAR" ] && LINUX_TAR=$(find_latest_file '*linux*amd64-v3*glibc*.tar.gz')
-          WINDOWS_ZIP=$(find_latest_file '*windows*amd64-v3*.zip')
-          
-          {
-            [ -n "$ANDROID_APK" ] && [ -f "$ANDROID_APK" ] && echo "$ANDROID_APK"
-            [ -n "$LINUX_TAR" ] && [ -f "$LINUX_TAR" ] && echo "$LINUX_TAR"
-            [ -n "$WINDOWS_ZIP" ] && [ -f "$WINDOWS_ZIP" ] && echo "$WINDOWS_ZIP"
-          } | grep -v '^$' | while read -r f; do
+          mapfile -t TG_FILES < <(find dist -maxdepth 1 -type f \( -name "*.apk" -o -name "*.tar.gz" -o -name "*.zip" \) ! -name "*-original*" -print 2>/dev/null)
+          > /tmp/tg_files.txt
+          for f in "${TG_FILES[@]}"; do
             SIZE=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
             if [ "$SIZE" -le 52428800 ]; then
               echo "$f" >> /tmp/tg_files.txt
