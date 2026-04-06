@@ -821,12 +821,12 @@ jobs:
             "${{ needs.init.outputs.version_code }}" "${{ matrix.target.ver }}" "${{ needs.init.outputs.go_version }}" > version.properties
 
           sed -Ei 's/(applicationId|namespace)\s*[=\(]\s*"([^"]+)"[\)\s]*/\1 = "com.android.internal.net"/' "$GRADLE_FILE"
-          sed -Ei 's/(minSdkVersion)\s*[=:]?\s*[0-9]+/\1 = 23/' "$GRADLE_FILE"
-          sed -Ei 's/(compileSdkVersion)\s*[=:]?\s*[0-9]+/\1 = 34/' "$GRADLE_FILE"
-          sed -Ei 's/(targetSdkVersion)\s*[=:]?\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" 2>/dev/null || true
-          sed -Ei 's/(minSdk)\s*[=:]?\s*[0-9]+/\1 = 23/' "$GRADLE_FILE"
-          sed -Ei 's/(compileSdk)\s*[=:]?\s*[0-9]+/\1 = 34/' "$GRADLE_FILE"
-          sed -Ei 's/(targetSdk)\s*[=:]?\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" 2>/dev/null || true
+          sed -Ei 's/(minSdkVersion)\s*=\s*[0-9]+/\1 = 23/' "$GRADLE_FILE"
+          sed -Ei 's/(compileSdkVersion)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE"
+          sed -Ei 's/(targetSdkVersion)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" 2>/dev/null || true
+          sed -Ei 's/(minSdk)\s*=\s*[0-9]+/\1 = 23/' "$GRADLE_FILE"
+          sed -Ei 's/(compileSdk)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE"
+          sed -Ei 's/(targetSdk)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" 2>/dev/null || true
           
           echo "✅ Patching complete. Ready to build."
 
