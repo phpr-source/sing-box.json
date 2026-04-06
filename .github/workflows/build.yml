@@ -157,7 +157,7 @@ jobs:
           fi
           
           cd puernya-src
-          git remote set-url sekai https://github.com/SagerNet/sing-box.git 2>/dev/null || \
+          git remote remove sekai 2>/dev/null || true
           git remote add sekai https://github.com/SagerNet/sing-box.git
           GIT_TERMINAL_PROMPT=0 git fetch --tags --force sekai
           
@@ -210,7 +210,6 @@ jobs:
             return 1
           }
           
-          MATRIX_JSON="[]"
           FORCE_BUILD="${{ github.event.inputs.force_build || 'false' }}"
           OVERRIDE_VERSION="${{ github.event.inputs.override_version || '' }}"
           TARGET_FILTER="${{ github.event.inputs.rebuild_target || '' }}"
@@ -224,6 +223,7 @@ jobs:
           
           echo "" > release_notes.txt
           rm -f /tmp/has_update_flag
+          > /tmp/matrix.jsonl
 
           check_branch() {
             local id="${1:-}" repo="${2:-}" branch="${3:-}" sfa_repo="${4:-}" sfa_branch="${5:-}"
@@ -297,11 +297,11 @@ jobs:
             if [ "$FORCE_BUILD" = "true" ] || [ -n "$OVERRIDE_VERSION" ] || [ -n "$TARGET_FILTER" ] || [ "$SKIP_CHECK" = "true" ]; then
               echo "true" > /tmp/has_update_flag
               echo "- 🔄 強制構建 **[$display_name]($branch_url)** \`v$ver\` ($time) $marker" >> release_notes.txt
-              MATRIX_JSON=$(echo "$MATRIX_JSON" | jq -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" '. + [{"id":$id,"repo":$repo,"branch":$branch,"sfa_repo":$sfa_repo,"sfa_branch":$sfa_branch,"ver":$ver,"time":$time}]')
+              jq -n -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" '{id:$id, repo:$repo, branch:$branch, sfa_repo:$sfa_repo, sfa_branch:$sfa_branch, ver:$ver, time:$time}' >> /tmp/matrix.jsonl
             elif [ "$LAST_VER" != "$ver" ] || [ -z "$LAST_VER" ]; then
               echo "true" > /tmp/has_update_flag
               echo "- ✨ 更新 **[$display_name]($branch_url)** 至 \`v$ver\`，發佈於 $time $marker" >> release_notes.txt
-              MATRIX_JSON=$(echo "$MATRIX_JSON" | jq -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" '. + [{"id":$id,"repo":$repo,"branch":$branch,"sfa_repo":$sfa_repo,"sfa_branch":$sfa_branch,"ver":$ver,"time":$time}]')
+              jq -n -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" '{id:$id, repo:$repo, branch:$branch, sfa_repo:$sfa_repo, sfa_branch:$sfa_branch, ver:$ver, time:$time}' >> /tmp/matrix.jsonl
             fi
           }
 
@@ -318,7 +318,7 @@ jobs:
             echo "- 📝 自動構建完成（無版本變更檢測）" > release_notes.txt
           fi
 
-          VALIDATED_MATRIX=$(echo "$MATRIX_JSON" | jq -c '[.[] | select((.ver // empty) != "" and (.time // empty) != "")]' 2>/dev/null || echo "[]")
+          VALIDATED_MATRIX=$(jq -s -c '[.[] | select((.ver // empty) != "" and (.time // empty) != "")]' /tmp/matrix.jsonl 2>/dev/null || echo "[]")
           if [ -z "$VALIDATED_MATRIX" ] || ! echo "$VALIDATED_MATRIX" | jq empty 2>/dev/null; then
             VALIDATED_MATRIX="[]"
           fi
@@ -539,7 +539,7 @@ jobs:
               if [ "$i" -eq 3 ]; then exit 1; fi
             done
             
-            go run ./cmd/build-naive --target="$TARGET" env 2>/dev/null | sed 's/^export //' >> "$GITHUB_ENV" || exit 1
+            go run ./cmd/build-naive --target="$TARGET" env 2>/dev/null | sed 's/^export //' | grep -E '^[A-Za-z0-9_]+=' >> "$GITHUB_ENV" || exit 1
             
           elif [ "${{ matrix.platform.goos }}" = "windows" ]; then
             mkdir -p "$GITHUB_WORKSPACE/sing-box/dist"
@@ -747,36 +747,19 @@ jobs:
             rm -f "$PATCH_FILE"
           done
 
-      - name: Streamline "Update" module & Apply Tweaks
+      - name: Patch Android Update Checker
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
-          set -euo pipefail
-          
-          if [[ "${{ matrix.target.repo }}" == *"reF1nd"* ]]; then
-            cd sing-box-for-android
-            
-            echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQKCi0g6ZqQ6JeP6K6+572u6aG16Z2i5Lit5bqU55So5Y2h54mH77yM5LiN5Yig6Zmk5Luj56CB5LuF5bGP6JS95YWl5Y+jCi0g56aB55So5omL5Yqo5qOA5p+l5pu05paw5oyJ6ZKu5ZKM6Ieq5Yqo5pu05paw5byA5YWzCi0g56aB55So5bqU55So5ZCv5Yqo5pe255qE6Ieq5Yqo5pu05paw5qOA5p+lCi0tLQogLi4uL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IHwgMTMgKysrKysrKysrKysrKwogLi4uL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0ICAgIHwgIDggKysrLS0tLS0KIC4uLi9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QgICB8ICA3IC0tLS0tLS0KIDMgZmlsZXMgY2hhbmdlZCwgMTYgaW5zZXJ0aW9ucygrKSwgMTIgZGVsZXRpb25zKC0pCgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0CmluZGV4IDU3NDQyMmIuLjFiMWI2YzkgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9NYWluQWN0aXZpdHkua3QKQEAgLTE5MSw2ICsxOTEsMTUgQEAgY2xhc3MgTWFpbkFjdGl2aXR5IDoKCiAgICAgICAgIGNvbm5lY3Rpb24ucmVjb25uZWN0KCkKCisgICAgICAgIC8vIOW8uuWItuemgeeUqOiHquWKqOabtOaWsOWKn+iDvQorICAgICAgICBTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQgPSBmYWxzZQorICAgICAgICAvLyDmoIforrDkuLrlt7Lmj5DnpLrov4fvvIzpmLLmraLmmL7npLrpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xlr7nor53moYYKKyAgICAgICAgU2V0dGluZ3MudXBkYXRlQ2hlY2tQcm9tcHRlZCA9IHRydWUKKyAgICAgICAgLy8g5riF6Zmk5Lu75L2V57yT5a2Y55qE5pu05paw54q25oCBCisgICAgICAgIFVwZGF0ZVN0YXRlLmNsZWFyKCkKKworICAgICAgICAvLyDoh6rliqjmm7TmlrDmo4Dmn6Xlt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgVXBkYXRlU3RhdGUubG9hZEZyb21DYWNoZSgpCiAgICAgICAgIGlmIChTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQpIHsKICAgICAgICAgICAgIGxpZmVjeWNsZVNjb3BlLmxhdW5jaChEaXNwYXRjaGVycy5JTykgewpAQCAtMjAyLDYgKzIxMSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgfQogICAgICAgICB9CisgICAgICAgICovCgogICAgICAgICBoYW5kbGVJbnRlbnQoaW50ZW50KQoKQEAgLTQ2NSw2ICs0NzUsOCBAQCBjbGFzcyBNYWluQWN0aXZpdHkgOgogICAgICAgICAgICAgKQogICAgICAgICB9CgorICAgICAgICAvLyDpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xmj5DnpLrlr7nor53moYblt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBjaGVjayBwcm9tcHQgZGlhbG9nIChzaG93biBvbmx5IG9uY2Ugb24gZmlyc3QgbGF1bmNoKQogICAgICAgICB2YXIgc2hvd1VwZGF0ZUNoZWNrUHJvbXB0IGJ5IHJlbWVtYmVyIHsgbXV0YWJsZVN0YXRlT2YoIVNldHRpbmdzLnVwZGF0ZUNoZWNrUHJvbXB0ZWQpIH0KICAgICAgICAgaWYgKHNob3dVcGRhdGVDaGVja1Byb21wdCkgewpAQCAtNTEzLDYgKzUyNSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICkKICAgICAgICAgfQorICAgICAgICAqLwoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBhdmFpbGFibGUgZGlhbG9nCiAgICAgICAgIHZhbCB1cGRhdGVJbmZvIGJ5IFVwZGF0ZVN0YXRlLnVwZGF0ZUluZm8KZGlmZiAtLWdpdCBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdAppbmRleCA4YWE2ZDIxLi4xYzJmNzlhIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvQXBwU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0CkBAIC00MDEsMTEgKzQwMSw2IEBAIGZ1biBBcHBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KSB7IFRleHQoIk5ldyIpIH0KLSAgICAgICAgICAgICAgICAgICAgICAgIH0KLSAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgbW9kaWZpZXIgPQogICAgICAgICAgICAgICAgICAgICBNb2RpZmllcgogICAgICAgICAgICAgICAgICAgICAgICAgLmNsaXAoUm91bmRlZENvcm5lclNoYXBlKHRvcFN0YXJ0ID0gMTIuZHAsIHRvcEVuZCA9IDEyLmRwKSksCkBAIC01MzUsNiArNTMwLDggQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgIH0KICAgICAgICAgfQoKKyAgICAgICAgLy8g5bey6ZqQ6JeP5pu05paw6K6+572u5ZKM5pON5L2c5Y2h54mHCisgICAgICAgIC8qCiAgICAgICAgIFNwYWNlcihtb2RpZmllciA9IE1vZGlmaWVyLmhlaWdodCg4LmRwKSkKCiAgICAgICAgIFRleHQoCkBAIC05OTUsNiArOTkyLDcgQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICB9CiAgICAgICAgIH0KKyAgICAgICAgKi8KICAgICB9CiB9CgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0CmluZGV4IGY0NjhmNTEuLjJhMzUzMTIgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QKQEAgLTUxLDcgKzUxLDYgQEAgaW1wb3J0IGFuZHJvaWR4Lm5hdmlnYXRpb24uTmF2Q29udHJvbGxlcgogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS5SCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLmNvbXBvc2UudG9wYmFyLk92ZXJyaWRlVG9wQmFyCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLmRhdGFiYXNlLlNldHRpbmdzCi1pbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLnVwZGF0ZS5VcGRhdGVTdGF0ZQogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS51dGlscy5Ib29rTW9kdWxlVXBkYXRlTm90aWZpZXIKIGltcG9ydCBpby5uZWtvaGFzZWthaS5zZmEudXRpbHMuSG9va1N0YXR1c0NsaWVudAoKQEAgLTY2LDcgKzY1LDYgQEAgZnVuIFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKCiAgICAgdmFsIGNvbnRleHQgPSBMb2NhbENvbnRleHQuY3VycmVudAogICAgIHZhbCBzY29wZSA9IHJlbWVtYmVyQ29yb3V0aW5lU2NvcGUoKQotICAgIHZhbCBoYXNVcGRhdGUgYnkgVXBkYXRlU3RhdGUuaGFzVXBkYXRlCiAgICAgdmFsIGhvb2tTdGF0dXMgYnkgSG9va1N0YXR1c0NsaWVudC5zdGF0dXMuY29sbGVjdEFzU3RhdGUoKQogICAgIHZhbCBoYXNQZW5kaW5nUHJpdmlsZWdlRG93bmdyYWRlID0gSG9va01vZHVsZVVwZGF0ZU5vdGlmaWVyLmlzRG93bmdyYWRlKGhvb2tTdGF0dXMpCiAgICAgdmFsIGhhc1BlbmRpbmdQcml2aWxlZ2VVcGRhdGUgPSBIb29rTW9kdWxlVXBkYXRlTm90aWZpZXIuaXNVcGdyYWRlKGhvb2tTdGF0dXMpCkBAIC0xMTUsMTEgKzExMyw2IEBAIGZ1biBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KSB7IFRleHQoIk5ldyIpIH0KLSAgICAgICAgICAgICAgICAgICAgICAgIH0KLSAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgbW9kaWZpZXIgPQogICAgICAgICAgICAgICAgICAgICBNb2RpZmllcgogICAgICAgICAgICAgICAgICAgICAgICAgLmNsaXAoUm91bmRlZENvcm5lclNoYXBlKHRvcFN0YXJ0ID0gMTIuZHAsIHRvcEVuZCA9IDEyLmRwKSksCi0tCjIuNTAuMSAoQXBwbGUgR2l0LTE1NSkK" | tr -d '\n\r ' | base64 -d > /tmp/sfa_patch.patch
-            
-            if ! git apply /tmp/sfa_patch.patch 2>/dev/null; then
-              echo "::warning::Failed to apply Android UI Base64 patch, falling back to dynamic sed injection"
-              TARGET_FILE=$(find . -name "*.kt" -exec grep -l "checkUpdateEnabled" {} \; 2>/dev/null | head -n 1 || echo "")
-              if [ -n "$TARGET_FILE" ] && [ -f "$TARGET_FILE" ]; then
-                echo "Found UI file: $TARGET_FILE"
-                sed -i 's/checkUpdateEnabled = true/checkUpdateEnabled = false/g' "$TARGET_FILE"
-                sed -i 's/updateCheckPrompted = false/updateCheckPrompted = true/g' "$TARGET_FILE"
-              else
-                echo "::warning::Could not find MainScreen.kt or equivalent. Update check button may remain active."
-              fi
-            fi
-            rm -f /tmp/sfa_patch.patch
-            cd ..
-          fi
-          
-          UPDATE_CHECKER=$(find sing-box-for-android -name "GitHubUpdateChecker.kt" -type f 2>/dev/null | head -n 1)
-          if [ -n "$UPDATE_CHECKER" ]; then
-            awk -v repo="${{ github.repository }}" '/REPO_URL[ \t]*=/ { sub(/".*"/, "\"" repo "\"") } 1' "$UPDATE_CHECKER" > tmp && mv tmp "$UPDATE_CHECKER"
+          UPDATE_FILE=$(find sing-box-for-android -name "GitHubUpdateChecker.kt" -type f 2>/dev/null | head -n 1)
+          if [ -n "$UPDATE_FILE" ]; then
+            sed -i "s|reF1nd/sing-box-releases|${{ github.repository }}|g" "$UPDATE_FILE"
+            sed -i "s|reF1nd/sing-box|${{ matrix.target.repo }}|g" "$UPDATE_FILE"
+            echo "✅ Update URL patched to own repository"
           fi
 
+      - name: Process Android Configuration
+        if: ${{ matrix.target.sfa_repo != 'none' }}
+        run: |
           cd sing-box-for-android
           printf 'VERSION_CODE=%s\nVERSION_NAME=%s\nGO_VERSION=%s\n' \
             "${{ needs.init.outputs.version_code }}" "${{ matrix.target.ver }}" "${{ needs.init.outputs.go_version }}" > version.properties
@@ -799,6 +782,7 @@ jobs:
           sed -Ei 's/(targetSdk|targetSdkVersion)\s*[=:]\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" 2>/dev/null || true
 
       - name: Sync Gradle Wrapper Version
+        if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           cd sing-box-for-android
           GRADLE_VERS=$(grep distributionUrl gradle/wrapper/gradle-wrapper.properties 2>/dev/null | sed 's/.*gradle-\(.*\)-all\.zip/\1/' || echo "")
@@ -1195,18 +1179,23 @@ jobs:
           esac
           echo "Fetching latest release for $FILE_ARCH..."
           
-          ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | jq -r --arg arch "$FILE_ARCH" '.assets[] | select(.name | test($arch) and test("tar\\.gz$") and (test("original") | not)) | .browser_download_url' | head -1)
-          
-          if [ -n "$ASSET_URL" ]; then
-            HTTP_CODE=$(curl -sI -o /dev/null -w "%{http_code}" "$ASSET_URL" || echo "000")
-            if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "302" ]; then
-              ASSET_URL=""
-            fi
-          fi
+          ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | \
+            grep '"browser_download_url"' | \
+            grep -i "$FILE_ARCH" | \
+            grep -v "original" | \
+            grep "\.tar\.gz" | \
+            head -n 1 | \
+            sed 's/.*"browser_download_url": "//;s/"//')
           
           if [ -z "$ASSET_URL" ]; then
-            echo "Standard package not found or inaccessible, looking for original uncompressed variant..."
-            ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | jq -r --arg arch "$FILE_ARCH" '.assets[] | select(.name | test($arch) and test("tar\\.gz$") and test("original")) | .browser_download_url' | head -1)
+            echo "Standard package not found, looking for original uncompressed variant..."
+            ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | \
+              grep '"browser_download_url"' | \
+              grep -i "$FILE_ARCH" | \
+              grep "original" | \
+              grep "\.tar\.gz" | \
+              head -n 1 | \
+              sed 's/.*"browser_download_url": "//;s/"//')
           fi
           
           [ -z "$ASSET_URL" ] && { echo "❌ No release found for $FILE_ARCH"; exit 1; }
@@ -1258,16 +1247,18 @@ jobs:
         run: |
           set -euo pipefail
           
-          HAS_TESTING="false"
-          if grep -qE "(Testing|Building|testing|alpha|beta|rc)" release_body.txt; then
-            HAS_TESTING="true"
+          if grep -qE "(Test|Testing|Building|testing|alpha|beta|rc)" release_body.txt; then
+            RELEASE_FLAG="--prerelease"
+          else
+            RELEASE_FLAG=""
           fi
-          RELEASE_FLAG=""
-          [ "$HAS_TESTING" = "true" ] && RELEASE_FLAG="--prerelease"
           
-          gh release delete sing-box --yes --cleanup-tag 2>/dev/null || true
-          sleep 3
-          gh release create sing-box --title "sing-box" --notes-file release_body.txt $RELEASE_FLAG ./release_files/*
+          if gh release view sing-box --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release edit sing-box --notes-file release_body.txt ./release_files/* || \
+            { gh release delete sing-box --yes --cleanup-tag 2>/dev/null || true; gh release create sing-box --notes-file release_body.txt $RELEASE_FLAG ./release_files/*; }
+          else
+            gh release create sing-box --notes-file release_body.txt $RELEASE_FLAG ./release_files/*
+          fi
 
       - name: Generate Build Provenance
         if: steps.check_files.outputs.files_exist == 'true'
@@ -1448,8 +1439,10 @@ jobs:
           done
           
           if [ -s /tmp/tg_files.txt ]; then
-            FILES_LIST=$(paste -sd',' /tmp/tg_files.txt)
-            echo "files_list=${FILES_LIST}" >> "$GITHUB_OUTPUT"
+            EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1 2>/dev/null || echo "EOM")
+            echo "files_list<<$EOF_MARKER" >> "$GITHUB_OUTPUT"
+            cat /tmp/tg_files.txt >> "$GITHUB_OUTPUT"
+            echo "$EOF_MARKER" >> "$GITHUB_OUTPUT"
             echo "skip_tg_file_upload=false" >> "$GITHUB_ENV"
           else
             echo "skip_tg_file_upload=true" >> "$GITHUB_ENV"
