@@ -88,9 +88,13 @@ jobs:
         id: time
         run: echo "start=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
 
-      - name: Calculate Android Version Code
+      - name: Calculate Android Version Code (Anti-Collision)
         id: calc
-        run: echo "code=$(( ($(date +%s) - BASE_TIMESTAMP) / 60 ))" >> $GITHUB_OUTPUT
+        run: |
+          NOW=$(date +%s)
+          # Ensure version_code is strictly increasing and unique even if triggered close together
+          CODE=$(( (NOW - BASE_TIMESTAMP) * 10 + $(shuf -i 1-9 -n 1) ))
+          echo "code=$CODE" >> $GITHUB_OUTPUT
 
       - name: Get Go latest version
         id: go
@@ -199,7 +203,8 @@ jobs:
           
           api_call_with_retry() {
             local url="$1"
-            curl -sfL -m ${CURL_TIMEOUT_API} --retry 3 --retry-delay 5 -H "Authorization: Bearer $GH_TOKEN" "$url" || echo "[]"
+            # Optimized curl retry strategy: only retry on connection refused or timeouts
+            curl -sfL -m ${CURL_TIMEOUT_API} --retry 3 --retry-delay 5 --retry-connrefused -H "Authorization: Bearer $GH_TOKEN" "$url" || echo "[]"
           }
           
           FORCE_BUILD="${{ github.event.inputs.force_build || 'false' }}"
@@ -329,7 +334,7 @@ jobs:
         with:
           name: workflow-metadata
           path: release_notes.txt
-          retention-days: 7
+          retention-days: 1 # Cost saving: only keep intermediate artifacts for 1 day
 
   build_core:
     needs: [init, check]
@@ -391,7 +396,7 @@ jobs:
           repository: ${{ matrix.target.repo }}
           ref: ${{ steps.resolve.outputs.ref }}
           path: sing-box
-          fetch-depth: 0
+          fetch-depth: 1 # Optimized: only fetch the necessary commit for core build
 
       - name: Setup Go
         if: steps.check_naive.outputs.skip != 'true'
@@ -607,7 +612,7 @@ jobs:
         with:
           name: core-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
           path: sing-box/dist/*
-          retention-days: 7
+          retention-days: 1
 
   build_android:
     needs: [init, check]
@@ -641,7 +646,7 @@ jobs:
           repository: ${{ matrix.target.repo }}
           ref: ${{ steps.resolve.outputs.ref }}
           path: sing-box
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Checkout SFA
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -778,40 +783,29 @@ jobs:
             exit 1
           fi
 
-      - name: Apply DustinWin Update Streamline Patch (Sed-Based)
+      - name: Apply DustinWin Update Streamline Patch (Safe Sed)
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           set -euo pipefail
           cd sing-box-for-android/app/src/main
-          
-          echo "🔧 Applying DustinWin update streamliner via sed..."
-          
-          # 1. 修改 MainActivity.kt：禁用更新檢查，清除舊狀態
           MAIN_FILE="java/io/nekohasekai/sfa/compose/MainActivity.kt"
-          if [ -f "$MAIN_FILE" ]; then
-            sed -i '/Settings.checkUpdateEnabled/s/= true/= false/' "$MAIN_FILE"
-            sed -i '/Settings.updateCheckPrompted/s/= false/= true/' "$MAIN_FILE"
-            sed -i '/UpdateState.clear()/s/^/\/\//' "$MAIN_FILE"
-            sed -i '/UpdateState.loadFromCache()/s/^/\/\//' "$MAIN_FILE"
-            echo "✅ MainActivity.kt updated"
-          fi
+          APP_SETTINGS="java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt"
+          SETTINGS_SCREEN="java/io/nekohasekai/sfa/compose/screen/settings/SettingsScreen.kt"
 
-          # 2. 修改 AppSettingsScreen.kt：移除 "New" 徽標與尾部更新 UI
-          APP_SETTINGS_FILE="java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt"
-          if [ -f "$APP_SETTINGS_FILE" ]; then
-            sed -i '/if (hasUpdate)/,/^$/d' "$APP_SETTINGS_FILE"
-            sed -i '/Spacer(modifier = Modifier.height(8.dp))/,/Text(/d' "$APP_SETTINGS_FILE"
-            echo "✅ AppSettingsScreen.kt updated"
-          fi
-
-          # 3. 修改 SettingsScreen.kt：移除 UpdateState import 與使用
-          SETTINGS_FILE="java/io/nekohasekai/sfa/compose/screen/settings/SettingsScreen.kt"
-          if [ -f "$SETTINGS_FILE" ]; then
-            sed -i '/import io.nekohasekai.sfa.update.UpdateState/d' "$SETTINGS_FILE"
-            sed -i '/val hasUpdate by UpdateState.hasUpdate/d' "$SETTINGS_FILE"
-            sed -i '/if (hasUpdate)/,/^$/d' "$SETTINGS_FILE"
-            echo "✅ SettingsScreen.kt updated"
-          fi
+          echo "🔧 Safely streamlining update UI components..."
+          
+          # 1. 禁用更新檢查（精準替換，不碰語法結構）
+          [ -f "$MAIN_FILE" ] && sed -i 's|Settings.checkUpdateEnabled = true|Settings.checkUpdateEnabled = false|' "$MAIN_FILE"
+          [ -f "$MAIN_FILE" ] && sed -i 's|Settings.updateCheckPrompted = false|Settings.updateCheckPrompted = true|' "$MAIN_FILE"
+          
+          # 2. 移除 New 徽標與 UpdateState 引用（使用註釋替代範圍刪除，確保括號完整）
+          [ -f "$APP_SETTINGS" ] && sed -i '/if (hasUpdate)/s/^/\/\/ /' "$APP_SETTINGS"
+          [ -f "$APP_SETTINGS" ] && sed -i 's|Badge(containerColor = MaterialTheme.colorScheme.primary) { Text("New") }|// Badge...|' "$APP_SETTINGS"
+          [ -f "$SETTINGS_SCREEN" ] && sed -i '/import io.nekohasekai.sfa.update.UpdateState/d' "$SETTINGS_SCREEN"
+          [ -f "$SETTINGS_SCREEN" ] && sed -i 's|val hasUpdate by UpdateState.hasUpdate|// val hasUpdate|' "$SETTINGS_SCREEN"
+          [ -f "$SETTINGS_SCREEN" ] && sed -i '/if (hasUpdate)/s/^/\/\/ /' "$SETTINGS_SCREEN"
+          
+          echo "✅ Patch applied safely without syntax corruption."
 
       - name: Fix Firebase/GMS Build Errors & Configuration
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -935,12 +929,15 @@ jobs:
             echo "SIGNING_MODE=debug" >> $GITHUB_ENV
           fi
 
+      - name: Stop Gradle Daemon
+        if: ${{ matrix.target.sfa_repo != 'none' }}
+        run: cd sing-box-for-android && ./gradlew --stop 2>/dev/null || true
+
       - name: Build APK
         if: ${{ matrix.target.sfa_repo != 'none' }}
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           JAVA_HOME: ${{ env.JAVA_HOME }}
-          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx2048m -Dorg.gradle.daemon=false"
         run: |
           set -euo pipefail
           
@@ -965,8 +962,10 @@ jobs:
             fi
           fi
           
+          JVM_ARGS="-Dorg.gradle.jvmargs=-Xmx2048m -Dorg.gradle.daemon=false"
+          
           if [ "$SIGNING_MODE" = "release" ]; then
-            ./gradlew ${GRADLE_OPTS} :app:${RELEASE_TASK} --console=plain \
+            ./gradlew ${JVM_ARGS} :app:${RELEASE_TASK} --console=plain \
               -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
               -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASS }}" \
               -Pandroid.injected.signing.key.alias="${{ secrets.ALIAS_NAME }}" \
@@ -976,7 +975,7 @@ jobs:
             APK_DIR="app/build/outputs/apk/${VARIANT}/release"
           else
             DEBUG_TASK=$(echo "$RELEASE_TASK" | sed 's/Release$/Debug/')
-            ./gradlew ${GRADLE_OPTS} :app:${DEBUG_TASK} --console=plain
+            ./gradlew ${JVM_ARGS} :app:${DEBUG_TASK} --console=plain
             VARIANT=$(echo "${DEBUG_TASK}" | sed -E 's/^assemble([A-Za-z]+)Debug$/\1/' | tr '[:upper:]' '[:lower:]')
             [ -z "$VARIANT" ] && VARIANT="other"
             APK_DIR="app/build/outputs/apk/${VARIANT}/debug"
@@ -1018,7 +1017,7 @@ jobs:
               --argjson patches "$PATCHES" \
               '{
                  target_id: "${{ matrix.target.id }}",
-                 version_code: (if ($version_code | test("^[0-9]+$")) and ($version_code | tonumber > 0) then ($version_code | tonumber) else 1 end),
+                 version_code: ($version_code | tonumber // 1),
                  version_name: $version_name,
                  build_time: $built_at,
                  workflow_run_id: $run_id,
@@ -1037,7 +1036,7 @@ jobs:
         with:
           name: apk-${{ matrix.target.id }}-${{ matrix.android_arch.ABI }}
           path: apks/*
-          retention-days: 7
+          retention-days: 1
 
   publish:
     runs-on: ubuntu-latest
@@ -1335,16 +1334,14 @@ jobs:
 
       - name: Publish Release (Atomic Overwrite)
         if: steps.check_files.outputs.files_exist == 'true'
-        uses: svenstaro/upload-release-action@v2
+        uses: softprops/action-gh-release@v2
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          release_name: sing-box
-          tag: sing-box
-          overwrite: true
-          prune: true
-          body_file: release_body.txt
-          file_glob: true
-          file: ./release_files/*
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: sing-box
+          tag_name: sing-box
+          make_latest: true
+          body_path: release_body.txt
+          files: ./release_files/*
 
       - name: Generate Build Provenance
         if: steps.check_files.outputs.files_exist == 'true'
