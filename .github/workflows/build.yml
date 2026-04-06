@@ -92,7 +92,6 @@ jobs:
         id: calc
         run: |
           NOW=$(date +%s)
-          # Ensure version_code is strictly increasing and unique even if triggered close together
           CODE=$(( (NOW - BASE_TIMESTAMP) * 10 + $(shuf -i 1-9 -n 1) ))
           echo "code=$CODE" >> $GITHUB_OUTPUT
 
@@ -203,7 +202,6 @@ jobs:
           
           api_call_with_retry() {
             local url="$1"
-            # Optimized curl retry strategy: only retry on connection refused or timeouts
             curl -sfL -m ${CURL_TIMEOUT_API} --retry 3 --retry-delay 5 --retry-connrefused -H "Authorization: Bearer $GH_TOKEN" "$url" || echo "[]"
           }
           
@@ -334,7 +332,7 @@ jobs:
         with:
           name: workflow-metadata
           path: release_notes.txt
-          retention-days: 1 # Cost saving: only keep intermediate artifacts for 1 day
+          retention-days: 1
 
   build_core:
     needs: [init, check]
@@ -396,7 +394,7 @@ jobs:
           repository: ${{ matrix.target.repo }}
           ref: ${{ steps.resolve.outputs.ref }}
           path: sing-box
-          fetch-depth: 1 # Optimized: only fetch the necessary commit for core build
+          fetch-depth: 1
 
       - name: Setup Go
         if: steps.check_naive.outputs.skip != 'true'
@@ -794,11 +792,9 @@ jobs:
 
           echo "🔧 Safely streamlining update UI components..."
           
-          # 1. 禁用更新檢查（精準替換，不碰語法結構）
           [ -f "$MAIN_FILE" ] && sed -i 's|Settings.checkUpdateEnabled = true|Settings.checkUpdateEnabled = false|' "$MAIN_FILE"
           [ -f "$MAIN_FILE" ] && sed -i 's|Settings.updateCheckPrompted = false|Settings.updateCheckPrompted = true|' "$MAIN_FILE"
           
-          # 2. 移除 New 徽標與 UpdateState 引用（使用註釋替代範圍刪除，確保括號完整）
           [ -f "$APP_SETTINGS" ] && sed -i '/if (hasUpdate)/s/^/\/\/ /' "$APP_SETTINGS"
           [ -f "$APP_SETTINGS" ] && sed -i 's|Badge(containerColor = MaterialTheme.colorScheme.primary) { Text("New") }|// Badge...|' "$APP_SETTINGS"
           [ -f "$SETTINGS_SCREEN" ] && sed -i '/import io.nekohasekai.sfa.update.UpdateState/d' "$SETTINGS_SCREEN"
@@ -818,11 +814,10 @@ jobs:
           fi
           
           echo "🔍 Step 1: Aggressively Remove GMS/Firebase Plugin..."
-          sed -i '/com\.google\.gms\.google-services/d' "$GRADLE_FILE"
-          
-          sed -i '/firebase-bom/d' "$GRADLE_FILE"
-          sed -i '/implementation.*firebase/d' "$GRADLE_FILE"
-          sed -i '/implementation.*analytics/d' "$GRADLE_FILE"
+          sed -i '/com\.google\.gms\.google-services/d' "$GRADLE_FILE" || true
+          sed -i '/firebase-bom/d' "$GRADLE_FILE" || true
+          sed -i '/implementation.*firebase/d' "$GRADLE_FILE" || true
+          sed -i '/implementation.*analytics/d' "$GRADLE_FILE" || true
           
           echo "🔧 Step 2: Create Valid Dummy google-services.json..."
           mkdir -p app
@@ -858,12 +853,12 @@ jobs:
           printf 'VERSION_CODE=%s\nVERSION_NAME=%s\nGO_VERSION=%s\n' \
             "${{ needs.init.outputs.version_code }}" "${{ matrix.target.ver }}" "${{ needs.init.outputs.go_version }}" > version.properties
 
-          sed -Ei 's/(minSdkVersion)\s*=\s*[0-9]+/\1 = 23/' "$GRADLE_FILE"
-          sed -Ei 's/(compileSdkVersion)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE"
-          sed -Ei 's/(targetSdkVersion)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" 2>/dev/null || true
-          sed -Ei 's/(minSdk)\s*=\s*[0-9]+/\1 = 23/' "$GRADLE_FILE"
-          sed -Ei 's/(compileSdk)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE"
-          sed -Ei 's/(targetSdk)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" 2>/dev/null || true
+          sed -Ei 's/(minSdkVersion)\s*=\s*[0-9]+/\1 = 23/' "$GRADLE_FILE" || true
+          sed -Ei 's/(compileSdkVersion)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" || true
+          sed -Ei 's/(targetSdkVersion)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" || true
+          sed -Ei 's/(minSdk)\s*=\s*[0-9]+/\1 = 23/' "$GRADLE_FILE" || true
+          sed -Ei 's/(compileSdk)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" || true
+          sed -Ei 's/(targetSdk)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" || true
           
           echo "✅ Patching complete. Ready to build."
 
@@ -929,10 +924,6 @@ jobs:
             echo "SIGNING_MODE=debug" >> $GITHUB_ENV
           fi
 
-      - name: Stop Gradle Daemon
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        run: cd sing-box-for-android && ./gradlew --stop 2>/dev/null || true
-
       - name: Build APK
         if: ${{ matrix.target.sfa_repo != 'none' }}
         env:
@@ -950,85 +941,75 @@ jobs:
           
           cd sing-box-for-android
           chmod +x gradlew
-          ./gradlew --version --console=plain >/dev/null 2>&1 || true
           
           RELEASE_TASK="assembleOtherRelease"
-          if ! ./gradlew --dry-run :app:${RELEASE_TASK} --console=plain >/dev/null 2>&1; then
-            AVAILABLE=$(./gradlew :app:tasks --console=plain 2>/dev/null | grep -iE "^assemble.*Release$" | head -n 1 | awk '{print $1}')
-            if [ -n "$AVAILABLE" ]; then
-              RELEASE_TASK=${AVAILABLE}
-            else
-              echo "::warning::No Release task found, defaulting to ${RELEASE_TASK} (may fail)"
-            fi
+          if ! ./gradlew :app:tasks --console=plain 2>/dev/null | grep -q "^${RELEASE_TASK}\b"; then
+            RELEASE_TASK="assembleRelease"
           fi
+          
+          echo "Building task: ${RELEASE_TASK} ..."
           
           JVM_ARGS="-Dorg.gradle.jvmargs=-Xmx2048m -Dorg.gradle.daemon=false"
           
           if [ "$SIGNING_MODE" = "release" ]; then
-            ./gradlew ${JVM_ARGS} :app:${RELEASE_TASK} --console=plain \
+            ./gradlew ${RELEASE_TASK} --console=plain ${JVM_ARGS} \
               -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
               -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASS }}" \
               -Pandroid.injected.signing.key.alias="${{ secrets.ALIAS_NAME }}" \
               -Pandroid.injected.signing.key.password="${{ secrets.ALIAS_PASS }}"
-            VARIANT=$(echo "${RELEASE_TASK}" | sed -E 's/^assemble([A-Za-z]+)Release$/\1/' | tr '[:upper:]' '[:lower:]')
-            [ -z "$VARIANT" ] && VARIANT="other"
-            APK_DIR="app/build/outputs/apk/${VARIANT}/release"
           else
             DEBUG_TASK=$(echo "$RELEASE_TASK" | sed 's/Release$/Debug/')
-            ./gradlew ${JVM_ARGS} :app:${DEBUG_TASK} --console=plain
-            VARIANT=$(echo "${DEBUG_TASK}" | sed -E 's/^assemble([A-Za-z]+)Debug$/\1/' | tr '[:upper:]' '[:lower:]')
-            [ -z "$VARIANT" ] && VARIANT="other"
-            APK_DIR="app/build/outputs/apk/${VARIANT}/debug"
+            ./gradlew ${DEBUG_TASK} --console=plain ${JVM_ARGS}
           fi
           
-          if [ -z "${APK_DIR:-}" ] || [ ! -d "${APK_DIR}" ]; then
-            APK_DIR="app/build/outputs/apk"
-          fi
-          
-          mkdir -p ../apks
           arch_abi="${{ matrix.android_arch.ABI }}"
           
-          apk=$(find "${APK_DIR}" -type f -name "*${arch_abi}*.apk" -print -quit 2>/dev/null || true)
-          [ -z "$apk" ] && apk=$(find app/build/outputs/apk/ -type f -name "*.apk" -print -quit 2>/dev/null || true)
+          cd ..
+          apk=$(find sing-box-for-android/app/build/outputs/apk -type f -name "*${arch_abi}*.apk" -print -quit 2>/dev/null || true)
+          [ -z "$apk" ] && apk=$(find sing-box-for-android/app/build/outputs/apk -type f -name "*.apk" -print -quit 2>/dev/null || true)
           
-          if [ -n "$apk" ] && [ -f "$apk" ]; then
-            basename_file=$(basename "$apk")
-            mv -f "$apk" "../apks/SFA-${{ matrix.target.id }}-${arch_abi}-${basename_file}"
-            
-            if [[ "${{ matrix.target.repo }}" == *"reF1nd"* ]]; then
-              PATCHES='["concurrent_dial","make_log_better","fix_interrupt_connections"]'
-            else
-              PATCHES='[]'
-            fi
-            
-            SIGNING_META="Release"
-            [ "$SIGNING_MODE" = "debug" ] && SIGNING_META="Debug (Unsigned)"
-            
-            jq -n \
-              --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              --arg run_id "${{ github.run_id }}" \
-              --argjson naive_enabled "${{ github.event.inputs.enable_naive || 'false' }}" \
-              --arg version_code "${{ needs.init.outputs.version_code }}" \
-              --arg version_name "${{ matrix.target.ver }}" \
-              --arg target_repo "${{ matrix.target.repo }}" \
-              --arg target_branch "${{ matrix.target.branch }}" \
-              --arg build_tags "${FINAL_TAGS_EXPORT}" \
-              --arg signing_meta "$SIGNING_META" \
-              --argjson patches "$PATCHES" \
-              '{
-                 target_id: "${{ matrix.target.id }}",
-                 version_code: ($version_code | tonumber // 1),
-                 version_name: $version_name,
-                 build_time: $built_at,
-                 workflow_run_id: $run_id,
-                 naive_enabled: $naive_enabled,
-                 target_repo: $target_repo,
-                 target_branch: $target_branch,
-                 build_tags: $build_tags,
-                 signing_status: $signing_meta,
-                 patches_applied: $patches
-               }' > "../apks/SFA-${{ matrix.target.id }}-${arch_abi}-metadata.json"
+          if [ -z "$apk" ] || [ ! -f "$apk" ]; then
+            echo "::error::❌ Failed to find APK for ${arch_abi}"
+            exit 1
           fi
+          
+          mkdir -p apks
+          basename_file=$(basename "$apk")
+          mv -f "$apk" "apks/SFA-${{ matrix.target.id }}-${arch_abi}-${basename_file}"
+          
+          if [[ "${{ matrix.target.repo }}" == *"reF1nd"* ]]; then
+            PATCHES='["concurrent_dial","make_log_better","fix_interrupt_connections"]'
+          else
+            PATCHES='[]'
+          fi
+          
+          SIGNING_META="Release"
+          [ "$SIGNING_MODE" = "debug" ] && SIGNING_META="Debug (Unsigned)"
+          
+          jq -n \
+            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg run_id "${{ github.run_id }}" \
+            --argjson naive_enabled "${{ github.event.inputs.enable_naive || 'false' }}" \
+            --arg version_code "${{ needs.init.outputs.version_code }}" \
+            --arg version_name "${{ matrix.target.ver }}" \
+            --arg target_repo "${{ matrix.target.repo }}" \
+            --arg target_branch "${{ matrix.target.branch }}" \
+            --arg build_tags "${FINAL_TAGS_EXPORT}" \
+            --arg signing_meta "$SIGNING_META" \
+            --argjson patches "$PATCHES" \
+            '{
+               target_id: "${{ matrix.target.id }}",
+               version_code: ($version_code | tonumber // 1),
+               version_name: $version_name,
+               build_time: $built_at,
+               workflow_run_id: $run_id,
+               naive_enabled: $naive_enabled,
+               target_repo: $target_repo,
+               target_branch: $target_branch,
+               build_tags: $build_tags,
+               signing_status: $signing_meta,
+               patches_applied: $patches
+             }' > "apks/SFA-${{ matrix.target.id }}-${arch_abi}-metadata.json"
 
       - name: Upload APK
         if: ${{ matrix.target.sfa_repo != 'none' }}
