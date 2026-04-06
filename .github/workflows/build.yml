@@ -679,7 +679,6 @@ jobs:
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           cd sing-box-for-android
-          # Fix missing newline at EOF to prevent property concatenation
           if [ -f "gradle.properties" ] && [ -s "gradle.properties" ]; then
             if [ "$(tail -c 1 gradle.properties | xxd -p | tr -d ' ')" != "0a" ]; then
               echo "" >> gradle.properties
@@ -687,6 +686,7 @@ jobs:
           fi
           echo "android.enableResourceOptimizations=false" >> gradle.properties
           echo "android.useAndroidX=true" >> gradle.properties
+          echo "android.defaults.buildfeatures.buildConfig=true" >> gradle.properties
 
       - name: Verify & Export Java Path
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -951,7 +951,7 @@ jobs:
           chmod +x gradlew
           
           RELEASE_TASK="assembleOtherRelease"
-          if ! ./gradlew :app:tasks --console-plain 2>/dev/null | grep -q "^${RELEASE_TASK}\b"; then
+          if ! ./gradlew :app:tasks --console=plain 2>/dev/null | awk '{print $1}' | grep -q "^${RELEASE_TASK}$"; then
             RELEASE_TASK="assembleRelease"
           fi
           
@@ -960,14 +960,14 @@ jobs:
           JVM_ARGS="-Dorg.gradle.jvmargs=-Xmx2048m -Dorg.gradle.daemon=false"
           
           if [ "$SIGNING_MODE" = "release" ]; then
-            ./gradlew ${RELEASE_TASK} --console-plain ${JVM_ARGS} \
+            ./gradlew ${RELEASE_TASK} --console=plain ${JVM_ARGS} \
               -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
               -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASS }}" \
               -Pandroid.injected.signing.key.alias="${{ secrets.ALIAS_NAME }}" \
               -Pandroid.injected.signing.key.password="${{ secrets.ALIAS_PASS }}"
           else
             DEBUG_TASK=$(echo "$RELEASE_TASK" | sed 's/Release$/Debug/')
-            ./gradlew ${DEBUG_TASK} --console-plain ${JVM_ARGS}
+            ./gradlew ${DEBUG_TASK} --console=plain ${JVM_ARGS}
           fi
           
           arch_abi="${{ matrix.android_arch.ABI }}"
