@@ -674,12 +674,19 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-          
+
       - name: Fix Gradle Properties for NDK Compatibility
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
-          echo "android.enableResourceOptimizations=false" >> sing-box-for-android/gradle.properties
-          echo "android.useAndroidX=true" >> sing-box-for-android/gradle.properties
+          cd sing-box-for-android
+          # Fix missing newline at EOF to prevent property concatenation
+          if [ -f "gradle.properties" ] && [ -s "gradle.properties" ]; then
+            if [ "$(tail -c 1 gradle.properties | xxd -p | tr -d ' ')" != "0a" ]; then
+              echo "" >> gradle.properties
+            fi
+          fi
+          echo "android.enableResourceOptimizations=false" >> gradle.properties
+          echo "android.useAndroidX=true" >> gradle.properties
 
       - name: Verify & Export Java Path
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -853,12 +860,9 @@ jobs:
           printf 'VERSION_CODE=%s\nVERSION_NAME=%s\nGO_VERSION=%s\n' \
             "${{ needs.init.outputs.version_code }}" "${{ matrix.target.ver }}" "${{ needs.init.outputs.go_version }}" > version.properties
 
-          sed -Ei 's/(minSdkVersion)\s*=\s*[0-9]+/\1 = 23/' "$GRADLE_FILE" || true
-          sed -Ei 's/(compileSdkVersion)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" || true
-          sed -Ei 's/(targetSdkVersion)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" || true
-          sed -Ei 's/(minSdk)\s*=\s*[0-9]+/\1 = 23/' "$GRADLE_FILE" || true
-          sed -Ei 's/(compileSdk)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" || true
-          sed -Ei 's/(targetSdk)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" || true
+          sed -Ei 's/(minSdkVersion|minSdk)\s*[= ]+\s*[0-9]+/\1 = 23/' "$GRADLE_FILE" || true
+          sed -Ei 's/(compileSdkVersion|compileSdk)\s*[= ]+\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" || true
+          sed -Ei 's/(targetSdkVersion|targetSdk)\s*[= ]+\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" || true
           
           echo "✅ Patching complete. Ready to build."
 
@@ -924,6 +928,10 @@ jobs:
             echo "SIGNING_MODE=debug" >> $GITHUB_ENV
           fi
 
+      - name: Stop Gradle Daemon
+        if: ${{ matrix.target.sfa_repo != 'none' }}
+        run: cd sing-box-for-android && ./gradlew --stop 2>/dev/null || true
+
       - name: Build APK
         if: ${{ matrix.target.sfa_repo != 'none' }}
         env:
@@ -943,7 +951,7 @@ jobs:
           chmod +x gradlew
           
           RELEASE_TASK="assembleOtherRelease"
-          if ! ./gradlew :app:tasks --console=plain 2>/dev/null | grep -q "^${RELEASE_TASK}\b"; then
+          if ! ./gradlew :app:tasks --console-plain 2>/dev/null | grep -q "^${RELEASE_TASK}\b"; then
             RELEASE_TASK="assembleRelease"
           fi
           
@@ -952,14 +960,14 @@ jobs:
           JVM_ARGS="-Dorg.gradle.jvmargs=-Xmx2048m -Dorg.gradle.daemon=false"
           
           if [ "$SIGNING_MODE" = "release" ]; then
-            ./gradlew ${RELEASE_TASK} --console=plain ${JVM_ARGS} \
+            ./gradlew ${RELEASE_TASK} --console-plain ${JVM_ARGS} \
               -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
               -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASS }}" \
               -Pandroid.injected.signing.key.alias="${{ secrets.ALIAS_NAME }}" \
               -Pandroid.injected.signing.key.password="${{ secrets.ALIAS_PASS }}"
           else
             DEBUG_TASK=$(echo "$RELEASE_TASK" | sed 's/Release$/Debug/')
-            ./gradlew ${DEBUG_TASK} --console=plain ${JVM_ARGS}
+            ./gradlew ${DEBUG_TASK} --console-plain ${JVM_ARGS}
           fi
           
           arch_abi="${{ matrix.android_arch.ABI }}"
