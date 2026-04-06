@@ -764,35 +764,68 @@ jobs:
             echo "✅ Update URL patched to own repository"
           fi
 
-      - name: Process Android Configuration
+      - name:  Fix Firebase/GMS Build Errors & Configuration
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           cd sing-box-for-android
+          GRADLE_FILE="app/build.gradle.kts"
           
-          if [ -f "app/build.gradle.kts" ]; then
-            GRADLE_FILE="app/build.gradle.kts"
-          elif [ -f "app/build.gradle" ]; then
-            GRADLE_FILE="app/build.gradle"
-          else
-            echo "::error::找不到 build.gradle(.kts)"
-            exit 1
+          if [ ! -f "$GRADLE_FILE" ]; then
+            if [ -f "app/build.gradle" ]; then
+              GRADLE_FILE="app/build.gradle"
+            else
+              echo "::error::找不到 build.gradle(.kts)"
+              exit 1
+            fi
           fi
-
-          sed -i 's/id("com\.google\.gms\.google-services")/\/\/ id("com.google.gms.google-services")/g' "$GRADLE_FILE"
-          sed -i 's|apply plugin: .*"com\.google\.gms\.google-services".*|// apply plugin: "com.google.gms.google-services"|' "$GRADLE_FILE"
           
-          sed -i '/firebase-bom/d; /firebase-/d; /analytics/d' "$GRADLE_FILE"
-
+          echo "🔍 Step 1: Aggressively Remove GMS/Firebase Plugin..."
+          sed -i '/com\.google\.gms\.google-services/d' "$GRADLE_FILE"
+          
+          sed -i '/firebase-bom/d' "$GRADLE_FILE"
+          sed -i '/implementation.*firebase/d' "$GRADLE_FILE"
+          sed -i '/implementation.*analytics/d' "$GRADLE_FILE"
+          
+          echo "🔧 Step 2: Create Valid Dummy google-services.json..."
           mkdir -p app
-          echo '{"client": [], "project_info": {"project_number": "0", "firebase_project_id": "ci-placeholder"}}' > app/google-services.json
+          cat > app/google-services.json << 'JSONEOF'
+          {
+            "project_info": {
+              "project_number": "0",
+              "project_id": "ci-dummy-placeholder",
+              "storage_bucket": "ci-dummy.appspot.com"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:0:android:dummy:ci",
+                  "android_client_info": {
+                    "package_name": "io.reF1nd.sfa" 
+                  }
+                },
+                "oauth_client": [],
+                "api_key": [ { "current_key": "fake-key-does-not-matter" } ],
+                "services": {
+                  "appinvite_service": {
+                    "other_platform_oauth_client": []
+                  }
+                }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          JSONEOF
 
+          echo "🔧 Step 3: Apply Version & Package Config..."
           printf 'VERSION_CODE=%s\nVERSION_NAME=%s\nGO_VERSION=%s\n' \
             "${{ needs.init.outputs.version_code }}" "${{ matrix.target.ver }}" "${{ needs.init.outputs.go_version }}" > version.properties
 
           sed -Ei 's/(applicationId|namespace)\s*[=\(]\s*"([^"]+)"[\)\s]*/\1 = "com.android.internal.net"/' "$GRADLE_FILE"
-          sed -Ei 's/(minSdkVersion|minSdk)\s*[=:]\s*[0-9]+/\1 = 23/' "$GRADLE_FILE"
-          sed -Ei 's/(compileSdk|compileSdkVersion)\s*[=:]\s*[0-9]+/\1 = 34/' "$GRADLE_FILE"
-          sed -Ei 's/(targetSdk|targetSdkVersion)\s*[=:]\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" 2>/dev/null || true
+          sed -Ei 's/(minSdk)|minSdkVersion/\1 = 23/' "$GRADLE_FILE"
+          sed -Ei 's/(compileSdk)|compileSdkVersion/\1 = 34/' "$GRADLE_FILE"
+          sed -Ei 's/(targetSdk)|targetSdkVersion/\1 = 34/' "$GRADLE_FILE" 2>/dev/null || true
+          
+          echo "✅ Patching complete. Ready to build."
 
       - name: Sync Gradle Wrapper Version
         if: ${{ matrix.target.sfa_repo != 'none' }}
