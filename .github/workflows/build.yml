@@ -161,10 +161,10 @@ jobs:
           git remote add sekai https://github.com/SagerNet/sing-box.git
           GIT_TERMINAL_PROMPT=0 git fetch --tags --force sekai
           
-          ver=$(CGO_ENABLED=0 go run ./cmd/internal/read_tag 2>/dev/null || \
-                git describe --tags --abbrev=0 2>/dev/null || \
-                git log -1 --format=%h 2>/dev/null || echo "")
-          ver=$(echo "$ver" | sed 's/^v//')
+          ver=$(CGO_ENABLED=0 go run ./cmd/internal/read_tag 2>/dev/null | sed 's/^v//' || echo "")
+          if [ -z "$ver" ]; then
+            ver=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || git log -1 --format=%h 2>/dev/null || echo "")
+          fi
           
           if [ -z "$ver" ]; then
             commit=$(git rev-parse HEAD)
@@ -667,8 +667,6 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ needs.init.outputs.go_version }}
-          cache: true
-          cache-dependency-path: 'sing-box/go.sum'
 
       - name: Setup Android NDK
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -698,7 +696,7 @@ jobs:
           path: |
             ~/.cache/gomobile
             ~/.android/sdk
-          key: gomobile-${{ runner.os }}-ndk28
+          key: gomobile-${{ runner.os }}-ndk28-${{ hashFiles('sing-box/go.sum') }}
 
       - name: Custom Gradle Cache
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -764,19 +762,42 @@ jobs:
             echo "✅ Update URL patched to own repository"
           fi
 
-      - name:  Fix Firebase/GMS Build Errors & Configuration
+      - name: Change Package Name (Safe Sed)
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           cd sing-box-for-android
           GRADLE_FILE="app/build.gradle.kts"
           
           if [ ! -f "$GRADLE_FILE" ]; then
-            if [ -f "app/build.gradle" ]; then
-              GRADLE_FILE="app/build.gradle"
-            else
-              echo "::error::找不到 build.gradle(.kts)"
-              exit 1
-            fi
+             GRADLE_FILE=$(find . -name "build.gradle" -path "*/app/*" | head -n 1)
+          fi
+          
+          if [ -f "$GRADLE_FILE" ]; then
+            sed -i 's|applicationId "io.reF1nd.sfa"|applicationId "com.android.internal.net"|g' "$GRADLE_FILE"
+            sed -i 's|applicationId = "io.reF1nd.sfa"|applicationId = "com.android.internal.net"|g' "$GRADLE_FILE"
+            sed -i 's|namespace("io.nekohasekai.sfa")|namespace("com.android.internal.net")|g' "$GRADLE_FILE"
+            sed -i 's|namespace = "io.nekohasekai.sfa"|namespace = "com.android.internal.net"|g' "$GRADLE_FILE"
+            echo "✅ Package name updated safely."
+          else
+            echo "::error::Cannot find build.gradle(.kts) to change package name!"
+            exit 1
+          fi
+
+      - name: Apply DustinWin Update Streamline Patch
+        if: ${{ matrix.target.sfa_repo != 'none' }}
+        run: |
+          echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQKCi0g6ZqQ6JeP6K6+572u6aG16Z2i5Lit5bqU55So5Y2h54mH77yM5LiN5Yig6Zmk5Luj56CB5LuF5bGP6JS95YWl5Y+jCi0g56aB55So5omL5Yqo5qOA5p+l5pu05paw5oyJ6ZKu5ZKM6Ieq5Yqo5pu05paw5byA5YWzCi0g56aB55So5bqU55So5ZCv5Yqo5pe255qE6Ieq5Yqo5pu05paw5qOA5p+lCi0tLQogLi4uL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IHwgMTMgKysrKysrKysrKysrKwogLi4uL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0ICAgIHwgIDggKysrLS0tLS0KIC4uLi9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QgICB8ICA3IC0tLS0tLS0KIDMgZmlsZXMgY2hhbmdlZCwgMTYgaW5zZXJ0aW9ucygrKSwgMTIgZGVsZXRpb25zKC0pCgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0CmluZGV4IDU3NDQyMmIuLjFiMWI2YzkgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9NYWluQWN0aXZpdHkua3QKQEAgLTE5MSw2ICsxOTEsMTUgQEAgY2xhc3MgTWFpbkFjdGl2aXR5IDoKCiAgICAgICAgIGNvbm5lY3Rpb24ucmVjb25uZWN0KCkKCisgICAgICAgIC8vIOW8uuWItuemgeeUqOiHquWKqOabtOaWsOWKn+iDvQorICAgICAgICBTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQgPSBmYWxzZQorICAgICAgICAvLyDmoIforrDkuLrlt7Lmj5DnpLrov4fvvIzpmLLmraLmmL7npLrpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xlr7nor53moYYKKyAgICAgICAgU2V0dGluZ3MudXBkYXRlQ2hlY2tQcm9tcHRlZCA9IHRydWUKKyAgICAgICAgLy8g5riF6Zmk5Lu75L2V57yT5a2Y55qE5pu05paw54q25oCBCisgICAgICAgIFVwZGF0ZVN0YXRlLmNsZWFyKCkKKworICAgICAgICAvLyDoh6rliqjmm7TmlrDmo4Dmn6Xlt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgVXBkYXRlU3RhdGUubG9hZEZyb21DYWNoZSgpCiAgICAgICAgIGlmIChTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQpIHsKICAgICAgICAgICAgIGxpZmVjeWNsZVNjb3BlLmxhdW5jaChEaXNwYXRjaGVycy5JTykgewpAQCAtMjAyLDYgKzIxMSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgfQogICAgICAgICB9CisgICAgICAgICovCgogICAgICAgICBoYW5kbGVJbnRlbnQoaW50ZW50KQoKQEAgLTQ2NSw2ICs0NzUsOCBAQCBjbGFzcyBNYWluQWN0aXZpdHkgOgogICAgICAgICAgICAgKQogICAgICAgICB9CgorICAgICAgICAvLyDpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xmj5DnpLrlr7nor53moYblt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBjaGVjayBwcm9tcHQgZGlhbG9nIChzaG93biBvbmx5IG9uY2Ugb24gZmlyc3QgbGF1bmNoKQogICAgICAgICB2YXIgc2hvd1VwZGF0ZUNoZWNrUHJvbXB0IGJ5IHJlbWVtYmVyIHsgbXV0YWJsZVN0YXRlT2YoIVNldHRpbmdzLnVwZGF0ZUNoZWNrUHJvbXB0ZWQpIH0KICAgICAgICAgaWYgKHNob3dVcGRhdGVDaGVja1Byb21wdCkgewpAQCAtNTEzLDYgKzUyNSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICkKICAgICAgICAgfQorICAgICAgICAqLwoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBhdmFpbGFibGUgZGlhbG9nCiAgICAgICAgIHZhbCB1cGRhdGVJbmZvIGJ5IFVwZGF0ZVN0YXRlLnVwZGF0ZUluZm8KZGlmZiAtLWdpdCBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdAppbmRleCA4YWE2ZDIxLi4xYzJmNzlhIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvQXBwU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0CkBAIC00MDEsMTEgKzQwMSwxMiBAQCBmdW4gQXBwU2V0dGluZ3NTY3JlZW4obmF2Q29udHJvbGxlcjogTmF2Q29udHJvbGxlcikgewogICAgICAgICAgICAgICAgICAgICAgICAgICAgIHRpbnQgPSBNYXRlcmlhbFRoZW1lLmNvbG9yU2NoZW1lLnByaW1hcnksCiAgICAgICAgICAgICAgICAgICAgICAgICApCiAgICAgICAgICAgICAgICAgICAgIH0sCi0gICAgICAgICAgICAgICAgICAgIHRyYWlsaW5nQ29udGVudCA9IHsKLSAgICAgICAgICAgICAgICAgICAgICAgIGlmIChoYXNVcGRhdGUpIHsKLSAgICAgICAgICAgICAgICAgICAgICAgICAgICBCYWRnZShjb250YWluZXJDb2xvciA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSkgeyBUZXh0KCJOZXciKSB9Ci0gICAgICAgICAgICAgICAgICAgICAgICB9Ci0gICAgICAgICAgICAgICAgICAgIH0sCiAgICAgICAgICAgICAgICAgICAgIG1vZGlmaWVyID0KICAgICAgICAgICAgICAgICAgICAgTW9kaWZpZXIKICAgICAgICAgICAgICAgICAgICAgICAgIC5jbGlwKFJvdW5kZWRDb3JuZXJTaGFwZSh0b3BTdGFydCA9IDEyLmRwLCB0b3BFbmQgPSAxMi5kcCkpLApAQCAtNTM1LDYgKzUzMCw4IEBAIGZ1biBBcHBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICB9CiAgICAgICAgIH0KCorICAgICAgICAvLyDlt7LpmrDol4/mm7TmlrDorr7nve7lkow5o63kvZzljahnib4KKyAgICAgICAgLyoKICAgICAgICAgU3BhY2VyKG1vZGlmaWVyID0gTW9kaWZpZXIuaGVpZ2h0KDguZHApKQoKICAgICAgICAgVGV4dCgKQEAgLTk5NSw2ICs5OTIsNyBAQCBmdW4gQXBwU2V0dGluZ3NTY3JlZW4obmF2Q29udHJvbGxlcjogTmF2Q29udHJvbGxlcikgewogICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgIH0KICAgICAgICAgfQorICAgICAgICAqLwogICAgIH0KIH0KCmRpZmYgLS1naXQgYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QKaW5kZXggZjQ2OGY1MS4uMmEzNTMxMiAxMDA2NDQKLS0tIGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0CisrKyBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdApAQCAtNTEsNyArNTEsNiBAQCBpbXBvcnQgYW5kcm9pZHgubmF2aWdhdGlvbi5OYXZDb250cm9sbGVyCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLlIKIGltcG9ydCBpby5uZWtvaGFzZWthaS5zZmEuY29tcG9zZS50b3BiYXIuT3ZlcnJpZGVUb3BCYXIKIGltcG9ydCBpby5uZWtvaGFzZWthaS5zZmEuZGF0YWJhc2UuU2V0dGluZ3MKLWltcG9ydCBpby5uZWtvaGFzZWthaS5zZmEudXBkYXRlLlVwZGF0ZVN0YXRlCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLnV0aWxzLkhvb2tNb2R1bGVVcGRhdGVOb3RpZmllcgogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS51dGlscy5Ib29rU3RhdHVzQ2xpZW50CgpAQCAtNjYsNyArNjUsNiBAQCBmdW4gU2V0dGluZ3NTY3JlZW4obmF2Q29udHJvbGxlcjogTmF2Q29udHJvbGxlcikgewoKICAgICB2YWwgY29udGV4dCA9IExvY2FsQ29udGV4dC5jdXJyZW50CiAgICAgdmFsIHNjb3BlID0gcmVtZW1iZXJDb3JvdXRpbmVTY29wZSgpCi0gICAgdmFsIGhhc1VwZGF0ZSBieSBVcGRhdGVTdGF0ZS5oYXNVcGRhdGUKICAgICB2YWwgaG9va1N0YXR1cyBieSBIb29rU3RhdHVzQ2xpZW50LnN0YXR1cy5jb2xsZWN0QXNTdGF0ZSgpCiAgICAgdmFsIGhhc1BlbmRpbmdQcml2aWxlZ2VEb3duZ3JhZGUgPSBIb29rTW9kdWxlVXBkYXRlTm90aWZpZXIuaXNEb3duZ3JhZGUoaG9va1N0YXR1cykKICAgICB2YWwgaGFzUGVuZGluZ1ByaXZpbGVnZVVwZGF0ZSA9IEhvb2tNb2R1bGVVcGRhdGVOb3RpZmllci5pc1VwZ3JhZGUoaG9va1N0YXR1cykKQEAgLTExNSwxMSArMTEzLDYgQEAgZnVuIFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgICB0aW50ID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5LAogICAgICAgICAgICAgICAgICAgICAgICAgKQogICAgICAgICAgICAgICAgICAgICB9LAotICAgICAgICAgICAgICAgICAgICB0cmFpbGluZ0NvbnRlbnQgPSB7Ci0gICAgICAgICAgICAgICAgICAgICAgICBpZiAoaGFzVXBkYXRlKSB7Ci0gICAgICAgICAgICAgICAgICAgICAgICAgICAgQmFkZ2UoY29udGFpbmVyQ29sb3IgPSBNYXRlcmlhbFRoZW1lLmNvbG9yU2NoZW1lLnByaW1hcnkpCi0gICAgICAgICAgICAgICAgICAgICAgICB9Ci0gICAgICAgICAgICAgICAgICAgIH0sCiAgICAgICAgICAgICAgICAgICAgIG1vZGlmaWVyID0KICAgICAgICAgICAgICAgICAgICAgTW9kaWZpZXIKICAgICAgICAgICAgICAgICAgICAgICAgIC5jbGlwKFJvdW5kZWRDb3JuZXJTaGFwZSh0b3BTdGFydCA9IDEyLmRwLCB0b3BFbmQgPSAxMi5kcCkpCi0tCjIuNTAuMSAoQXBwbGUgR2l0LTE1NSkK" | base64 -d > ./streamline-update.patch
+          cd sing-box-for-android
+          git apply ../streamline-update.patch || echo "::warning::Patch apply warning"
+
+      - name: Fix Firebase/GMS Build Errors & Configuration
+        if: ${{ matrix.target.sfa_repo != 'none' }}
+        run: |
+          cd sing-box-for-android
+          GRADLE_FILE="app/build.gradle.kts"
+          
+          if [ ! -f "$GRADLE_FILE" ]; then
+             GRADLE_FILE=$(find . -name "build.gradle" -path "*/app/*" | head -n 1)
           fi
           
           echo "🔍 Step 1: Aggressively Remove GMS/Firebase Plugin..."
@@ -820,7 +841,6 @@ jobs:
           printf 'VERSION_CODE=%s\nVERSION_NAME=%s\nGO_VERSION=%s\n' \
             "${{ needs.init.outputs.version_code }}" "${{ matrix.target.ver }}" "${{ needs.init.outputs.go_version }}" > version.properties
 
-          sed -Ei 's/(applicationId|namespace)\s*[=\(]\s*"([^"]+)"[\)\s]*/\1 = "com.android.internal.net"/' "$GRADLE_FILE"
           sed -Ei 's/(minSdkVersion)\s*=\s*[0-9]+/\1 = 23/' "$GRADLE_FILE"
           sed -Ei 's/(compileSdkVersion)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE"
           sed -Ei 's/(targetSdkVersion)\s*=\s*[0-9]+/\1 = 34/' "$GRADLE_FILE" 2>/dev/null || true
@@ -874,13 +894,11 @@ jobs:
         env:
           EXPECTED_SHA1: ${{ secrets.EXPECTED_SHA1_FINGERPRINT || '' }}
         run: |
-          echo "${{ secrets.ANDROID_KEYSTORE }}" | tr -d '\n\r ' > /tmp/keystore.b64
-          
-          if ! base64 -d /tmp/keystore.b64 > ./sing-box-for-android/app/release.keystore 2>/dev/null; then
-            echo "::error::❌ Keystore Base64 解碼失敗。請檢查 Secrets 是否為連續字符串（無換行）。"
+          printf "%s" "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > ./sing-box-for-android/app/release.keystore 2>/dev/null || {
+            echo "::error::❌ Keystore Base64 decode failed."
             echo "SIGNING_MODE=debug" >> $GITHUB_ENV
             exit 0
-          fi
+          }
           
           chmod 600 ./sing-box-for-android/app/release.keystore
           
@@ -940,11 +958,15 @@ jobs:
             APK_DIR="app/build/outputs/apk/${VARIANT}/debug"
           fi
           
+          if [ -z "${APK_DIR:-}" ] || [ ! -d "${APK_DIR}" ]; then
+            APK_DIR="app/build/outputs/apk"
+          fi
+          
           mkdir -p ../apks
           arch_abi="${{ matrix.android_arch.ABI }}"
           
-          apk=$(find "${APK_DIR}" -type f -name "*${arch_abi}*.apk" -print -quit 2>/dev/null)
-          [ -z "$apk" ] && apk=$(find app/build/outputs/apk/ -type f -name "*${arch_abi}*.apk" -print -quit 2>/dev/null)
+          apk=$(find "${APK_DIR}" -type f -name "*${arch_abi}*.apk" -print -quit 2>/dev/null || true)
+          [ -z "$apk" ] && apk=$(find app/build/outputs/apk/ -type f -name "*.apk" -print -quit 2>/dev/null || true)
           
           if [ -n "$apk" ] && [ -f "$apk" ]; then
             basename_file=$(basename "$apk")
@@ -994,6 +1016,7 @@ jobs:
           retention-days: 7
 
   publish:
+    runs-on: ubuntu-latest
     needs: [init, check, build_core, build_android]
     if: >-
       always() &&
@@ -1001,7 +1024,6 @@ jobs:
       (needs.check.result == 'success' || needs.check.result == 'skipped') &&
       needs.check.outputs.has_update == 'true' &&
       (needs.build_core.result == 'success' || needs.build_core.result == 'partial_success' || needs.build_android.result == 'success' || needs.build_android.result == 'partial_success')
-    runs-on: ubuntu-latest
     steps:
       - name: Setup UPX
         uses: crazy-max/ghaction-upx@v4
@@ -1165,20 +1187,20 @@ jobs:
             CORE_TARGETS+=("{\"target_id\":\"$target_id\", \"version_name\":\"$ver_name\", \"build_time\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}")
           done
 
-          if [ ${#APK_META[@]} -gt 0 ] || [ ${#CORE_TARGETS[@]} -gt 0 ]; then
-            {
-              echo "{\"global_run_id\": \"${{ github.run_id }}\", \"built_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"targets\": ["
-              FIRST="true"
-              for meta in "${APK_META[@]}"; do
-                if [ "$FIRST" = "true" ]; then FIRST="false"; else echo ","; fi
-                cat "$meta"
-              done
-              for core in "${CORE_TARGETS[@]}"; do
-                if [ "$FIRST" = "true" ]; then FIRST="false"; else echo ","; fi
-                echo "$core"
-              done
-              echo "]}"
-            } | jq '.' > release_files/build-info.json || echo "{}" > release_files/build-info.json
+          TARGETS_LIST=()
+          for meta in "${APK_META[@]}"; do
+            TARGETS_LIST+=("$(jq -c '.' "$meta")")
+          done
+          for core in "${CORE_TARGETS[@]}"; do
+            TARGETS_LIST+=("$core")
+          done
+
+          if [ ${#TARGETS_LIST[@]} -gt 0 ]; then
+            printf '%s\n' "${TARGETS_LIST[@]}" | jq -s --arg run_id "${{ github.run_id }}" --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
+              global_run_id: $run_id,
+              built_at: $built_at,
+              targets: .
+            }' > release_files/build-info.json || echo "{}" > release_files/build-info.json
           else
             echo "{}" > release_files/build-info.json
           fi
