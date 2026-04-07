@@ -86,7 +86,7 @@ jobs:
         id: time
         run: echo "start=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
 
-      - name: Calculate Android Version Code (Anti-Collision)
+      - name: Calculate Android Version Code
         id: calc
         run: |
           CODE=$(( ($(date +%s) / 60) + ${{ github.run_number }} ))
@@ -515,11 +515,9 @@ jobs:
           elif [ "${{ matrix.platform.goos }}" = "windows" ]; then
             mkdir -p "$GITHUB_WORKSPACE/sing-box/dist"
             
-            # 🚀 借鑑 yagh779: 預編制二進制直下，大幅節省編譯時間
             if curl -fL -o "$GITHUB_WORKSPACE/sing-box/dist/libcronet.dll.zip" "https://github.com/yagh779/sing-box-releases/releases/download/cronet/libcronet.dll.zip" 2>/dev/null; then
               unzip -q "$GITHUB_WORKSPACE/sing-box/dist/libcronet.dll.zip" -d "$GITHUB_WORKSPACE/sing-box/dist" 2>/dev/null || true
               rm -f "$GITHUB_WORKSPACE/sing-box/dist/libcronet.dll.zip"
-              echo "✅ Prebuilt cronet downloaded successfully."
             fi
             
             if [ ! -f "$GITHUB_WORKSPACE/sing-box/dist/libcronet.dll" ]; then
@@ -601,6 +599,7 @@ jobs:
           compression-level: 0
 
   build_android:
+    runs-on: ubuntu-latest
     needs: [init, check]
     timeout-minutes: 60
     if: >-
@@ -613,301 +612,143 @@ jobs:
       fail-fast: false
       matrix:
         target: ${{ fromJson(needs.check.outputs.matrix) }}
-        android_arch:
-          - { GOARCH: arm64, ABI: arm64-v8a }
-    runs-on: ubuntu-latest
+    env:
+      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
     steps:
-      - name: Resolve Commit
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        id: resolve
-        run: |
-          COMMIT="${{ github.event.inputs.build_commit || '' }}"
-          COMMIT="$(echo "$COMMIT" | xargs)"
-          [ -z "$COMMIT" ] && COMMIT="${{ matrix.target.branch }}"
-          echo "ref=$COMMIT" >> $GITHUB_OUTPUT
-
-      - name: Checkout Core
-        if: ${{ matrix.target.sfa_repo != 'none' }}
+      - name: Checkout `Core`
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.target.repo }}
-          ref: ${{ steps.resolve.outputs.ref }}
+          ref: ${{ matrix.target.branch }}
           path: sing-box
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: Clean Workspace
-        if: ${{ matrix.target.sfa_repo != 'none' && contains(matrix.target.repo, 'reF1nd') }}
-        working-directory: sing-box
-        run: |
-          git clean -fdx
-          git reset --hard
-
-      - name: Checkout SFA
-        if: ${{ matrix.target.sfa_repo != 'none' }}
+      - name: Checkout `Android Client`
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.target.sfa_repo }}
           ref: ${{ matrix.target.sfa_branch }}
           path: sing-box-for-android
 
-      - name: Setup Go
-        if: ${{ matrix.target.sfa_repo != 'none' }}
+      - name: Setup `Go`
         uses: actions/setup-go@v5
         with:
           go-version: ${{ needs.init.outputs.go_version }}
 
-      - name: Setup Android NDK
-        if: ${{ matrix.target.sfa_repo != 'none' }}
+      - name: Setup `Android NDK`
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
 
-      - name: Setup OpenJDK
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        id: setup-java
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Verify & Export Java Path
-        if: ${{ matrix.target.sfa_repo != 'none' }}
+      - name: Setup `OpenJDK`
         run: |
-          java -version
-          echo "JAVA_HOME=${{ steps.setup-java.outputs.path }}" >> $GITHUB_ENV
+          sudo apt update && sudo apt install -y openjdk-17-jdk-headless
+          /usr/lib/jvm/java-17-openjdk-amd64/bin/java --version
 
-      - name: Cache gomobile & Android SDK
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/gomobile
-            ~/.android/sdk
-          key: gomobile-${{ runner.os }}-ndk28-${{ hashFiles('sing-box/go.sum') }}
-
-      - name: Custom Gradle Cache
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('sing-box-for-android/**/*.gradle*', 'sing-box-for-android/**/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
-
-      - name: Patch Android Update Checker
-        if: ${{ matrix.target.sfa_repo != 'none' }}
+      - name: Build `library` (libbox.aar)
         run: |
-          UPDATE_FILE=$(find sing-box-for-android -name "GitHubUpdateChecker.kt" -type f 2>/dev/null | head -n 1)
-          if [ -n "$UPDATE_FILE" ]; then
-            sed -i "s|reF1nd/sing-box-releases|${{ github.repository }}|g" "$UPDATE_FILE"
-            sed -i "s|reF1nd/sing-box|${{ matrix.target.repo }}|g" "$UPDATE_FILE"
-            echo "✅ Update URL patched to own repository"
-          fi
-
-      - name: Change Package Name & Patch SDK Versions
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        run: |
-          cd sing-box-for-android
-          GRADLE_FILE="app/build.gradle.kts"
-          [ ! -f "$GRADLE_FILE" ] && GRADLE_FILE=$(find . -name "build.gradle" -path "*/app/*" | head -n 1)
-          
-          echo "🔧 Patching Package ID & SDK Versions..."
-          # 1. 修改應用包名
-          sed -Ei 's/(applicationId|namespace)\s*=?\s*"io\.(reF1nd|nekohasekai)\.sfa[^"]*"/\1 = "io.nekohasekai.sfa.custom"/g' "$GRADLE_FILE" 2>/dev/null || true
-          
-          # 2. 🔑 核心修復：強制將 minSdk 提升至 23，匹配 gomobile -androidapi 23
-          sed -Ei 's/(minSdk|minSdkVersion)\s*=?\s*([0-9]+)/minSdk = 23/g' "$GRADLE_FILE" 2>/dev/null || true
-          
-          # 3. Manifest 層級兜底（防止 Gradle DSL 解析失敗）
-          sed -i 's/android:minSdkVersion="21"/android:minSdkVersion="23"/g' app/src/main/AndroidManifest.xml 2>/dev/null || true
-          
-          echo "✅ SDK & Package ID patched successfully."
-
-      - name: Apply Safe UI Streamline Patch
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        run: |
-          set -euo pipefail
-          cd sing-box-for-android
-          
-          echo "🔧 Safely streamlining update UI components..."
-          # 使用增強的正則 sed 替換，即使失敗也不會中斷後續編譯 (|| true)
-          sed -E -i 's/Settings\.checkUpdateEnabled *= *true/Settings.checkUpdateEnabled = false/g' app/src/main/java/**/MainActivity.kt 2>/dev/null || true
-          sed -E -i 's/Settings\.updateCheckPrompted *= *false/Settings.updateCheckPrompted = true/g' app/src/main/java/**/MainActivity.kt 2>/dev/null || true
-          
-          # 禁用有問題的 badge 導入，防止編譯報錯
-          sed -E -i 's/val hasUpdate by UpdateState\.hasUpdate/\/\/ val hasUpdate/g' app/src/main/java/**/SettingsScreen.kt 2>/dev/null || true
-          sed -E -i '/if *\(hasUpdate\)/s/^/\/\/ /g' app/src/main/java/**/SettingsScreen.kt 2>/dev/null || true
-          sed -E -i '/if *\(hasUpdate\)/s/^/\/\/ /g' app/src/main/java/**/AppSettingsScreen.kt 2>/dev/null || true
-          
-          echo "✅ Sed Patches applied safely."
-
-      - name: Fix Firebase/GMS Build Errors & Configuration
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        run: |
-          cd sing-box-for-android
-          GRADLE_FILE="app/build.gradle.kts"
-          
-          if [ ! -f "$GRADLE_FILE" ]; then
-             GRADLE_FILE=$(find app -name "build.gradle" -path "*/app/*" | head -n 1)
-          fi
-          
-          echo "🔍 Step 1: Aggressively Remove GMS/Firebase Plugin..."
-          sed -i '/com\.google\.gms\.google-services/d' "$GRADLE_FILE" || true
-          sed -i '/firebase-bom/d' "$GRADLE_FILE" || true
-          sed -i '/implementation.*firebase/d' "$GRADLE_FILE" || true
-          sed -i '/implementation.*analytics/d' "$GRADLE_FILE" || true
-          
-          echo "🔧 Step 2: Apply Version Config..."
-          printf 'VERSION_CODE=%s\nVERSION_NAME=%s\nGO_VERSION=%s\n' \
-            "${{ needs.init.outputs.version_code }}" "${{ matrix.target.ver }}" "${{ needs.init.outputs.go_version }}" > version.properties
-
-          echo "✅ Patching complete. Ready to build."
-
-      - name: Fix Gradle Properties for Modern AGP
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        run: |
-          cd sing-box-for-android
-          if [ -f "gradle.properties" ]; then
-            sed -i '/android.enableResourceOptimizations/d' gradle.properties 2>/dev/null || true
-            sed -i '/android.enableBuildConfigGeneration/d' gradle.properties 2>/dev/null || true
-            
-            # 確保文件末尾有換行符，防止接下來的 cat 粘連在上一行末尾引發語法崩潰
-            [ -n "$(tail -c 1 gradle.properties 2>/dev/null)" ] && echo "" >> gradle.properties || true
-          fi
-          cat >> gradle.properties <<EOF
-          android.useAndroidX=true
-          android.nonTransitiveRClass=true
-          android.buildFeatures.buildConfig=true
-          org.gradle.jvmargs=-Xmx5120m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8
-          org.gradle.parallel=true
-          EOF
-
-      - name: Install & Lock gomobile
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        run: |
-          go install github.com/sagernet/gomobile/cmd/gomobile@latest
-          go install github.com/sagernet/gomobile/cmd/gobind@latest
-          export PATH="$PATH:$(go env GOPATH)/bin"
-          export ANDROID_SDK_ROOT=${ANDROID_HOME:-$HOME/Android/Sdk}
-          gomobile init
-
-      - name: Build libbox.aar
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          JAVA_HOME: ${{ env.JAVA_HOME }}
-        run: |
-          set -euo pipefail
-          ls -d "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/"* >/dev/null 2>&1 || { echo "::error::NDK toolchains not found!"; exit 1; }
           cd sing-box
           make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
           
           FINAL_TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_ANDROID_EXTRA }}"
-          if [[ "${{ matrix.target.repo }}" == *"PuerNya"* ]]; then
-            FINAL_TAGS="${FINAL_TAGS},${{ env.TAGS_PUERNYA_EXTRA }}"
-          fi
           FINAL_TAGS=$(echo "${FINAL_TAGS}" | tr ',' '\n' | sort -u | paste -sd,)
           echo "FINAL_TAGS_EXPORT=${FINAL_TAGS}" >> $GITHUB_ENV
           
-          gomobile bind -v -target android/${{ matrix.android_arch.GOARCH }} -androidapi 23 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false -tags="${FINAL_TAGS}" -ldflags="-checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -s -w -buildid=" ./experimental/libbox
-
-      - name: Verify libbox.aar and JNI Symbols
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        run: |
-          if [ ! -f "sing-box/libbox.aar" ]; then exit 1; fi
-          AAR_SIZE=$(stat -c%s "sing-box/libbox.aar" 2>/dev/null || stat -f%z "sing-box/libbox.aar" 2>/dev/null || echo 0)
-          if [ "$AAR_SIZE" -lt 1000000 ]; then exit 1; fi
-          
-          echo "🔍 正在預檢查 AAR JNI 符號..."
-          unzip -q sing-box/libbox.aar -d /tmp/libbox_aar
-          SO_FILE=$(find /tmp/libbox_aar/jni -name "libbox.so" | head -n 1)
-          if [ -z "$SO_FILE" ]; then
-            echo "::error::libbox.so not found inside AAR!"
-            exit 1
-          fi
-          if ! nm -D "$SO_FILE" | grep -q "Java_"; then
-            echo "::error::JNI symbols missing in libbox.so! gomobile bind failed silently."
-            exit 1
-          fi
-          echo "✅ JNI symbols verified."
-
-      - name: Decode Keystore & Validate
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        id: keystore
-        run: |
-          printf "%s" "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > ./sing-box-for-android/app/release.keystore 2>/dev/null || {
-            echo "::error::❌ Keystore Base64 decode failed. Cannot proceed with Release build."
-            exit 1
-          }
-          
-          chmod 600 ./sing-box-for-android/app/release.keystore
-          
-          if keytool -list -keystore ./sing-box-for-android/app/release.keystore \
-             -storepass "${{ secrets.KEYSTORE_PASS }}" \
-             -alias "${{ secrets.ALIAS_NAME }}" >/dev/null 2>&1; then
-            echo "SIGNING_MODE=release" >> $GITHUB_ENV
-            echo "✅ Keystore 驗證成功，將執行 Release 簽名構建。"
-          else
-            echo "::error::⚠️ Keystore 驗證失敗（密碼/別名錯誤）。為防止發布 Debug 簽名版本污染通道，已強制中止構建。"
-            exit 1
-          fi
-
-      - name: Stop Gradle Daemon
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        run: cd sing-box-for-android && ./gradlew --stop 2>/dev/null || true
-
-      - name: Build APK
-        if: ${{ matrix.target.sfa_repo != 'none' }}
+          gomobile bind -v \
+            -o libbox.aar \
+            -target android/arm64 \
+            -androidapi 23 \
+            -javapkg=io.nekohasekai \
+            -libname=box \
+            -trimpath \
+            -buildvcs=false \
+            -tags="${FINAL_TAGS}" \
+            -ldflags="-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid=" \
+            ./experimental/libbox/
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          JAVA_HOME: ${{ env.JAVA_HOME }}
-          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx5120m -Dorg.gradle.daemon=false"
+
+      - name: Copy & Fix `libbox-legacy.aar`
+        run: |
+          mkdir -p ./sing-box-for-android/app/libs/
+          cp -f ./sing-box/libbox.aar ./sing-box-for-android/app/libs/
+          # ✅ 核心修復：解決 reF1nd 項目 legacy 變體找不到依賴的問題
+          cp -f ./sing-box/libbox.aar ./sing-box-for-android/app/libs/libbox-legacy.aar 2>/dev/null || true
+
+      - name: Apply `Streamline Update` Patch
         run: |
           set -euo pipefail
+          cd sing-box-for-android
           
-          if [ -z "${FINAL_TAGS_EXPORT:-}" ]; then
-            FINAL_TAGS_EXPORT="unknown"
+          echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQKCi0g6ZqQ6JeP6K6+572u6aG16Z2i5Lit5bqU55So5Y2h54mH77yM5LiN5Yig6Zmk5Luj56CB5LuF5bGP6JS95YWl5Y+jCi0g56aB55So5omL5Yqo5qOA5p+l5pu05paw5oyJ6ZKu5ZKM6Ieq5Yqo5pu05paw5byA5YWzCi0g56aB55So5bqU55So5ZCv5Yqo5pe255qE6Ieq5Yqo5pu05paw5qOA5p+lCi0tLQogLi4uL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IHwgMTMgKysrKysrKysrKysrKwogLi4uL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0ICAgIHwgIDggKysrLS0tLS0KIC4uLi9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QgICB8ICA3IC0tLS0tLS0KIDMgZmlsZXMgY2hhbmdlZCwgMTYgaW5zZXJ0aW9ucygrKSwgMTIgZGVsZXRpb25zKC0pCgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0CmluZGV4IDU3NDQyMmIuLjFiMWI2YzkgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9NYWluQWN0aXZpdHkua3QKQEAgLTE5MSw2ICsxOTEsMTUgQEAgY2xhc3MgTWFpbkFjdGl2aXR5IDoKCiAgICAgICAgIGNvbm5lY3Rpb24ucmVjb25uZWN0KCkKCisgICAgICAgIC8vIOW8uuWItuemgeeUqOiHquWKqOabtOaWsOWKn+iDvQorICAgICAgICBTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQgPSBmYWxzZQorICAgICAgICAvLyDmoIforrDkuLrlt7Lmj5DnpLrov4fvvIzpmLLmraLmmL7npLrpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xlr7nor53moYYKKyAgICAgICAgU2V0dGluZ3MudXBkYXRlQ2hlY2tQcm9tcHRlZCA9IHRydWUKKyAgICAgICAgLy8g5riF6Zmk5Lu75L2V57yT5a2Y55qE5pu05paw54q25oCBCisgICAgICAgIFVwZGF0ZVN0YXRlLmNsZWFyKCkKKworICAgICAgICAvLyDoh6rliqjmm7TmlrDmo4Dmn6Xlt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgVXBkYXRlU3RhdGUubG9hZEZyb21DYWNoZSgpCiAgICAgICAgIGlmIChTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQpIHsKICAgICAgICAgICAgIGxpZmVjeWNsZVNjb3BlLmxhdW5jaChEaXNwYXRjaGVycy5JTykgewpAQCAtMjAyLDYgKzIxMSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgfQogICAgICAgICB9CisgICAgICAgICovCgogICAgICAgICBoYW5kbGVJbnRlbnQoaW50ZW50KQoKQEAgLTQ2NSw2ICs0NzUsOCBAQCBjbGFzcyBNYWluQWN0aXZpdHkgOgogICAgICAgICAgICAgKQogICAgICAgICB9CgorICAgICAgICAvLyDpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xmj5DnpLrlr7nor53moYblt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBjaGVjayBwcm9tcHQgZGlhbG9nIChzaG93biBvbmx5IG9uY2Ugb24gZmlyc3QgbGF1bmNoKQogICAgICAgICB2YXIgc2hvd1VwZGF0ZUNoZWNrUHJvbXB0IGJ5IHJlbWVtYmVyIHsgbXV0YWJsZVN0YXRlT2YoIVNldHRpbmdzLnVwZGF0ZUNoZWNrUHJvbXB0ZWQpIH0KICAgICAgICAgaWYgKHNob3dVcGRhdGVDaGVja1Byb21wdCkgewpAQCAtNTEzLDYgKzUyNSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICkKICAgICAgICAgfQorICAgICAgICAqLwoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBhdmFpbGFibGUgZGlhbG9nCiAgICAgICAgIHZhbCB1cGRhdGVJbmZvIGJ5IFVwZGF0ZVN0YXRlLnVwZGF0ZUluZm8KZGlmZiAtLWdpdCBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdAppbmRleCA4YWE2ZDIxLi4xYzJmNzlhIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvQXBwU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0CkBAIC00MDEsMTEgKzQwMSw2IEBAIGZ1biBBcHBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KSB7IFRleHQoIk5ldyIpIH0KLSAgICAgICAgICAgICAgICAgICAgICAgIH0KLSAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgbW9kaWZpZXIgPQogICAgICAgICAgICAgICAgICAgICBNb2RpZmllcgogICAgICAgICAgICAgICAgICAgICAgICAgLmNsaXAoUm91bmRlZENvcm5lclNoYXBlKHRvcFN0YXJ0ID0gMTIuZHAsIHRvcEVuZCA9IDEyLmRwKSksCkBAIC01MzUsNiArNTMwLDggQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgIH0KICAgICAgICAgfQoKKyAgICAgICAgLy8g5bey6ZqQ6JeP5pu05paw6K6+572u5ZKM5pON5L2c5Y2h54mHCisgICAgICAgIC8qCiAgICAgICAgIFNwYWNlcihtb2RpZmllciA9IE1vZGlmaWVyLmhlaWdodCg4LmRwKSkKCiAgICAgICAgIFRleHQoCkBAIC05OTUsNiArOTkyLDcgQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICB9CiAgICAgICAgIH0KKyAgICAgICAgKi8KICAgICB9CiB9CgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0CmluZGV4IGY0NjhmNTEuLjJhMzUzMTIgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QKQEAgLTUxLDcgKzUxLDYgQEAgaW1wb3J0IGFuZHJvaWR4Lm5hdmlnYXRpb24uTmF2Q29udHJvbGxlcgogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS5SCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLmNvbXBvc2UudG9wYmFyLk92ZXJyaWRlVG9wQmFyCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLmRhdGFiYXNlLlNldHRpbmdzCi1pbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLnVwZGF0ZS5VcGRhdGVTdGF0ZQogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS51dGlscy5Ib29rTW9kdWxlVXBkYXRlTm90aWZpZXIKIGltcG9ydCBpby5uZWtvaGFzZWthaS5zZmEudXRpbHMuSG9va1N0YXR1c0NsaWVudAoKQEAgLTY2LDcgKzY1LDYgQEAgZnVuIFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKCiAgICAgdmFsIGNvbnRleHQgPSBMb2NhbENvbnRleHQuY3VycmVudAogICAgIHZhbCBzY29wZSA9IHJlbWVtYmVyQ29yb3V0aW5lU2NvcGUoKQotICAgIHZhbCBoYXNVcGRhdGUgYnkgVXBkYXRlU3RhdGUuaGFzVXBkYXRlCiAgICAgdmFsIGhvb2tTdGF0dXMgYnkgSG9va1N0YXR1c0NsaWVudC5zdGF0dXMuY29sbGVjdEFzU3RhdGUoKQogICAgIHZhbCBoYXNQZW5kaW5nUHJpdmlsZWdlRG93bmdyYWRlID0gSG9va01vZHVsZVVwZGF0ZU5vdGlmaWVyLmlzRG93bmdyYWRlKGhvb2tTdGF0dXMpCiAgICAgdmFsIGhhc1BlbmRpbmdQcml2aWxlZ2VVcGRhdGUgPSBIb29rTW9kdWxlVXBkYXRlTm90aWZpZXIuaXNVcGRyYWdlKGhvb2tTdGF0dXMpCkBAIC0xMTUsMTEgKzExMyw2IEBAIGZ1biBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KQotICAgICAgICAgICAgICAgICAgICAgICAgfQotICAgICAgICAgICAgICAgICAgICB9LAogICAgICAgICAgICAgICAgICAgICBtb2RpZmllciA9CiAgICAgICAgICAgICAgICAgICAgIE1vZGlmaWVyCiAgICAgICAgICAgICAgICAgICAgICAgICAuY2xpcChSb3VuZGVkQ29ybmVyU2hhcGUodG9wU3RhcnQgPSAxMi5kcCwgdG9wRW5kID0gMTIuZHApKQotLQoyLjUwLjEgKEFwcGxlIEdpdC0xNTUpCg==" | base64 -d > ./streamline-update.patch
+          
+          if ! git apply ./streamline-update.patch 2>/dev/null; then
+             echo "::warning::Patch failed, falling back to safe sed overrides..."
+             sed -E -i 's/Settings\.checkUpdateEnabled *= *true/Settings.checkUpdateEnabled = false/g' app/src/main/java/**/MainActivity.kt 2>/dev/null || true
+             sed -E -i 's/Settings\.updateCheckPrompted *= *false/Settings.updateCheckPrompted = true/g' app/src/main/java/**/MainActivity.kt 2>/dev/null || true
+          fi
+
+      - name: Change Package Name & Clean Dependencies
+        run: |
+          cd ./sing-box-for-android
+          GRADLE_FILE="app/build.gradle.kts"
+          
+          if [ -f "$GRADLE_FILE" ]; then
+            sed -i 's/applicationId "io.reF1nd.sfa"/applicationId = "io.nekohasekai.sfa.custom"/' "$GRADLE_FILE"
+            sed -i 's/applicationId = "io.reF1nd.sfa"/applicationId = "io.nekohasekai.sfa.custom"/' "$GRADLE_FILE"
+            sed -i 's/namespace("io.nekohasekai.sfa")/namespace("io.nekohasekai.sfa.custom")/' "$GRADLE_FILE"
+            sed -i 's/namespace = "io.nekohasekai.sfa"/namespace = "io.nekohasekai.sfa.custom"/' "$GRADLE_FILE"
           fi
           
-          mkdir -p sing-box-for-android/app/libs
-          cp sing-box/libbox.aar sing-box-for-android/app/libs/
-          
+          sed -i '/com\.google\.gms\.google-services/d' "$GRADLE_FILE" 2>/dev/null || true
+          sed -i '/firebase-bom/d' "$GRADLE_FILE" 2>/dev/null || true
+          sed -i '/implementation.*firebase/d' "$GRADLE_FILE" 2>/dev/null || true
+          sed -i '/implementation.*analytics/d' "$GRADLE_FILE" 2>/dev/null || true
+
+      - name: Fix Gradle Properties (Memory & Manifest)
+        run: |
           cd sing-box-for-android
+          
+          echo "android.useAndroidX=true" >> gradle.properties
+          echo "android.nonTransitiveRClass=true" >> gradle.properties
+          # ✅ 恢復 5120m 內存，防止 R8/KAPT 階段 OOM 卡死
+          echo "org.gradle.jvmargs=-Xmx5120m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8" >> gradle.properties
+          echo "org.gradle.parallel=true" >> gradle.properties
+
+          sed -i 's/minSdkVersion="[^"]*"/minSdkVersion="23"/g' app/src/main/AndroidManifest.xml 2>/dev/null || true
+          sed -i 's/minSdk = [0-9]*/minSdk = 23/g' app/build.gradle.kts 2>/dev/null || true
+
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > ./sing-box-for-android/app/release.keystore
+
+      - name: Build `SFA` apk
+        run: |
+          cd ./sing-box-for-android/
           chmod +x gradlew
           
-          RELEASE_TASK="assembleOtherRelease"
-          if ! ./gradlew :app:tasks --console=plain 2>/dev/null | awk '{print $1}' | grep -q "^${RELEASE_TASK}$"; then
-            RELEASE_TASK="assembleRelease"
+          # 使用 grep 快速檢測取代耗時的 tasks --all
+          if grep -qi "otherRelease" app/build.gradle.kts app/build.gradle 2>/dev/null; then
+            TASK="assembleOtherRelease"
+          else
+            TASK="assembleRelease"
           fi
+          echo "Building task: ${TASK}"
           
-          echo "Building task: ${RELEASE_TASK} ..."
-          
-          ./gradlew ${RELEASE_TASK} --console=plain \
+          ./gradlew ${TASK} \
             -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
             -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASS }}" \
             -Pandroid.injected.signing.key.alias="${{ secrets.ALIAS_NAME }}" \
             -Pandroid.injected.signing.key.password="${{ secrets.ALIAS_PASS }}"
+            
+          # 提取並重命名 APK 以供後續上傳
+          arch_abi="arm64-v8a"
+          REL_DIR="app/build/outputs/apk/other/release"
+          [ -d "$REL_DIR" ] || REL_DIR="app/build/outputs/apk/release"
           
-          arch_abi="${{ matrix.android_arch.ABI }}"
-          cd ..
-          
-          REL_DIR="sing-box-for-android/app/build/outputs/apk/other/release"
-          [ -d "$REL_DIR" ] || REL_DIR="sing-box-for-android/app/build/outputs/apk/release"
-          
-          shopt -s nullglob
-          apk_files=("$REL_DIR"/*"${arch_abi}"*.apk)
-          shopt -u nullglob
-          
-          if [ ${#apk_files[@]} -gt 0 ]; then
-            apk="${apk_files[0]}"
-          else
-            apk=$(find "$REL_DIR" -maxdepth 1 -name "*.apk" -print -quit 2>/dev/null || true)
-          fi
-          
+          apk=$(find "$REL_DIR" -maxdepth 1 -name "*.apk" -print -quit 2>/dev/null || true)
           if [ -z "$apk" ] || [ ! -f "$apk" ]; then
             echo "::error::❌ Failed to find APK in $REL_DIR"
             exit 1
@@ -917,40 +758,25 @@ jobs:
           basename_file=$(basename "$apk")
           mv -f "$apk" "apks/SFA-${{ matrix.target.id }}-${arch_abi}-${basename_file}"
           
-          PATCHES='[]'
-          SIGNING_META="Release"
-          
+          # ✅ 補回缺失的 Metadata JSON 生成，供 Publish 任務讀取
           jq -n \
             --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg run_id "${{ github.run_id }}" \
-            --argjson naive_enabled "${{ github.event.inputs.enable_naive || 'false' }}" \
-            --arg version_code "${{ needs.init.outputs.version_code }}" \
             --arg version_name "${{ matrix.target.ver }}" \
-            --arg target_repo "${{ matrix.target.repo }}" \
-            --arg target_branch "${{ matrix.target.branch }}" \
-            --arg build_tags "${FINAL_TAGS_EXPORT}" \
-            --arg signing_meta "$SIGNING_META" \
-            --argjson patches "$PATCHES" \
+            --arg target_id "${{ matrix.target.id }}" \
             '{
-               target_id: "${{ matrix.target.id }}",
-               version_code: ($version_code | tonumber // 1),
+               target_id: $target_id,
                version_name: $version_name,
-               build_time: $built_at,
-               workflow_run_id: $run_id,
-               naive_enabled: $naive_enabled,
-               target_repo: $target_repo,
-               target_branch: $target_branch,
-               build_tags: $build_tags,
-               signing_status: $signing_meta,
-               patches_applied: $patches
+               build_time: $built_at
              }' > "apks/SFA-${{ matrix.target.id }}-${arch_abi}-metadata.json"
 
-      - name: Upload APK
-        if: ${{ matrix.target.sfa_repo != 'none' }}
+      - name: Upload files to workspace
         uses: actions/upload-artifact@v4
         with:
-          name: apk-${{ matrix.target.id }}-${{ matrix.android_arch.ABI }}
-          path: apks/*
+          name: apk-${{ matrix.target.id }}-arm64-v8a
+          # ✅ 使用正確的語法上傳，不支持 fallback
+          path: |
+            sing-box-for-android/apks/*.apk
+            sing-box-for-android/apks/*-metadata.json
           retention-days: 1
           compression-level: 0
 
@@ -1119,15 +945,12 @@ jobs:
           APK_META=($(./release_files/*-metadata.json 2>/dev/null || echo ""))
           shopt -u nullglob
 
-          # 使用 jq 直接合併標準化 JSON
           TARGETS_LIST=()
           
-          # 合併 APK 數據
           for meta in "${APK_META[@]}"; do
             TARGETS_LIST+=("$(jq -c '{target_id: .target_id, platform: "android", version_name: .version_name}' "$meta")")
           done
           
-          # 合併 Core 數據
           for dir in ./tmp/core-*; do
             if [ -d "$dir" ] && [ -f "$dir/artifact-meta.json" ]; then
               TARGETS_LIST+=("$(jq -c '{target_id: .target_id, platform: .platform, version_name: .version_name}' "$dir/artifact-meta.json")")
