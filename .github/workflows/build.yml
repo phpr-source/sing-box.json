@@ -53,7 +53,7 @@ on:
     branches:
       - main
     paths:
-      - '.github/workflows/build-sing-box.yml' # 已鎖定為單一工作流文件，防止誤觸發
+      - '.github/workflows/build-sing-box.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
@@ -514,8 +514,19 @@ jobs:
             
           elif [ "${{ matrix.platform.goos }}" = "windows" ]; then
             mkdir -p "$GITHUB_WORKSPACE/sing-box/dist"
-            cd "$HOME/cronet-go"
-            CGO_ENABLED=0 go run -v ./cmd/build-naive extract-lib --target="windows/${{ matrix.platform.goarch }}" -o "$GITHUB_WORKSPACE/sing-box/dist" || exit 1
+            
+            # 🚀 借鑑 yagh779: 預編制二進制直下，大幅節省編譯時間
+            if curl -fL -o "$GITHUB_WORKSPACE/sing-box/dist/libcronet.dll.zip" "https://github.com/yagh779/sing-box-releases/releases/download/cronet/libcronet.dll.zip" 2>/dev/null; then
+              unzip -q "$GITHUB_WORKSPACE/sing-box/dist/libcronet.dll.zip" -d "$GITHUB_WORKSPACE/sing-box/dist" 2>/dev/null || true
+              rm -f "$GITHUB_WORKSPACE/sing-box/dist/libcronet.dll.zip"
+              echo "✅ Prebuilt cronet downloaded successfully."
+            fi
+            
+            if [ ! -f "$GITHUB_WORKSPACE/sing-box/dist/libcronet.dll" ]; then
+              echo "::warning::Prebuilt cronet missing/failed, falling back to source build..."
+              cd "$HOME/cronet-go"
+              CGO_ENABLED=0 go run -v ./cmd/build-naive extract-lib --target="windows/${{ matrix.platform.goarch }}" -o "$GITHUB_WORKSPACE/sing-box/dist" || exit 1
+            fi
           fi
 
       - name: Build Core
@@ -542,7 +553,7 @@ jobs:
           
           go build -v -trimpath -ldflags "-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid=" -tags "${{ steps.env.outputs.tags }}" -o "dist/$BIN_NAME" ./cmd/sing-box
           
-          echo "{\"target_id\": \"${{ matrix.target.id }}\", \"platform\": \"${{ matrix.platform.name }}\", \"suffix\": \"${{ steps.env.outputs.suffix }}\"}" > dist/artifact-meta.json
+          echo "{\"target_id\": \"${{ matrix.target.id }}\", \"platform\": \"${{ matrix.platform.name }}\", \"suffix\": \"${{ steps.env.outputs.suffix }}\", \"version_name\": \"${{ matrix.target.ver }}\"}" > dist/artifact-meta.json
 
       - name: Verify Binary Integrity
         if: steps.check_naive.outputs.skip != 'true'
@@ -696,26 +707,24 @@ jobs:
             echo "✅ Update URL patched to own repository"
           fi
 
-      - name: Change Package Name (Safe Sed)
+      - name: Change Package Name & Patch SDK Versions
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           cd sing-box-for-android
           GRADLE_FILE="app/build.gradle.kts"
+          [ ! -f "$GRADLE_FILE" ] && GRADLE_FILE=$(find . -name "build.gradle" -path "*/app/*" | head -n 1)
           
-          if [ ! -f "$GRADLE_FILE" ]; then
-             GRADLE_FILE=$(find . -name "build.gradle" -path "*/app/*" | head -n 1)
-          fi
+          echo "🔧 Patching Package ID & SDK Versions..."
+          # 1. 修改應用包名
+          sed -Ei 's/(applicationId|namespace)\s*=?\s*"io\.(reF1nd|nekohasekai)\.sfa[^"]*"/\1 = "io.nekohasekai.sfa.custom"/g' "$GRADLE_FILE" 2>/dev/null || true
           
-          if [ -f "$GRADLE_FILE" ]; then
-            sed -i 's|applicationId "io.reF1nd.sfa"|applicationId "io.nekohasekai.sfa.custom"|g' "$GRADLE_FILE"
-            sed -i 's|applicationId = "io.reF1nd.sfa"|applicationId = "io.nekohasekai.sfa.custom"|g' "$GRADLE_FILE"
-            sed -i 's|namespace("io.nekohasekai.sfa")|namespace("io.nekohasekai.sfa.custom")|g' "$GRADLE_FILE"
-            sed -i 's|namespace = "io.nekohasekai.sfa"|namespace = "io.nekohasekai.sfa.custom"|g' "$GRADLE_FILE"
-            echo "✅ Package name updated safely."
-          else
-            echo "::error::Cannot find build.gradle(.kts) to change package name!"
-            exit 1
-          fi
+          # 2. 🔑 核心修復：強制將 minSdk 提升至 23，匹配 gomobile -androidapi 23
+          sed -Ei 's/(minSdk|minSdkVersion)\s*=?\s*([0-9]+)/minSdk = 23/g' "$GRADLE_FILE" 2>/dev/null || true
+          
+          # 3. Manifest 層級兜底（防止 Gradle DSL 解析失敗）
+          sed -i 's/android:minSdkVersion="21"/android:minSdkVersion="23"/g' app/src/main/AndroidManifest.xml 2>/dev/null || true
+          
+          echo "✅ SDK & Package ID patched successfully."
 
       - name: Apply Safe UI Streamline Patch
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -772,7 +781,8 @@ jobs:
           android.useAndroidX=true
           android.nonTransitiveRClass=true
           android.buildFeatures.buildConfig=true
-          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          org.gradle.jvmargs=-Xmx5120m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8
+          org.gradle.parallel=true
           EOF
 
       - name: Install & Lock gomobile
@@ -855,7 +865,7 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           JAVA_HOME: ${{ env.JAVA_HOME }}
-          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx2048m -Dorg.gradle.daemon=false"
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx5120m -Dorg.gradle.daemon=false"
         run: |
           set -euo pipefail
           
@@ -1109,21 +1119,19 @@ jobs:
           APK_META=($(./release_files/*-metadata.json 2>/dev/null || echo ""))
           shopt -u nullglob
 
-          CORE_TARGETS=()
-          for f in release_files/*.tar.gz release_files/*.zip; do
-            if [[ "$f" == *"-original"* ]]; then continue; fi
-            base=$(basename "$f" | sed -E 's/\.tar\.gz$//' | sed -E 's/\.zip$//')
-            target_id=$(echo "$base" | sed 's/^sing-box-//')
-            ver_name=$(sed -n 's/.*`\([^`]*\)`.*/\1/p' ./tmp/workflow-metadata/release_notes.txt | head -1 || echo "unknown")
-            CORE_TARGETS+=("{\"target_id\":\"$target_id\", \"version_name\":\"$ver_name\", \"build_time\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}")
-          done
-
+          # 使用 jq 直接合併標準化 JSON
           TARGETS_LIST=()
+          
+          # 合併 APK 數據
           for meta in "${APK_META[@]}"; do
-            TARGETS_LIST+=("$(jq -c '.' "$meta")")
+            TARGETS_LIST+=("$(jq -c '{target_id: .target_id, platform: "android", version_name: .version_name}' "$meta")")
           done
-          for core in "${CORE_TARGETS[@]}"; do
-            TARGETS_LIST+=("$core")
+          
+          # 合併 Core 數據
+          for dir in ./tmp/core-*; do
+            if [ -d "$dir" ] && [ -f "$dir/artifact-meta.json" ]; then
+              TARGETS_LIST+=("$(jq -c '{target_id: .target_id, platform: .platform, version_name: .version_name}' "$dir/artifact-meta.json")")
+            fi
           done
 
           if [ ${#TARGETS_LIST[@]} -gt 0 ]; then
@@ -1131,7 +1139,7 @@ jobs:
               global_run_id: $run_id,
               commit_sha: $commit,
               built_at: $built_at,
-              targets: .
+              targets: (unique_by(.target_id))
             }' > release_files/build-info.json || echo "{}" > release_files/build-info.json
           else
             echo "{}" > release_files/build-info.json
@@ -1353,7 +1361,7 @@ jobs:
           echo "| 目標 | 版本 |" >> "$GITHUB_STEP_SUMMARY"
           echo "|------|------|" >> "$GITHUB_STEP_SUMMARY"
           if [ -f "release_files/build-info.json" ]; then
-            jq -r '.targets[] | "| \(.target_id) | \(.version_name) |"' release_files/build-info.json >> "$GITHUB_STEP_SUMMARY" || true
+            jq -r '.targets[]? | "| \(.target_id) | \(.version_name) |"' release_files/build-info.json >> "$GITHUB_STEP_SUMMARY" || true
           else
             echo "| N/A | N/A |" >> "$GITHUB_STEP_SUMMARY"
           fi
