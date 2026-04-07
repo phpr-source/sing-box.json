@@ -779,8 +779,8 @@ jobs:
       - name: Install & Lock gomobile
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
-          go install github.com/sagernet/mobile/cmd/gomobile@latest
-          go install github.com/sagernet/mobile/cmd/gobind@latest
+          go install github.com/sagernet/gomobile/cmd/gomobile@latest
+          go install github.com/sagernet/gomobile/cmd/gobind@latest
           export PATH="$PATH:$(go env GOPATH)/bin"
           export ANDROID_SDK_ROOT=${ANDROID_HOME:-$HOME/Android/Sdk}
           gomobile init
@@ -889,9 +889,14 @@ jobs:
           REL_DIR="sing-box-for-android/app/build/outputs/apk/other/release"
           [ -d "$REL_DIR" ] || REL_DIR="sing-box-for-android/app/build/outputs/apk/release"
           
-          apk=$(find "$REL_DIR" -maxdepth 1 -name "*${arch_abi}*.apk" -print -quit 2>/dev/null || true)
-          if [ -z "$apk" ]; then
-             apk=$(find "$REL_DIR" -maxdepth 1 -name "*.apk" -print -quit 2>/dev/null || true)
+          shopt -s nullglob
+          apk_files=("$REL_DIR"/*"${arch_abi}"*.apk)
+          shopt -u nullglob
+          
+          if [ ${#apk_files[@]} -gt 0 ]; then
+            apk="${apk_files[0]}"
+          else
+            apk=$(find "$REL_DIR" -maxdepth 1 -name "*.apk" -print -quit 2>/dev/null || true)
           fi
           
           if [ -z "$apk" ] || [ ! -f "$apk" ]; then
@@ -1256,6 +1261,15 @@ jobs:
         uses: actions/attest-build-provenance@v1
         with:
           subject-path: './release_files/*'
+
+      - name: Cleanup patches branch
+        if: always()
+        continue-on-error: true
+        run: |
+          git checkout --orphan temp_patches
+          git add -A
+          git commit -m "chore: squash patches history [skip ci]" || true
+          git push -f origin temp_patches:patches
 
       - name: Update release-info branch
         if: always()
