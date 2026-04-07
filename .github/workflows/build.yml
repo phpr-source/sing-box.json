@@ -67,6 +67,7 @@ permissions:
   id-token: write
 
 env:
+  # badlinkname/tfogo_checklinkname0: Bypasses Go 1.22+ strict linker name checks for compatibility
   TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard"
   TAGS_PUERNYA_EXTRA: "with_shadowsocksr,with_ech"
   TAGS_ANDROID_EXTRA: "with_conntrack"
@@ -87,7 +88,7 @@ jobs:
         id: time
         run: echo "start=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
 
-      - name: Calculate Android Version Code
+      - name: Calculate Android Version Code (Anti-Collision)
         id: calc
         run: |
           NOW=$(date +%s)
@@ -166,7 +167,7 @@ jobs:
           
           ver=$(CGO_ENABLED=0 go run ./cmd/internal/read_tag 2>/dev/null | sed 's/^v//' || echo "")
           if [ -z "$ver" ]; then
-            ver=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || git tag -l --sort=-v:refname | head -n1 | sed 's/^v//' || echo "")
+            ver=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || git log -1 --format=%h 2>/dev/null || echo "")
           fi
           
           if [ -z "$ver" ]; then
@@ -242,26 +243,26 @@ jobs:
               if [[ "$repo" == *"reF1nd"* ]]; then
                 local tag_data=$(api_call_with_retry "https://api.github.com/repos/$repo/tags")
                 if [[ "$branch" == *"testing"* ]]; then
-                  ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | type=="string" and test("reF1nd.*(alpha|beta|rc)"))] | if length > 0 then (sort_by(.name) | reverse | .[0].name) else empty end' 2>/dev/null | sed 's/^v//' || echo "")
+                  ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | type == "string" and contains("reF1nd") and test("alpha|beta|rc"))][0].name // empty' 2>/dev/null | sed 's/^v//' || true)
                 else
-                  ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | type=="string" and contains("reF1nd") and (test("alpha|beta|rc") | not))] | if length > 0 then (sort_by(.name) | reverse | .[0].name) else empty end' 2>/dev/null | sed 's/^v//' || echo "")
+                  ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | type == "string" and contains("reF1nd") and (test("alpha|beta|rc") | not))][0].name // empty' 2>/dev/null | sed 's/^v//' || true)
                 fi
               else
                 if [[ "$branch" == *"testing"* ]]; then
-                  ver=$(echo "$release_data" | jq -r '[.[] | select(.tag_name | type=="string" and test("alpha|beta|rc"))] | if length > 0 then .[0].tag_name else empty end' 2>/dev/null | sed 's/^v//' || echo "")
+                  ver=$(echo "$release_data" | jq -r '[.[] | select(.tag_name | type == "string" and test("alpha|beta|rc"))][0].tag_name // empty' 2>/dev/null | sed 's/^v//' || true)
                 else
-                  ver=$(echo "$release_data" | jq -r '[.[] | select(.tag_name | type=="string" and (test("alpha|beta|rc") | not))] | if length > 0 then .[0].tag_name else empty end' 2>/dev/null | sed 's/^v//' || echo "")
+                  ver=$(echo "$release_data" | jq -r '[.[] | select(.tag_name | type == "string" and (test("alpha|beta|rc") | not))][0].tag_name // empty' 2>/dev/null | sed 's/^v//' || true)
                 fi
               fi
               
-              if [ -z "$ver" ]; then
+              if [ -z "$ver" ] || [ "$ver" = "null" ]; then
                 local commit_data=$(api_call_with_retry "https://api.github.com/repos/$repo/commits?sha=$branch&per_page=1")
                 ver=$(echo "$commit_data" | jq -r '.[0].sha // empty' 2>/dev/null | cut -c1-8 || true)
               fi
               
-              if [ -n "$ver" ]; then
+              if [ -n "$ver" ] && [ "$ver" != "null" ]; then
                 local commit_date=$(api_call_with_retry "https://api.github.com/repos/$repo/commits/$branch" | jq -r '.commit.committer.date // empty' 2>/dev/null || echo "")
-                if [ -n "$commit_date" ]; then
+                if [ -n "$commit_date" ] && [ "$commit_date" != "null" ]; then
                   time=$(TZ=Asia/Shanghai date -d "$commit_date" '+%Y-%m-%d' 2>/dev/null || TZ=Asia/Shanghai date '+%Y-%m-%d')
                 else
                   time="unknown"
@@ -269,14 +270,13 @@ jobs:
               fi
             fi
 
-            if [ -z "$ver" ] || [ -z "$time" ]; then
+            if [ -z "$ver" ] || [ "$ver" = "null" ] || [ -z "$time" ]; then
               echo "::warning::[$id] Cannot read valid version or time. Skipping."
               return 0
             fi
 
             if [[ "$sfa_repo" != "none" ]]; then
-              local sfa_exists=$(curl -sSL -m 10 "https://api.github.com/repos/$sfa_repo/git/ref/heads/$sfa_branch" -H "Authorization: Bearer $GH_TOKEN" | jq -r '.ref // empty')
-              if [ -z "$sfa_exists" ]; then
+              if ! timeout 10 git ls-remote --heads "https://github.com/${sfa_repo}.git" "$sfa_branch" 2>/dev/null | grep -qw "$sfa_branch"; then
                 echo "::warning::[$id] Android branch $sfa_repo/$sfa_branch not found. Disabling Android."
                 sfa_repo="none"
                 sfa_branch="none"
@@ -404,15 +404,6 @@ jobs:
           cache: true
           cache-dependency-path: 'sing-box/go.sum'
 
-      - name: Setup Go Build Cache
-        if: steps.check_naive.outputs.skip != 'true'
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-build-${{ matrix.platform.name }}-${{ hashFiles('sing-box/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-build-${{ matrix.platform.name }}-
-
       - name: Fix sniff
         if: steps.check_naive.outputs.skip != 'true' && contains(matrix.target.repo, 'PuerNya')
         run: |
@@ -455,6 +446,7 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
+          
           git -c http.extraHeader="Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             fetch https://github.com/${{ github.repository }}.git patches:patches 2>/dev/null || true
           
@@ -477,18 +469,17 @@ jobs:
               exit 1
             fi
             
-            if git apply --check --whitespace=fix "$PATCH_FILE" 2>/dev/null; then
-              git apply --whitespace=fix "$PATCH_FILE"
-            elif git apply --reject "$PATCH_FILE" 2>/dev/null; then
-              echo "::warning::Patch $patch applied with conflicts. Checking for critical errors..."
-              if find . -name "*.rej" -exec grep -l "import\|func\|struct" {} + 2>/dev/null | grep -q .; then
-                echo "::error::Patch $patch caused structural conflicts!"
+            git apply -v --whitespace=fix "$PATCH_FILE" || {
+              git apply -v --3way "$PATCH_FILE" && {
+                if grep -rq "^<<<<<<< " ./; then
+                  echo "::error::Patch $patch left conflicts!"
+                  exit 1
+                fi
+              } || {
+                echo "::error::Patch $patch failed completely!"
                 exit 1
-              fi
-            else
-              echo "::error::Patch $patch failed completely!"
-              exit 1
-            fi
+              }
+            }
             rm -f "$PATCH_FILE"
           done
 
@@ -502,7 +493,7 @@ jobs:
         if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
         uses: hendrikmuhs/ccache-action@v1
         with:
-          key: ${{ runner.os }}-cgo-${{ matrix.platform.name }}-naive
+          key: ${{ runner.os }}-cgo-${{ matrix.platform.goarch }}
 
       - name: Export ccache compilers
         if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
@@ -524,17 +515,16 @@ jobs:
             git -C "$HOME/cronet-go" checkout FETCH_HEAD
           fi
           
-          # Fix Exit 126: Hardcode toolchain host arch & explicitly use bash
-          TARGET="linux/amd64"
+          TARGET="${{ matrix.platform.goos }}/${{ matrix.platform.goarch }}"
           
           if [ "${{ matrix.platform.goos }}" = "linux" ]; then
             git -C "$HOME/cronet-go" submodule update --init --recursive --depth=1 2>/dev/null || true
             rm -f "$HOME/cronet-go/naiveproxy/src/build/linux/sysroot_scripts/keyring.gpg" 2>/dev/null || true
             cd "$HOME/cronet-go"
             
-            if ! GPG_TTY=/dev/null bash ./naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh; then
+            if ! GPG_TTY=/dev/null ./naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh; then
               sleep 10
-              GPG_TTY=/dev/null bash ./naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh || exit 1
+              GPG_TTY=/dev/null ./naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh || exit 1
             fi
             
             for i in 1 2 3; do
@@ -561,8 +551,6 @@ jobs:
           cd sing-box
           mkdir -p dist
           cp LICENSE dist/ 2>/dev/null || true
-          
-          git tag "v${{ matrix.target.ver }}" -f 2>/dev/null || true
           
           TAGS_STR="${{ steps.env.outputs.tags }}"
           ENABLE_NAIVE="${{ github.event.inputs.enable_naive || 'false' }}"
@@ -609,7 +597,7 @@ jobs:
               echo "::error::File is not a valid ELF executable!"; exit 1
             fi
           elif [ "${{ matrix.platform.goos }}" = "windows" ]; then
-            if ! echo "$FILE_HEADER" | grep -qiE "PE.*executable"; then
+            if ! echo "$FILE_HEADER" | grep -qiE "PE32.*executable"; then
               echo "::error::File is not a valid PE executable!"; exit 1
             fi
           fi
@@ -672,15 +660,6 @@ jobs:
         with:
           go-version: ${{ needs.init.outputs.go_version }}
 
-      - name: Setup Go Build Cache
-        if: ${{ matrix.target.sfa_repo != 'none' }}
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-build-android-${{ matrix.android_arch.ABI }}-${{ hashFiles('sing-box/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-build-android-${{ matrix.android_arch.ABI }}-
-
       - name: Setup Android NDK
         if: ${{ matrix.target.sfa_repo != 'none' }}
         id: setup-ndk
@@ -728,6 +707,7 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
+          
           git -c http.extraHeader="Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             fetch https://github.com/${{ github.repository }}.git patches:patches 2>/dev/null || true
           
@@ -750,18 +730,17 @@ jobs:
               exit 1
             fi
             
-            if git apply --check --whitespace=fix "$PATCH_FILE" 2>/dev/null; then
-              git apply --whitespace=fix "$PATCH_FILE"
-            elif git apply --reject "$PATCH_FILE" 2>/dev/null; then
-              echo "::warning::Patch $patch applied with conflicts. Checking for critical errors..."
-              if find . -name "*.rej" -exec grep -l "import\|func\|struct" {} + 2>/dev/null | grep -q .; then
-                echo "::error::Patch $patch caused structural conflicts!"
+            git apply -v --whitespace=fix "$PATCH_FILE" || {
+              git apply -v --3way "$PATCH_FILE" && {
+                if grep -rq "^<<<<<<< " ./; then
+                  echo "::error::Patch $patch left conflicts!"
+                  exit 1
+                fi
+              } || {
+                echo "::error::Patch $patch failed completely!"
                 exit 1
-              fi
-            else
-              echo "::error::Patch $patch failed completely!"
-              exit 1
-            fi
+              }
+            }
             rm -f "$PATCH_FILE"
           done
 
@@ -775,7 +754,7 @@ jobs:
             echo "✅ Update URL patched to own repository"
           fi
 
-      - name: Change Package Name
+      - name: Change Package Name (Safe Sed)
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           cd sing-box-for-android
@@ -796,15 +775,27 @@ jobs:
             exit 1
           fi
 
-      - name: Apply DustinWin Update Streamline Patch
+      - name: Apply DustinWin Update Streamline Patch (Safe Sed)
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           set -euo pipefail
-          cd sing-box-for-android
-          echo "🔧 Safely streamlining update UI components using git apply..."
+          cd sing-box-for-android/app/src/main
+          MAIN_FILE="java/io/nekohasekai/sfa/compose/MainActivity.kt"
+          APP_SETTINGS="java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt"
+          SETTINGS_SCREEN="java/io/nekohasekai/sfa/compose/screen/settings/SettingsScreen.kt"
+
+          echo "🔧 Safely streamlining update UI components..."
           
-          echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQKCi0g6ZqQ6JeP6K6+572u6aG16Z2i5Lit5bqU55So5Y2h54mH77yM5LiN5Yig6Zmk5Luj56CB5LuF5bGP6JS95YWl5Y+jCi0g56aB55So5omL5Yqo5qOA5p+l5pu05paw5oyJ6ZKu5ZKM6Ieq5Yqo5pu05paw5byA5YWzCi0g56aB55So5bqU55So5ZCv5Yqo5pe255qE6Ieq5Yqo5pu05paw5qOA5p+lCi0tLQogLi4uL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IHwgMTMgKysrKysrKysrKysrKwogLi4uL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0ICAgIHwgIDggKysrLS0tLS0KIC4uLi9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QgICB8ICA3IC0tLS0tLS0KIDMgZmlsZXMgY2hhbmdlZCwgMTYgaW5zZXJ0aW9ucygrKSwgMTIgZGVsZXRpb25zKC0pCgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0CmluZGV4IDU3NDQyMmIuLjFiMWI2YzkgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9NYWluQWN0aXZpdHkua3QKQEAgLTE5MSw2ICsxOTEsMTUgQEAgY2xhc3MgTWFpbkFjdGl2aXR5IDoKCiAgICAgICAgIGNvbm5lY3Rpb24ucmVjb25uZWN0KCkKCisgICAgICAgIC8vIOW8uuWItuemgeeUqOiHquWKqOabtOaWsOWKn+iDvQorICAgICAgICBTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQgPSBmYWxzZQorICAgICAgICAvLyDmoIforrDkuLrlt7Lmj5DnpLrov4fvvIzpmLLmraLmmL7npLrpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xlr7nor53moYYKKyAgICAgICAgU2V0dGluZ3MudXBkYXRlQ2hlY2tQcm9tcHRlZCA9IHRydWUKKyAgICAgICAgLy8g5riF6Zmk5Lu75L2V57yT5a2Y55qE5pu05paw54q25oCBCisgICAgICAgIFVwZGF0ZVN0YXRlLmNsZWFyKCkKKworICAgICAgICAvLyDoh6rliqjmm7TmlrDmo4Dmn6Xlt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgVXBkYXRlU3RhdGUubG9hZEZyb21DYWNoZSgpCiAgICAgICAgIGlmIChTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQpIHsKICAgICAgICAgICAgIGxpZmVjeWNsZVNjb3BlLmxhdW5jaChEaXNwYXRjaGVycy5JTykgewpAQCAtMjAyLDYgKzIxMSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgfQogICAgICAgICB9CisgICAgICAgICovCgogICAgICAgICBoYW5kbGVJbnRlbnQoaW50ZW50KQoKQEAgLTQ2NSw2ICs0NzUsOCBAQCBjbGFzcyBNYWluQWN0aXZpdHkgOgogICAgICAgICAgICAgKQogICAgICAgICB9CgorICAgICAgICAvLyDpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xmj5DnpLrlr7nor53moYblt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBjaGVjayBwcm9tcHQgZGlhbG9nIChzaG93biBvbmx5IG9uY2Ugb24gZmlyc3QgbGF1bmNoKQogICAgICAgICB2YXIgc2hvd1VwZGF0ZUNoZWNrUHJvbXB0IGJ5IHJlbWVtYmVyIHsgbXV0YWJsZVN0YXRlT2YoIVNldHRpbmdzLnVwZGF0ZUNoZWNrUHJvbXB0ZWQpIH0KICAgICAgICAgaWYgKHNob3dVcGRhdGVDaGVja1Byb21wdCkgewpAQCAtNTEzLDYgKzUyNSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICkKICAgICAgICAgfQorICAgICAgICAqLwoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBhdmFpbGFibGUgZGlhbG9nCiAgICAgICAgIHZhbCB1cGRhdGVJbmZvIGJ5IFVwZGF0ZVN0YXRlLnVwZGF0ZUluZm8KZGlmZiAtLWdpdCBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdAppbmRleCA4YWE2ZDIxLi4xYzJmNzlhIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvQXBwU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0CkBAIC00MDEsMTEgKzQwMSw2IEBAIGZ1biBBcHBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KSB7IFRleHQoIk5ldyIpIH0KLSAgICAgICAgICAgICAgICAgICAgICAgIH0KLSAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgbW9kaWZpZXIgPQogICAgICAgICAgICAgICAgICAgICBNb2RpZmllcgogICAgICAgICAgICAgICAgICAgICAgICAgLmNsaXAoUm91bmRlZENvcm5lclNoYXBlKHRvcFN0YXJ0ID0gMTIuZHAsIHRvcEVuZCA9IDEyLmRwKSksCkBAIC01MzUsNiArNTMwLDggQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgIH0KICAgICAgICAgfQoKKyAgICAgICAgLy8g5bey6ZqQ6JeP5pu05paw6K6+572u5ZKM5pON5L2c5Y2h54mHCisgICAgICAgIC8qCiAgICAgICAgIFNwYWNlcihtb2RpZmllciA9IE1vZGlmaWVyLmhlaWdodCg4LmRwKSkKCiAgICAgICAgIFRleHQoCkBAIC05OTUsNiArOTkyLDcgQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICB9CiAgICAgICAgIH0KKyAgICAgICAgKi8KICAgICB9CiB9CgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0CmluZGV4IGY0NjhmNTEuLjJhMzUzMTIgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QKQEAgLTUxLDcgKzUxLDYgQEAgaW1wb3J0IGFuZHJvaWR4Lm5hdmlnYXRpb24uTmF2Q29udHJvbGxlcgogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS5SCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLmNvbXBvc2UudG9wYmFyLk92ZXJyaWRlVG9wQmFyCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLmRhdGFiYXNlLlNldHRpbmdzCi1pbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLnVwZGF0ZS5VcGRhdGVTdGF0ZQogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS51dGlscy5Ib29rTW9kdWxlVXBkYXRlTm90aWZpZXIKIGltcG9ydCBpby5uZWtvaGFzZWthaS5zZmEudXRpbHMuSG9va1N0YXR1c0NsaWVudAoKQEAgLTY2LDcgKzY1LDYgQEAgZnVuIFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKCiAgICAgdmFsIGNvbnRleHQgPSBMb2NhbENvbnRleHQuY3VycmVudAogICAgIHZhbCBzY29wZSA9IHJlbWVtYmVyQ29yb3V0aW5lU2NvcGUoKQotICAgIHZhbCBoYXNVcGRhdGUgYnkgVXBkYXRlU3RhdGUuaGFzVXBkYXRlCiAgICAgdmFsIGhvb2tTdGF0dXMgYnkgSG9va1N0YXR1c0NsaWVudC5zdGF0dXMuY29sbGVjdEFzU3RhdGUoKQogICAgIHZhbCBoYXNQZW5kaW5nUHJpdmlsZWdlRG93bmdyYWRlID0gSG9va01vZHVsZVVwZGF0ZU5vdGlmaWVyLmlzRG93bmdyYWRlKGhvb2tTdGF0dXMpCiAgICAgdmFsIGhhc1BlbmRpbmdQcml2aWxlZ2VVcGRhdGUgPSBIb29rTW9kdWxlVXBkYXRlTm90aWZpZXIuaXNVcGdyYWRlKGhvb2tTdGF0dXMpCkBAIC0xMTUsMTEgKzExMyw2IEBAIGZ1biBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KQotICAgICAgICAgICAgICAgICAgICAgICAgfQotICAgICAgICAgICAgICAgICAgICB9LAogICAgICAgICAgICAgICAgICAgICBtb2RpZmllciA9CiAgICAgICAgICAgICAgICAgICAgIE1vZGlmaWVyCiAgICAgICAgICAgICAgICAgICAgICAgICAuY2xpcChSb3VuZGVkQ29ybmVyU2hhcGUodG9wU3RhcnQgPSAxMi5kcCwgdG9wRW5kID0gMTIuZHApKQotLQoyLjUwLjEgKEFwcGxlIEdpdC0xNTUpCg==" | base64 -d > streamline-update.patch
-          git apply --whitespace=fix streamline-update.patch || echo "::warning::Update patch apply failed, continuing..."
+          [ -f "$MAIN_FILE" ] && sed -i 's|Settings.checkUpdateEnabled = true|Settings.checkUpdateEnabled = false|' "$MAIN_FILE"
+          [ -f "$MAIN_FILE" ] && sed -i 's|Settings.updateCheckPrompted = false|Settings.updateCheckPrompted = true|' "$MAIN_FILE"
+          
+          [ -f "$APP_SETTINGS" ] && sed -i '/if (hasUpdate)/s/^/\/\/ /' "$APP_SETTINGS"
+          [ -f "$APP_SETTINGS" ] && sed -i 's|Badge(containerColor = MaterialTheme.colorScheme.primary) { Text("New") }|// Badge...|' "$APP_SETTINGS"
+          [ -f "$SETTINGS_SCREEN" ] && sed -i '/import io.nekohasekai.sfa.update.UpdateState/d' "$SETTINGS_SCREEN"
+          [ -f "$SETTINGS_SCREEN" ] && sed -i 's|val hasUpdate by UpdateState.hasUpdate|// val hasUpdate|' "$SETTINGS_SCREEN"
+          [ -f "$SETTINGS_SCREEN" ] && sed -i '/if (hasUpdate)/s/^/\/\/ /' "$SETTINGS_SCREEN"
+          
+          echo "✅ Patch applied safely without syntax corruption."
 
       - name: Fix Firebase/GMS Build Errors & Configuration
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -891,13 +882,8 @@ jobs:
               echo "" >> gradle.properties
             fi
           fi
-          
-          if ! grep -q "android.useAndroidX" gradle.properties 2>/dev/null; then
-            echo "android.useAndroidX=true" >> gradle.properties
-          fi
-          if ! grep -q "android.defaults.buildfeatures.buildconfig" gradle.properties 2>/dev/null; then
-            echo "android.defaults.buildfeatures.buildconfig=true" >> gradle.properties
-          fi
+          echo "android.enableResourceOptimizations=false" >> gradle.properties
+          echo "android.useAndroidX=true" >> gradle.properties
 
       - name: Build libbox.aar
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -909,19 +895,16 @@ jobs:
           ls -d "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/"* >/dev/null 2>&1 || { echo "::error::NDK toolchains not found!"; exit 1; }
           cd sing-box
           make lib_install
-          
-          export GOBIN="$(go env GOPATH)/bin"
-          export PATH="$GOBIN:$PATH"
+          export PATH="$PATH:$(go env GOPATH)/bin"
           
           FINAL_TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_ANDROID_EXTRA }}"
           if [[ "${{ matrix.target.repo }}" == *"PuerNya"* ]]; then
             FINAL_TAGS="${FINAL_TAGS},${{ env.TAGS_PUERNYA_EXTRA }}"
           fi
+          FINAL_TAGS=$(echo "${FINAL_TAGS}" | tr ',' '\n' | sort -u | paste -sd,)
+          echo "FINAL_TAGS_EXPORT=${FINAL_TAGS}" >> $GITHUB_ENV
           
-          GO_COMPAT_TAGS=$(echo "${FINAL_TAGS}" | tr ',' '\n' | grep -vE "with_shadowsocksr" | sort -u | paste -sd,)
-          echo "FINAL_TAGS_EXPORT=${GO_COMPAT_TAGS}" >> $GITHUB_ENV
-          
-          gomobile bind -v -target android/${{ matrix.android_arch.GOARCH }} -androidapi 23 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false -tags="${GO_COMPAT_TAGS}" -ldflags="-checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -s -w -buildid=" ./experimental/libbox
+          gomobile bind -v -target android/${{ matrix.android_arch.GOARCH }} -androidapi 23 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false -tags="${FINAL_TAGS}" -ldflags="-checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -s -w -buildid=" ./experimental/libbox
 
       - name: Verify libbox.aar
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -1098,7 +1081,7 @@ jobs:
               [ -f "$dir/upx_supported.txt" ] && UPX_SUPPORTED=$(cat "$dir/upx_supported.txt")
               
               if [ "$UPX_SUPPORTED" = "true" ]; then
-                if file "sing-box.exe" | grep -qiE "^PE.*executable"; then
+                if file "sing-box.exe" | grep -qiE "^PE32.*executable"; then
                   if ! upx -t "sing-box.exe" >/dev/null 2>&1 || ! upx --best --lzma "sing-box.exe" 2>/dev/null; then
                     upx --best "sing-box.exe" 2>/dev/null || cp "sing-box-original.exe" "sing-box.exe"
                   fi
@@ -1158,7 +1141,7 @@ jobs:
               [ -f "$dir/upx_supported.txt" ] && UPX_SUPPORTED=$(cat "$dir/upx_supported.txt")
 
               if [ "$UPX_SUPPORTED" = "true" ]; then
-                if file "sing-box" | grep -qi "ELF"; then
+                if file "sing-box" | grep -qE "ELF.*executable"; then
                   if ! upx -t "sing-box" >/dev/null 2>&1 || ! upx --best --lzma "sing-box" 2>/dev/null; then
                     upx --best "sing-box" 2>/dev/null || cp "sing-box-original" "sing-box"
                   fi
@@ -1285,14 +1268,24 @@ jobs:
             aarch64|arm64) FILE_ARCH="arm64" ;;
             armv7l) FILE_ARCH="armv7" ;;
             armv6l) FILE_ARCH="armv6" ;;
-            mips*) FILE_ARCH="mips-softfloat" ;;
-            mipsel*) FILE_ARCH="mipsle-softfloat" ;;
+            mips*) FILE_ARCH="mips" ;;
             *) echo "Unsupported arch: $ARCH"; exit 1 ;;
           esac
           echo "Fetching latest release for $FILE_ARCH..."
           
-          ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | jq -r --arg arch "$FILE_ARCH" '.assets[] | select(.name | contains($arch) and endswith(".tar.gz") and (contains("original") | not)) | .browser_download_url' | head -n1)
-          [ -z "$ASSET_URL" ] && ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | jq -r --arg arch "$FILE_ARCH" '.assets[] | select(.name | contains($arch) and endswith(".tar.gz") and contains("original")) | .browser_download_url' | head -n1)
+          ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | \
+            python3 -c "
+          import json, sys
+          try:
+              data = json.load(sys.stdin)
+              arch = '$FILE_ARCH'
+              urls = [a['browser_download_url'] for a in data.get('assets', []) if arch in a['name'] and a['name'].endswith('.tar.gz') and 'original' not in a['name']]
+              if not urls:
+                  urls = [a['browser_download_url'] for a in data.get('assets', []) if arch in a['name'] and a['name'].endswith('.tar.gz') and 'original' in a['name']]
+              print(urls[0] if urls else '')
+          except Exception:
+              print('')
+          " 2>/dev/null)
           
           [ -z "$ASSET_URL" ] && { echo "❌ No release found for $FILE_ARCH"; exit 1; }
           echo "Downloading $ASSET_URL ..."
@@ -1338,19 +1331,17 @@ jobs:
 
       - name: Publish Release (Atomic Overwrite)
         if: steps.check_files.outputs.files_exist == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if ! gh release view sing-box --repo ${{ github.repository }} &>/dev/null; then
-            gh release create sing-box --prerelease --title "sing-box" --notes-file release_body.txt
-          else
-            gh release edit sing-box --notes-file release_body.txt --prerelease=false
-          fi
-          gh release upload sing-box --clobber ./release_files/*
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: sing-box
+          tag_name: sing-box
+          make_latest: true
+          body_path: release_body.txt
+          files: ./release_files/*
 
       - name: Generate Build Provenance
-        if: steps.check_files.outputs.files_exist == 'true' && github.event.repository.visibility == 'public'
-        continue-on-error: true
+        if: steps.check_files.outputs.files_exist == 'true'
         uses: actions/attest-build-provenance@v1
         with:
           subject-path: './release_files/*'
@@ -1404,12 +1395,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release list --repo "${{ github.repository }}" --limit 50 --json tagName,isPrerelease \
-            --jq '.[] | select(.isPrerelease == false) | select(.tagName != "sing-box") | select(.tagName | startswith("sing-box-") | not) | .tagName' | \
+          gh release list --repo "${{ github.repository }}" --limit 50 --json tagName,isPrerelease --jq '.[] | select(.isPrerelease == false) | .tagName' | \
             tail -n +4 | xargs -r -I {} gh release delete {} --yes --cleanup-tag 2>/dev/null || true
           
-          gh release list --repo "${{ github.repository }}" --limit 50 --json tagName,isPrerelease \
-            --jq '.[] | select(.isPrerelease == true) | select(.tagName != "sing-box") | select(.tagName | startswith("sing-box-") | not) | .tagName' | \
+          gh release list --repo "${{ github.repository }}" --limit 50 --json tagName,isPrerelease --jq '.[] | select(.isPrerelease == true) | .tagName' | \
             tail -n +6 | xargs -r -I {} gh release delete {} --yes --cleanup-tag 2>/dev/null || true
 
       - name: Delete old workflow runs
@@ -1518,15 +1507,16 @@ jobs:
         if: ${{ steps.status.outputs.status == 'success' }}
         id: find_files
         run: |
+          mapfile -t TG_FILES < <(find dist -maxdepth 1 -type f \( -name "*.apk" -o -name "*.tar.gz" -o -name "*.zip" \) ! -name "*-original*" -print 2>/dev/null)
           > /tmp/tg_files.txt
-          while read -r f; do
+          for f in "${TG_FILES[@]}"; do
             SIZE=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
-            if [ "$SIZE" -le 2000000000 ]; then
+            if [ "$SIZE" -le 52428800 ]; then
               echo "$f" >> /tmp/tg_files.txt
             else
-              echo "::warning::$f exceeds 2GB MTProto limit, skipping."
+              echo "::warning::$f exceeds 50MB Telegram limit, skipping."
             fi
-          done < <(find dist -maxdepth 1 -type f \( -name "*.apk" -o -name "*.tar.gz" -o -name "*.zip" \) ! -name "*-original*" -print 2>/dev/null)
+          done
           
           if [ -s /tmp/tg_files.txt ]; then
             EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1 2>/dev/null || echo "EOM")
