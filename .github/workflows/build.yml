@@ -67,7 +67,6 @@ permissions:
   id-token: write
 
 env:
-  # badlinkname/tfogo_checklinkname0: Bypasses Go 1.22+ strict linker name checks for compatibility
   TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard"
   TAGS_PUERNYA_EXTRA: "with_shadowsocksr,with_ech"
   TAGS_ANDROID_EXTRA: "with_conntrack"
@@ -88,7 +87,7 @@ jobs:
         id: time
         run: echo "start=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
 
-      - name: Calculate Android Version Code (Anti-Collision)
+      - name: Calculate Android Version Code
         id: calc
         run: |
           NOW=$(date +%s)
@@ -98,7 +97,7 @@ jobs:
       - name: Get Go latest version
         id: go
         run: |
-          VERSION=$(curl -m ${CURL_TIMEOUT_API} -sSL https://raw.githubusercontent.com/actions/go-versions/update-versions-manifest-file/versions-manifest.json | jq -r '[.[] | select(.stable)] | first | .version')
+          VERSION=$(curl -m ${CURL_TIMEOUT_API} -sL https://go.dev/VERSION?m=text | head -n 1 | sed 's/go//')
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Validate Secrets
@@ -118,7 +117,6 @@ jobs:
               echo "::warning::Telegram secrets missing. Notifications may fail."
             fi
           fi
-          
           if [[ -z "$ANDROID_KEYSTORE" || -z "$KEYSTORE_PASS" || -z "$ALIAS_NAME" || -z "$ALIAS_PASS" ]]; then
             echo "::warning::Android Keystore secrets missing."
             echo "android_secrets_valid=false" >> $GITHUB_OUTPUT
@@ -169,7 +167,6 @@ jobs:
           if [ -z "$ver" ]; then
             ver=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || git log -1 --format=%h 2>/dev/null || echo "")
           fi
-          
           if [ -z "$ver" ]; then
             commit=$(git rev-parse HEAD)
             ver="dev-$(echo "$commit" | cut -c1-8)"
@@ -356,9 +353,9 @@ jobs:
           - { name: linux-mips-softfloat, goos: linux, goarch: mips, gomips: softfloat, upx: false }
           - { name: linux-mipsle-softfloat, goos: linux, goarch: mipsle, gomips: softfloat, upx: false }
           - { name: linux-mipsle-hardfloat, goos: linux, goarch: mipsle, gomips: hardfloat, upx: false }
-          - { name: windows-amd64-v1, goos: windows, goarch: amd64, goamd64: v1, upx: true }
-          - { name: windows-amd64-v3, goos: windows, goarch: amd64, goamd64: v3, upx: true }
-          - { name: windows-arm64, goos: windows, goarch: arm64, upx: true }
+          - { name: windows-amd64-v1, goos: windows, goarch: amd64, goamd64: v1, upx: false }
+          - { name: windows-amd64-v3, goos: windows, goarch: amd64, goamd64: v3, upx: false }
+          - { name: windows-arm64, goos: windows, goarch: arm64, upx: false }
     runs-on: ubuntu-latest
     env:
       GOOS: ${{ matrix.platform.goos }}
@@ -797,7 +794,7 @@ jobs:
           
           echo "✅ Patch applied safely without syntax corruption."
 
-      - name: Fix Firebase/GMS Build Errors & Configuration
+      - name: Fix Firebase/GMS Build Errors & MinSdk Configuration
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           cd sing-box-for-android
@@ -849,9 +846,9 @@ jobs:
             "${{ needs.init.outputs.version_code }}" "${{ matrix.target.ver }}" "${{ needs.init.outputs.go_version }}" > version.properties
 
           echo "🔧 Overriding SDK Versions in: $GRADLE_FILE"
-          sed -Ei 's/(compileSdkVersion|compileSdk)\s*[=(]+\s*[0-9]+/\1 = 35/' "$GRADLE_FILE" || true
-          sed -Ei 's/(targetSdkVersion|targetSdk)\s*[=(]+\s*[0-9]+/\1 = 35/' "$GRADLE_FILE" || true
-          sed -Ei 's/(minSdkVersion|minSdk)\s*[=(]+\s*[0-9]+/\1 = 23/' "$GRADLE_FILE" || true
+          sed -Ei 's/(compileSdkVersion|compileSdk)[ \t=]+[0-9]+/\1 = 35/g' "$GRADLE_FILE" || true
+          sed -Ei 's/(targetSdkVersion|targetSdk)[ \t=]+[0-9]+/\1 = 35/g' "$GRADLE_FILE" || true
+          sed -Ei 's/(minSdkVersion|minSdk)[ \t=]+[0-9]+/\1 = 23/g' "$GRADLE_FILE" || true
           
           if [ -f "$TOML_FILE" ]; then
              echo "📖 Updating SDK Versions in: $TOML_FILE"
