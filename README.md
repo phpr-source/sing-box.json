@@ -2,14 +2,14 @@
 
 > 自動檢測並編譯 [SagerNet/sing-box](https://github.com/SagerNet/sing-box)、[reF1nd/sing-box](https://github.com/reF1nd/sing-box) 和 [PuerNya/sing-box](https://github.com/PuerNya/sing-box)
 
-## 📦 最新版本狀態 (2026-04-07 14:10 UTC+8)
+## 📦 最新版本狀態 (2026-04-07 14:37 UTC+8)
 
 - ✨ 更新 **[SagerNet_Oldstable](https://github.com/SagerNet/sing-box/tree/oldstable)** 至 `v1.13.6`，發佈於 2026-03-24 [SagerNet_Oldstable v1.13.6]
 - ✨ 更新 **[SagerNet_Stable](https://github.com/SagerNet/sing-box/tree/stable)** 至 `v1.13.6`，發佈於 2026-04-06 [SagerNet_Stable v1.13.6]
-- ✨ 更新 **[SagerNet_Testing](https://github.com/SagerNet/sing-box/tree/testing)** 至 `v1.14.0-alpha.9`，發佈於 2026-04-06 [SagerNet_Testing v1.14.0-alpha.9]
+- ✨ 更新 **[SagerNet_Testing](https://github.com/SagerNet/sing-box/tree/testing)** 至 `v1.14.0-alpha.9`，發佈於 2026-04-07 [SagerNet_Testing v1.14.0-alpha.9]
 - ✨ 更新 **[reF1nd_Oldstable](https://github.com/reF1nd/sing-box/tree/reF1nd-oldstable)** 至 `v1.13.5-reF1nd`，發佈於 2026-04-01 [reF1nd_Oldstable v1.13.5-reF1nd]
 - ✨ 更新 **[reF1nd_Stable](https://github.com/reF1nd/sing-box/tree/reF1nd-stable)** 至 `v1.13.5-reF1nd`，發佈於 2026-04-01 [reF1nd_Stable v1.13.5-reF1nd]
-- ✨ 更新 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** 至 `v52df4634`，發佈於 2026-04-01 [reF1nd_Testing v52df4634]
+- ✨ 更新 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** 至 `v1.14.0-alpha.8-reF1nd`，發佈於 2026-04-01 [reF1nd_Testing v1.14.0-alpha.8-reF1nd]
 - ✨ 更新 **[PuerNya_Building](https://github.com/PuerNya/sing-box/tree/building)** 至 `v1.10.0-alpha.29-067c81a7`，發佈於 2024-08-16 [PuerNya_Building v1.10.0-alpha.29-067c81a7]
 
 ---
