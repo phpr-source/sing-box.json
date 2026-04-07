@@ -404,6 +404,15 @@ jobs:
           cache: true
           cache-dependency-path: 'sing-box/go.sum'
 
+      - name: Setup Go Build Cache
+        if: steps.check_naive.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-${{ matrix.platform.name }}-${{ hashFiles('sing-box/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-${{ matrix.platform.name }}-
+
       - name: Fix sniff
         if: steps.check_naive.outputs.skip != 'true' && contains(matrix.target.repo, 'PuerNya')
         run: |
@@ -493,7 +502,7 @@ jobs:
         if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
         uses: hendrikmuhs/ccache-action@v1
         with:
-          key: ${{ runner.os }}-cgo-${{ matrix.platform.goarch }}
+          key: ${{ runner.os }}-cgo-${{ matrix.platform.name }}-naive
 
       - name: Export ccache compilers
         if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
@@ -515,16 +524,17 @@ jobs:
             git -C "$HOME/cronet-go" checkout FETCH_HEAD
           fi
           
-          TARGET="${{ matrix.platform.goos }}/${{ matrix.platform.goarch }}"
+          # Fix Exit 126: Hardcode toolchain host arch & explicitly use bash
+          TARGET="linux/amd64"
           
           if [ "${{ matrix.platform.goos }}" = "linux" ]; then
             git -C "$HOME/cronet-go" submodule update --init --recursive --depth=1 2>/dev/null || true
             rm -f "$HOME/cronet-go/naiveproxy/src/build/linux/sysroot_scripts/keyring.gpg" 2>/dev/null || true
             cd "$HOME/cronet-go"
             
-            if ! GPG_TTY=/dev/null ./naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh; then
+            if ! GPG_TTY=/dev/null bash ./naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh; then
               sleep 10
-              GPG_TTY=/dev/null ./naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh || exit 1
+              GPG_TTY=/dev/null bash ./naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh || exit 1
             fi
             
             for i in 1 2 3; do
@@ -599,7 +609,7 @@ jobs:
               echo "::error::File is not a valid ELF executable!"; exit 1
             fi
           elif [ "${{ matrix.platform.goos }}" = "windows" ]; then
-            if ! echo "$FILE_HEADER" | grep -qiE "PE32.*executable"; then
+            if ! echo "$FILE_HEADER" | grep -qiE "PE.*executable"; then
               echo "::error::File is not a valid PE executable!"; exit 1
             fi
           fi
@@ -661,6 +671,15 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ needs.init.outputs.go_version }}
+
+      - name: Setup Go Build Cache
+        if: ${{ matrix.target.sfa_repo != 'none' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-android-${{ matrix.android_arch.ABI }}-${{ hashFiles('sing-box/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-android-${{ matrix.android_arch.ABI }}-
 
       - name: Setup Android NDK
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -872,8 +891,13 @@ jobs:
               echo "" >> gradle.properties
             fi
           fi
-          echo "android.useAndroidX=true" >> gradle.properties
-          echo "android.defaults.buildfeatures.buildconfig=true" >> gradle.properties
+          
+          if ! grep -q "android.useAndroidX" gradle.properties 2>/dev/null; then
+            echo "android.useAndroidX=true" >> gradle.properties
+          fi
+          if ! grep -q "android.defaults.buildfeatures.buildconfig" gradle.properties 2>/dev/null; then
+            echo "android.defaults.buildfeatures.buildconfig=true" >> gradle.properties
+          fi
 
       - name: Build libbox.aar
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -885,7 +909,9 @@ jobs:
           ls -d "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/"* >/dev/null 2>&1 || { echo "::error::NDK toolchains not found!"; exit 1; }
           cd sing-box
           make lib_install
-          export PATH="$PATH:$(go env GOPATH)/bin"
+          
+          export GOBIN="$(go env GOPATH)/bin"
+          export PATH="$GOBIN:$PATH"
           
           FINAL_TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_ANDROID_EXTRA }}"
           if [[ "${{ matrix.target.repo }}" == *"PuerNya"* ]]; then
@@ -1072,7 +1098,7 @@ jobs:
               [ -f "$dir/upx_supported.txt" ] && UPX_SUPPORTED=$(cat "$dir/upx_supported.txt")
               
               if [ "$UPX_SUPPORTED" = "true" ]; then
-                if file "sing-box.exe" | grep -qiE "^PE32.*executable"; then
+                if file "sing-box.exe" | grep -qiE "^PE.*executable"; then
                   if ! upx -t "sing-box.exe" >/dev/null 2>&1 || ! upx --best --lzma "sing-box.exe" 2>/dev/null; then
                     upx --best "sing-box.exe" 2>/dev/null || cp "sing-box-original.exe" "sing-box.exe"
                   fi
@@ -1132,7 +1158,7 @@ jobs:
               [ -f "$dir/upx_supported.txt" ] && UPX_SUPPORTED=$(cat "$dir/upx_supported.txt")
 
               if [ "$UPX_SUPPORTED" = "true" ]; then
-                if file "sing-box" | grep -qE "ELF.*executable"; then
+                if file "sing-box" | grep -qi "ELF"; then
                   if ! upx -t "sing-box" >/dev/null 2>&1 || ! upx --best --lzma "sing-box" 2>/dev/null; then
                     upx --best "sing-box" 2>/dev/null || cp "sing-box-original" "sing-box"
                   fi
@@ -1492,16 +1518,15 @@ jobs:
         if: ${{ steps.status.outputs.status == 'success' }}
         id: find_files
         run: |
-          mapfile -t TG_FILES < <(find dist -maxdepth 1 -type f \( -name "*.apk" -o -name "*.tar.gz" -o -name "*.zip" \) ! -name "*-original*" -print 2>/dev/null)
           > /tmp/tg_files.txt
-          for f in "${TG_FILES[@]}"; do
+          while read -r f; do
             SIZE=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
             if [ "$SIZE" -le 2000000000 ]; then
               echo "$f" >> /tmp/tg_files.txt
             else
               echo "::warning::$f exceeds 2GB MTProto limit, skipping."
             fi
-          done
+          done < <(find dist -maxdepth 1 -type f \( -name "*.apk" -o -name "*.tar.gz" -o -name "*.zip" \) ! -name "*-original*" -print 2>/dev/null)
           
           if [ -s /tmp/tg_files.txt ]; then
             EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1 2>/dev/null || echo "EOM")
