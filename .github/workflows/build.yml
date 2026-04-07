@@ -72,7 +72,6 @@ env:
   TAGS_ANDROID_EXTRA: "with_conntrack"
   CURL_TIMEOUT_API: 60
   CURL_TIMEOUT_FILE: 120
-  BASE_TIMESTAMP: 1735689600
 
 jobs:
   init:
@@ -87,11 +86,10 @@ jobs:
         id: time
         run: echo "start=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
 
-      - name: Calculate Android Version Code
+      - name: Calculate Android Version Code (Anti-Collision)
         id: calc
         run: |
-          NOW=$(date +%s)
-          CODE=$(( (NOW - BASE_TIMESTAMP) * 10 + $(shuf -i 1-9 -n 1) ))
+          CODE=$(( ($(date +%s) / 60) + ${{ github.run_number }} ))
           echo "code=$CODE" >> $GITHUB_OUTPUT
 
       - name: Get Go latest version
@@ -199,7 +197,7 @@ jobs:
           
           api_call_with_retry() {
             local url="$1"
-            curl -sfL -m ${CURL_TIMEOUT_API} --retry 3 --retry-delay 5 --retry-connrefused -H "Authorization: Bearer $GH_TOKEN" "$url" || echo "[]"
+            curl -sfL -m ${CURL_TIMEOUT_API} --retry 3 --retry-delay 5 --retry-connrefused -H "Authorization: token $GH_TOKEN" "$url" || echo "[]"
           }
           
           FORCE_BUILD="${{ github.event.inputs.force_build || 'false' }}"
@@ -209,7 +207,12 @@ jobs:
           
           LAST_BUILD_INFO="{}"
           if [ "$SKIP_CHECK" != "true" ]; then
-            LAST_BUILD_INFO=$(curl -sSL -m ${CURL_TIMEOUT_API} "https://raw.githubusercontent.com/${{ github.repository }}/release-info/build-info.json" 2>/dev/null || echo "{}")
+            CONTENT=$(gh api "repos/${{ github.repository }}/contents/build-info.json?ref=release-info" -q ".content" 2>/dev/null || true)
+            if [ -z "$CONTENT" ]; then
+              LAST_BUILD_INFO="{}"
+            else
+              LAST_BUILD_INFO=$(echo "$CONTENT" | base64 -d 2>/dev/null || echo "{}")
+            fi
             if ! echo "$LAST_BUILD_INFO" | jq empty 2>/dev/null; then LAST_BUILD_INFO="{}"; fi
           fi
           
@@ -297,9 +300,9 @@ jobs:
             fi
           }
 
-          check_branch "SagerNet_Oldstable" "SagerNet/sing-box" "oldstable" "SagerNet/sing-box-for-android" "oldstable"
-          check_branch "SagerNet_Stable" "SagerNet/sing-box" "stable" "SagerNet/sing-box-for-android" "stable"
-          check_branch "SagerNet_Testing" "SagerNet/sing-box" "testing" "SagerNet/sing-box-for-android" "testing"
+          check_branch "SagerNet_Oldstable" "SagerNet/sing-box" "oldstable" "none" "none"
+          check_branch "SagerNet_Stable" "SagerNet/sing-box" "stable" "none" "none"
+          check_branch "SagerNet_Testing" "SagerNet/sing-box" "testing" "none" "none"
           check_branch "reF1nd_Oldstable" "reF1nd/sing-box" "reF1nd-oldstable" "reF1nd/sing-box-for-android" "reF1nd-oldstable"
           check_branch "reF1nd_Stable" "reF1nd/sing-box" "reF1nd-stable" "reF1nd/sing-box-for-android" "reF1nd-stable"
           check_branch "reF1nd_Testing" "reF1nd/sing-box" "reF1nd-testing" "reF1nd/sing-box-for-android" "reF1nd-testing"
@@ -310,7 +313,7 @@ jobs:
             echo "- 📝 自動構建完成（無版本變更檢測）" > release_notes.txt
           fi
 
-          VALIDATED_MATRIX=$(jq -s -c '[.[] | select((.ver // empty) != "" and (.time // empty) != "")]' /tmp/matrix.jsonl 2>/dev/null || echo "[]")
+          VALIDATED_MATRIX=$(jq -s -c '[.[] | select(.ver != null and .ver != "" and .time != null and .time != "")]' /tmp/matrix.jsonl 2>/dev/null || echo "[]")
           if [ -z "$VALIDATED_MATRIX" ] || ! echo "$VALIDATED_MATRIX" | jq empty 2>/dev/null; then
             VALIDATED_MATRIX="[]"
           fi
@@ -330,6 +333,7 @@ jobs:
           name: workflow-metadata
           path: release_notes.txt
           retention-days: 1
+          compression-level: 0
 
   build_core:
     needs: [init, check]
@@ -393,6 +397,13 @@ jobs:
           path: sing-box
           fetch-depth: 1
 
+      - name: Clean Workspace Before Patches
+        if: steps.check_naive.outputs.skip != 'true' && contains(matrix.target.repo, 'reF1nd')
+        working-directory: sing-box
+        run: |
+          git clean -fdx
+          git reset --hard
+
       - name: Setup Go
         if: steps.check_naive.outputs.skip != 'true'
         uses: actions/setup-go@v5
@@ -440,11 +451,10 @@ jobs:
       - name: Fetch and Apply patches atomically
         if: steps.check_naive.outputs.skip != 'true' && contains(matrix.target.repo, 'reF1nd')
         working-directory: sing-box
-        continue-on-error: true
         run: |
           set -euo pipefail
           
-          git -c http.extraHeader="Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          git -c http.extraHeader="Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             fetch https://github.com/${{ github.repository }}.git patches:patches 2>/dev/null || true
           
           for patch in concurrent_dial make_log_better fix_interrupt_connections; do
@@ -479,6 +489,17 @@ jobs:
             }
             rm -f "$PATCH_FILE"
           done
+
+      - name: Cache Cronet Toolchain
+        if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/cronet-go
+          key: ${{ runner.os }}-cronet-${{ matrix.platform.goos }}-${{ matrix.platform.goarch }}-${{ hashFiles('sing-box/.github/CRONET_GO_VERSION') }}
+          restore-keys: |
+            ${{ runner.os }}-cronet-${{ matrix.platform.goos }}-${{ matrix.platform.goarch }}-
+            ${{ runner.os }}-cronet-
 
       - name: Free disk space for cronet toolchain
         if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
@@ -608,6 +629,7 @@ jobs:
           name: core-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
           path: sing-box/dist/*
           retention-days: 1
+          compression-level: 0
 
   build_android:
     needs: [init, check]
@@ -616,7 +638,8 @@ jobs:
       needs.check.outputs.has_update == 'true' &&
       needs.check.outputs.matrix != '[]' &&
       needs.check.outputs.matrix != '' &&
-      github.event.inputs.enable_naive != 'true'
+      github.event.inputs.enable_naive != 'true' &&
+      needs.init.outputs.android_secrets_valid == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -642,6 +665,13 @@ jobs:
           ref: ${{ steps.resolve.outputs.ref }}
           path: sing-box
           fetch-depth: 1
+
+      - name: Clean Workspace Before Patches
+        if: ${{ matrix.target.sfa_repo != 'none' && contains(matrix.target.repo, 'reF1nd') }}
+        working-directory: sing-box
+        run: |
+          git clean -fdx
+          git reset --hard
 
       - name: Checkout SFA
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -701,11 +731,10 @@ jobs:
       - name: Fetch and Apply Core patches atomically
         if: ${{ matrix.target.sfa_repo != 'none' && contains(matrix.target.repo, 'reF1nd') }}
         working-directory: sing-box
-        continue-on-error: true
         run: |
           set -euo pipefail
           
-          git -c http.extraHeader="Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          git -c http.extraHeader="Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             fetch https://github.com/${{ github.repository }}.git patches:patches 2>/dev/null || true
           
           for patch in concurrent_dial make_log_better fix_interrupt_connections; do
@@ -762,10 +791,10 @@ jobs:
           fi
           
           if [ -f "$GRADLE_FILE" ]; then
-            sed -i 's|applicationId "io.reF1nd.sfa"|applicationId "com.android.internal.net"|g' "$GRADLE_FILE"
-            sed -i 's|applicationId = "io.reF1nd.sfa"|applicationId = "com.android.internal.net"|g' "$GRADLE_FILE"
-            sed -i 's|namespace("io.nekohasekai.sfa")|namespace("com.android.internal.net")|g' "$GRADLE_FILE"
-            sed -i 's|namespace = "io.nekohasekai.sfa"|namespace = "com.android.internal.net"|g' "$GRADLE_FILE"
+            sed -i 's|applicationId "io.reF1nd.sfa"|applicationId "io.nekohasekai.sfa.custom"|g' "$GRADLE_FILE"
+            sed -i 's|applicationId = "io.reF1nd.sfa"|applicationId = "io.nekohasekai.sfa.custom"|g' "$GRADLE_FILE"
+            sed -i 's|namespace("io.nekohasekai.sfa")|namespace("io.nekohasekai.sfa.custom")|g' "$GRADLE_FILE"
+            sed -i 's|namespace = "io.nekohasekai.sfa"|namespace = "io.nekohasekai.sfa.custom"|g' "$GRADLE_FILE"
             echo "✅ Package name updated safely."
           else
             echo "::error::Cannot find build.gradle(.kts) to change package name!"
@@ -794,93 +823,51 @@ jobs:
           
           echo "✅ Patch applied safely without syntax corruption."
 
-      - name: Fix Firebase/GMS Build Errors & MinSdk Configuration
+      - name: Fix Firebase/GMS Build Errors
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           cd sing-box-for-android
           GRADLE_FILE="app/build.gradle.kts"
-          TOML_FILE="gradle/libs.versions.toml"
           
           if [ ! -f "$GRADLE_FILE" ]; then
              GRADLE_FILE=$(find app -name "build.gradle" -path "*/app/*" | head -n 1)
           fi
           
-          echo "🔍 Step 1: Aggressively Remove GMS/Firebase Plugin..."
+          echo "🔍 Aggressively Remove GMS/Firebase Plugin..."
           sed -i '/com\.google\.gms\.google-services/d' "$GRADLE_FILE" || true
           sed -i '/firebase-bom/d' "$GRADLE_FILE" || true
           sed -i '/implementation.*firebase/d' "$GRADLE_FILE" || true
           sed -i '/implementation.*analytics/d' "$GRADLE_FILE" || true
           
-          echo "🔧 Step 2: Create Valid Dummy google-services.json..."
-          mkdir -p app
-          cat > app/google-services.json << 'JSONEOF'
-          {
-            "project_info": {
-              "project_number": "0",
-              "project_id": "ci-dummy-placeholder",
-              "storage_bucket": "ci-dummy.appspot.com"
-            },
-            "client": [
-              {
-                "client_info": {
-                  "mobilesdk_app_id": "1:0:android:dummy:ci",
-                  "android_client_info": {
-                    "package_name": "io.reF1nd.sfa" 
-                  }
-                },
-                "oauth_client": [],
-                "api_key": [ { "current_key": "fake-key-does-not-matter" } ],
-                "services": {
-                  "appinvite_service": {
-                    "other_platform_oauth_client": []
-                  }
-                }
-              }
-            ],
-            "configuration_version": "1"
-          }
-          JSONEOF
-
-          echo "🔧 Step 3: Apply Version & Package Config..."
+          echo "🔧 Apply Version Config..."
           printf 'VERSION_CODE=%s\nVERSION_NAME=%s\nGO_VERSION=%s\n' \
             "${{ needs.init.outputs.version_code }}" "${{ matrix.target.ver }}" "${{ needs.init.outputs.go_version }}" > version.properties
 
-          echo "🔧 Overriding SDK Versions in: $GRADLE_FILE"
-          sed -Ei 's/(compileSdkVersion|compileSdk)[ \t=]+[0-9]+/\1 = 35/g' "$GRADLE_FILE" || true
-          sed -Ei 's/(targetSdkVersion|targetSdk)[ \t=]+[0-9]+/\1 = 35/g' "$GRADLE_FILE" || true
-          sed -Ei 's/(minSdkVersion|minSdk)[ \t=]+[0-9]+/\1 = 23/g' "$GRADLE_FILE" || true
-          
-          if [ -f "$TOML_FILE" ]; then
-             echo "📖 Updating SDK Versions in: $TOML_FILE"
-             sed -Ei 's/(compile-sdk)\s*=\s*\"[0-9]+\"/\1 = "35"/' "$TOML_FILE" || true
-             sed -Ei 's/(target-sdk)\s*=\s*\"[0-9]+\"/\1 = "35"/' "$TOML_FILE" || true
-             sed -Ei 's/(min-sdk)\s*=\s*\"[0-9]+\"/\1 = "23"/' "$TOML_FILE" || true
-             echo "✅ TOML version catalog updated."
-          fi
-          
-          echo "✅ Patching complete. Ready to build."
+          echo "✅ Patching complete."
 
-      - name: Sync Gradle Wrapper Version
+      - name: Fix Gradle Properties for Modern AGP
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           cd sing-box-for-android
-          chmod +x gradlew
-          GRADLE_VERS=$(grep distributionUrl gradle/wrapper/gradle-wrapper.properties 2>/dev/null | sed 's/.*gradle-\(.*\)-all\.zip/\1/' || echo "")
-          if [ -n "$GRADLE_VERS" ]; then
-            ./gradlew wrapper --gradle-version "$GRADLE_VERS" --console=plain || true
+          if [ -f "gradle.properties" ]; then
+            sed -i '/android.enableResourceOptimizations/d' gradle.properties 2>/dev/null || true
+            sed -i '/android.enableBuildConfigGeneration/d' gradle.properties 2>/dev/null || true
           fi
+          cat >> gradle.properties <<EOF
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          android.buildFeatures.buildConfig=true
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          EOF
 
-      - name: Fix Gradle Properties for NDK Compatibility
+      - name: Install & Lock gomobile
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
-          cd sing-box-for-android
-          if [ -f "gradle.properties" ] && [ -s "gradle.properties" ]; then
-            if [ "$(tail -c 1 gradle.properties | xxd -p | tr -d ' ')" != "0a" ]; then
-              echo "" >> gradle.properties
-            fi
-          fi
-          echo "android.enableResourceOptimizations=false" >> gradle.properties
-          echo "android.useAndroidX=true" >> gradle.properties
+          go install github.com/sagernet/mobile/cmd/gomobile@latest
+          go install github.com/sagernet/mobile/cmd/gobind@latest
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          export ANDROID_SDK_ROOT=${ANDROID_HOME:-$HOME/Android/Sdk}
+          gomobile init
 
       - name: Build libbox.aar
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -903,23 +890,33 @@ jobs:
           
           gomobile bind -v -target android/${{ matrix.android_arch.GOARCH }} -androidapi 23 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false -tags="${FINAL_TAGS}" -ldflags="-checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -s -w -buildid=" ./experimental/libbox
 
-      - name: Verify libbox.aar
+      - name: Verify libbox.aar and JNI Symbols
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           if [ ! -f "sing-box/libbox.aar" ]; then exit 1; fi
           AAR_SIZE=$(stat -c%s "sing-box/libbox.aar" 2>/dev/null || stat -f%z "sing-box/libbox.aar" 2>/dev/null || echo 0)
           if [ "$AAR_SIZE" -lt 1000000 ]; then exit 1; fi
+          
+          echo "🔍 正在預檢查 AAR JNI 符號..."
+          unzip -q sing-box/libbox.aar -d /tmp/libbox_aar
+          SO_FILE=$(find /tmp/libbox_aar/jni -name "libbox.so" | head -n 1)
+          if [ -z "$SO_FILE" ]; then
+            echo "::error::libbox.so not found inside AAR!"
+            exit 1
+          fi
+          if ! nm -D "$SO_FILE" | grep -q "Java_"; then
+            echo "::error::JNI symbols missing in libbox.so! gomobile bind failed silently."
+            exit 1
+          fi
+          echo "✅ JNI symbols verified."
 
       - name: Decode Keystore & Validate
         if: ${{ matrix.target.sfa_repo != 'none' }}
         id: keystore
-        env:
-          EXPECTED_SHA1: ${{ secrets.EXPECTED_SHA1_FINGERPRINT || '' }}
         run: |
           printf "%s" "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > ./sing-box-for-android/app/release.keystore 2>/dev/null || {
-            echo "::error::❌ Keystore Base64 decode failed."
-            echo "SIGNING_MODE=debug" >> $GITHUB_ENV
-            exit 0
+            echo "::error::❌ Keystore Base64 decode failed. Cannot proceed with Release build."
+            exit 1
           }
           
           chmod 600 ./sing-box-for-android/app/release.keystore
@@ -930,8 +927,8 @@ jobs:
             echo "SIGNING_MODE=release" >> $GITHUB_ENV
             echo "✅ Keystore 驗證成功，將執行 Release 簽名構建。"
           else
-            echo "::warning::⚠️ 密鑰驗證失敗（密碼/別名錯誤），回退至 Debug 構建。"
-            echo "SIGNING_MODE=debug" >> $GITHUB_ENV
+            echo "::error::⚠️ Keystore 驗證失敗（密碼/別名錯誤）。為防止發布 Debug 簽名版本污染通道，已強制中止構建。"
+            exit 1
           fi
 
       - name: Stop Gradle Daemon
@@ -964,25 +961,25 @@ jobs:
           
           echo "Building task: ${RELEASE_TASK} ..."
           
-          if [ "$SIGNING_MODE" = "release" ]; then
-            ./gradlew ${RELEASE_TASK} --console=plain \
-              -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
-              -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASS }}" \
-              -Pandroid.injected.signing.key.alias="${{ secrets.ALIAS_NAME }}" \
-              -Pandroid.injected.signing.key.password="${{ secrets.ALIAS_PASS }}"
-          else
-            DEBUG_TASK=$(echo "$RELEASE_TASK" | sed 's/Release$/Debug/')
-            ./gradlew ${DEBUG_TASK} --console=plain
-          fi
+          ./gradlew ${RELEASE_TASK} --console=plain \
+            -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
+            -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASS }}" \
+            -Pandroid.injected.signing.key.alias="${{ secrets.ALIAS_NAME }}" \
+            -Pandroid.injected.signing.key.password="${{ secrets.ALIAS_PASS }}"
           
           arch_abi="${{ matrix.android_arch.ABI }}"
-          
           cd ..
-          apk=$(find sing-box-for-android/app/build/outputs/apk -type f -name "*${arch_abi}*.apk" -print -quit 2>/dev/null || true)
-          [ -z "$apk" ] && apk=$(find sing-box-for-android/app/build/outputs/apk -type f -name "*.apk" -print -quit 2>/dev/null || true)
+          
+          REL_DIR="sing-box-for-android/app/build/outputs/apk/other/release"
+          [ -d "$REL_DIR" ] || REL_DIR="sing-box-for-android/app/build/outputs/apk/release"
+          
+          apk=$(find "$REL_DIR" -maxdepth 1 -name "*${arch_abi}*.apk" -print -quit 2>/dev/null || true)
+          if [ -z "$apk" ]; then
+             apk=$(find "$REL_DIR" -maxdepth 1 -name "*.apk" -print -quit 2>/dev/null || true)
+          fi
           
           if [ -z "$apk" ] || [ ! -f "$apk" ]; then
-            echo "::error::❌ Failed to find APK for ${arch_abi}"
+            echo "::error::❌ Failed to find APK in $REL_DIR"
             exit 1
           fi
           
@@ -997,7 +994,6 @@ jobs:
           fi
           
           SIGNING_META="Release"
-          [ "$SIGNING_MODE" = "debug" ] && SIGNING_META="Debug (Unsigned)"
           
           jq -n \
             --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -1031,6 +1027,7 @@ jobs:
           name: apk-${{ matrix.target.id }}-${{ matrix.android_arch.ABI }}
           path: apks/*
           retention-days: 1
+          compression-level: 0
 
   publish:
     runs-on: ubuntu-latest
@@ -1195,12 +1192,14 @@ jobs:
 
           shopt -s nullglob
           APK_META=($(./release_files/*-metadata.json 2>/dev/null || echo ""))
+          shopt -u nullglob
+
           CORE_TARGETS=()
-          for f in release_files/sing-box-*.tar.gz release_files/sing-box-*.zip; do
+          for f in release_files/*.tar.gz release_files/*.zip; do
             if [[ "$f" == *"-original"* ]]; then continue; fi
             base=$(basename "$f" | sed -E 's/\.tar\.gz$//' | sed -E 's/\.zip$//')
             target_id=$(echo "$base" | sed 's/^sing-box-//')
-            ver_name=$(grep -oP 'v\K[^ ]+' ./tmp/workflow-metadata/release_notes.txt 2>/dev/null | head -1 || echo "unknown")
+            ver_name=$(sed -n 's/.*`\([^`]*\)`.*/\1/p' ./tmp/workflow-metadata/release_notes.txt | head -1 || echo "unknown")
             CORE_TARGETS+=("{\"target_id\":\"$target_id\", \"version_name\":\"$ver_name\", \"build_time\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}")
           done
 
@@ -1213,8 +1212,9 @@ jobs:
           done
 
           if [ ${#TARGETS_LIST[@]} -gt 0 ]; then
-            printf '%s\n' "${TARGETS_LIST[@]}" | jq -s --arg run_id "${{ github.run_id }}" --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
+            printf '%s\n' "${TARGETS_LIST[@]}" | jq -s --arg run_id "${{ github.run_id }}" --arg commit "${{ github.sha }}" --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
               global_run_id: $run_id,
+              commit_sha: $commit,
               built_at: $built_at,
               targets: .
             }' > release_files/build-info.json || echo "{}" > release_files/build-info.json
@@ -1226,6 +1226,7 @@ jobs:
           # 🚀 sing-box 自動編譯
           
           > 🔒 此 Release 已通過 [GitHub Artifact Attestations](https://github.com/advanced-security/artifact-attestations) 驗證，防範供應鏈攻擊。
+          > ⚠️ **發佈狀態提示**：此 Release 包含 `testing` (測試版) 和 `stable` (穩定版) 的多分支產物，為防止下游依賴腳本誤抓取不穩定版本，已統一標記為 **Pre-release (預發佈)**。
           
           ## 📦 本次更新內容
           
@@ -1250,6 +1251,10 @@ jobs:
             fi
           done
           echo '```' >> release_body.txt
+          
+          echo "" >> release_body.txt
+          echo "### 📜 歷史更新摘要" >> release_body.txt
+          gh release list --repo "${{ github.repository }}" --limit 3 --json tagName,name,publishedAt --jq '.[] | "- \(.publishedAt[0:10]) \(.tagName): \(.name)"' >> release_body.txt || echo "- 暫無歷史記錄" >> release_body.txt
 
       - name: Generate install scripts
         run: |
@@ -1271,18 +1276,14 @@ jobs:
           echo "Fetching latest release for $FILE_ARCH..."
           
           ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | \
-            python3 -c "
-          import json, sys
-          try:
-              data = json.load(sys.stdin)
-              arch = '$FILE_ARCH'
-              urls = [a['browser_download_url'] for a in data.get('assets', []) if arch in a['name'] and a['name'].endswith('.tar.gz') and 'original' not in a['name']]
-              if not urls:
-                  urls = [a['browser_download_url'] for a in data.get('assets', []) if arch in a['name'] and a['name'].endswith('.tar.gz') and 'original' in a['name']]
-              print(urls[0] if urls else '')
-          except Exception:
-              print('')
-          " 2>/dev/null)
+            jq -r --arg arch "$FILE_ARCH" '
+              [ .assets[] | select(.name | test($arch) and endswith(".tar.gz") and (contains("original") | not)) ] | first | .browser_download_url // empty
+            ')
+          
+          [[ -z "$ASSET_URL" ]] && ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | \
+            jq -r --arg arch "$FILE_ARCH" '
+              [ .assets[] | select(.name | test($arch) and endswith(".tar.gz")) ] | first | .browser_download_url // empty
+            ')
           
           [ -z "$ASSET_URL" ] && { echo "❌ No release found for $FILE_ARCH"; exit 1; }
           echo "Downloading $ASSET_URL ..."
@@ -1299,7 +1300,7 @@ jobs:
         run: |
           cd release_files
           for f in *.tar.gz; do
-            if [ -f "$f" ]; then tar xzf "$f" -O > /dev/null 2>&1 || exit 1; fi
+            if [ -f "$f" ]; then tar -tzf "$f" > /dev/null 2>&1 || exit 1; fi
           done
           for f in *.zip; do
             if [ -f "$f" ]; then unzip -t "$f" > /dev/null 2>&1 || exit 1; fi
@@ -1334,8 +1335,10 @@ jobs:
           name: sing-box
           tag_name: sing-box
           make_latest: true
+          prerelease: true
           body_path: release_body.txt
           files: ./release_files/*
+          fail_on_unmatched_files: true
 
       - name: Generate Build Provenance
         if: steps.check_files.outputs.files_exist == 'true'
@@ -1410,22 +1413,65 @@ jobs:
             gh api "repos/${{ github.repository }}/actions/runs/$run_id" -X DELETE >/dev/null 2>&1 || true
           done
 
+      - name: Prune Old Caches
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🧹 Clearing caches older than 7 days to prevent 10GB limit exhaustion..."
+          CUTOFF_DATE=$(date -u -d "7 days ago" +%Y-%m-%dT%H:%M:%SZ)
+          gh api "repos/${{ github.repository }}/actions/caches" --paginate -q ".actions_caches[] | select(.created_at < \"$CUTOFF_DATE\") | .id" | xargs -I {} gh api -X DELETE "repos/${{ github.repository }}/actions/caches/{}" || true
+
+      - name: Log Build Summary
+        if: always()
+        run: |
+          echo "### 📊 構建摘要" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 任務 | 執行狀態 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 核心編譯 | ${{ needs.build_core.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 客戶端編譯 | ${{ needs.build_android.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 發佈打包 | ${{ needs.publish.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          
+          echo "#### 📦 產物詳情" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 目標 | 版本 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|------|" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "release_files/build-info.json" ]; then
+            jq -r '.targets[] | "| \(.target_id) | \(.version_name) |"' release_files/build-info.json >> "$GITHUB_STEP_SUMMARY" || true
+          else
+            echo "| N/A | N/A |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   create_issue_on_failure:
     needs: [build_core, build_android, publish]
     if: failure() && (github.event_name == 'schedule' || github.event_name == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `🔴 定時構建失敗: sing-box`,
-              body: `構建在工作流 \`${context.workflow}\` 中失敗。\n\n[查看日誌](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
-              labels: ['bug', 'ci-failure']
-            })
+      - name: Create Issue with logs
+        run: |
+          echo "Fetching failed logs..."
+          gh run view ${{ github.run_id }} --repo "${{ github.repository }}" --log-failed --exit-status 0 | tail -n 100 > /tmp/error.log || echo "Failed to fetch logs." > /tmp/error.log
+          
+          cat > issue_body.md <<EOF
+          構建在工作流 \`${{ github.workflow }}\` 中失敗。
+          
+          [查看完整的 Actions 日誌](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          
+          ### 🔍 錯誤日誌摘要 (Tail 100 lines)
+          \`\`\`log
+          EOF
+          cat /tmp/error.log >> issue_body.md
+          echo '```' >> issue_body.md
+          
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "🔴 定時構建失敗: sing-box" \
+            --body-file issue_body.md \
+            --label "bug" || true
 
   telegram_notify:
     needs: [build_core, build_android, publish]
@@ -1507,12 +1553,7 @@ jobs:
           mapfile -t TG_FILES < <(find dist -maxdepth 1 -type f \( -name "*.apk" -o -name "*.tar.gz" -o -name "*.zip" \) ! -name "*-original*" -print 2>/dev/null)
           > /tmp/tg_files.txt
           for f in "${TG_FILES[@]}"; do
-            SIZE=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
-            if [ "$SIZE" -le 52428800 ]; then
-              echo "$f" >> /tmp/tg_files.txt
-            else
-              echo "::warning::$f exceeds 50MB Telegram limit, skipping."
-            fi
+             echo "$f" >> /tmp/tg_files.txt
           done
           
           if [ -s /tmp/tg_files.txt ]; then
@@ -1527,6 +1568,7 @@ jobs:
 
       - name: Telegram notification (with files)
         if: ${{ (steps.status.outputs.status == 'success' || steps.status.outputs.status == 'failed') && env.skip_tg_file_upload != 'true' }}
+        continue-on-error: true
         uses: xz-dev/TelegramFileUploader@v1
         with:
           to-who: "${{ secrets.CHAT_ID }}"
@@ -1539,6 +1581,7 @@ jobs:
 
       - name: Telegram notification (text only)
         if: ${{ (steps.status.outputs.status == 'success' || steps.status.outputs.status == 'failed') && env.skip_tg_file_upload == 'true' }}
+        continue-on-error: true
         uses: xz-dev/TelegramFileUploader@v1
         with:
           to-who: "${{ secrets.CHAT_ID }}"
@@ -1554,6 +1597,7 @@ jobs:
     if: >-
       always() && 
       needs.check.result == 'success' && 
+      needs.publish.result == 'success' &&
       needs.check.outputs.has_update == 'true'
     steps:
       - uses: actions/checkout@v4
@@ -1586,7 +1630,7 @@ jobs:
           
           使用動態路由自動安裝最新版對應架構：
           \`\`\`bash
-          bash <(curl -sSL https://github.com/${{ github.repository }}/releases/download/sing-box/install-linux.sh)
+          bash <(curl -sSL [https://github.com/$](https://github.com/$){{ github.repository }}/releases/download/sing-box/install-linux.sh)
           \`\`\`
           
           ## 📦 文件命名規則
