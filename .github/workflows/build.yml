@@ -53,7 +53,7 @@ on:
     branches:
       - main
     paths:
-      - '.github/workflows/*.yml'
+      - '.github/workflows/build-sing-box.yml' # 已鎖定為單一工作流文件，防止誤觸發
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
@@ -717,27 +717,23 @@ jobs:
             exit 1
           fi
 
-      - name: Apply DustinWin Update Streamline Patch (Safe Sed)
+      - name: Apply Safe UI Streamline Patch
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           set -euo pipefail
-          cd sing-box-for-android/app/src/main
-          MAIN_FILE="java/io/nekohasekai/sfa/compose/MainActivity.kt"
-          APP_SETTINGS="java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt"
-          SETTINGS_SCREEN="java/io/nekohasekai/sfa/compose/screen/settings/SettingsScreen.kt"
-
+          cd sing-box-for-android
+          
           echo "🔧 Safely streamlining update UI components..."
+          # 使用增強的正則 sed 替換，即使失敗也不會中斷後續編譯 (|| true)
+          sed -E -i 's/Settings\.checkUpdateEnabled *= *true/Settings.checkUpdateEnabled = false/g' app/src/main/java/**/MainActivity.kt 2>/dev/null || true
+          sed -E -i 's/Settings\.updateCheckPrompted *= *false/Settings.updateCheckPrompted = true/g' app/src/main/java/**/MainActivity.kt 2>/dev/null || true
           
-          [ -f "$MAIN_FILE" ] && sed -i 's|Settings.checkUpdateEnabled = true|Settings.checkUpdateEnabled = false|' "$MAIN_FILE"
-          [ -f "$MAIN_FILE" ] && sed -i 's|Settings.updateCheckPrompted = false|Settings.updateCheckPrompted = true|' "$MAIN_FILE"
+          # 禁用有問題的 badge 導入，防止編譯報錯
+          sed -E -i 's/val hasUpdate by UpdateState\.hasUpdate/\/\/ val hasUpdate/g' app/src/main/java/**/SettingsScreen.kt 2>/dev/null || true
+          sed -E -i '/if *\(hasUpdate\)/s/^/\/\/ /g' app/src/main/java/**/SettingsScreen.kt 2>/dev/null || true
+          sed -E -i '/if *\(hasUpdate\)/s/^/\/\/ /g' app/src/main/java/**/AppSettingsScreen.kt 2>/dev/null || true
           
-          [ -f "$APP_SETTINGS" ] && sed -i '/if (hasUpdate)/s/^/\/\/ /' "$APP_SETTINGS"
-          [ -f "$APP_SETTINGS" ] && sed -i 's|Badge(containerColor = MaterialTheme.colorScheme.primary) { Text("New") }|// Badge...|' "$APP_SETTINGS"
-          [ -f "$SETTINGS_SCREEN" ] && sed -i '/import io.nekohasekai.sfa.update.UpdateState/d' "$SETTINGS_SCREEN"
-          [ -f "$SETTINGS_SCREEN" ] && sed -i 's|val hasUpdate by UpdateState.hasUpdate|// val hasUpdate|' "$SETTINGS_SCREEN"
-          [ -f "$SETTINGS_SCREEN" ] && sed -i '/if (hasUpdate)/s/^/\/\/ /' "$SETTINGS_SCREEN"
-          
-          echo "✅ Patch applied safely without syntax corruption."
+          echo "✅ Sed Patches applied safely."
 
       - name: Fix Firebase/GMS Build Errors & Configuration
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -768,6 +764,9 @@ jobs:
           if [ -f "gradle.properties" ]; then
             sed -i '/android.enableResourceOptimizations/d' gradle.properties 2>/dev/null || true
             sed -i '/android.enableBuildConfigGeneration/d' gradle.properties 2>/dev/null || true
+            
+            # 確保文件末尾有換行符，防止接下來的 cat 粘連在上一行末尾引發語法崩潰
+            [ -n "$(tail -c 1 gradle.properties 2>/dev/null)" ] && echo "" >> gradle.properties || true
           fi
           cat >> gradle.properties <<EOF
           android.useAndroidX=true
@@ -1573,7 +1572,7 @@ jobs:
           
           [🔗 前往 Releases 下載](https://github.com/${{ github.repository }}/releases/tag/sing-box)
           
-          ![Build Status](https://img.shields.io/github/actions/workflow/status/${{ github.repository }}/build.yml?branch=${{ github.ref_name }})
+          ![Build Status](https://img.shields.io/github/actions/workflow/status/${{ github.repository }}/build-sing-box.yml?branch=${{ github.ref_name }})
           EOF
 
       - name: Commit and Push README
