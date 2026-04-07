@@ -397,7 +397,7 @@ jobs:
           path: sing-box
           fetch-depth: 1
 
-      - name: Clean Workspace Before Patches
+      - name: Clean Workspace
         if: steps.check_naive.outputs.skip != 'true' && contains(matrix.target.repo, 'reF1nd')
         working-directory: sing-box
         run: |
@@ -447,48 +447,6 @@ jobs:
           echo "tags=${FINAL_TAGS}" >> $GITHUB_OUTPUT
           echo "suffix=${ARCHIVE_SUFFIX}" >> $GITHUB_OUTPUT
           echo "cgo_val=${CGO_VAL}" >> $GITHUB_OUTPUT
-
-      - name: Fetch and Apply patches atomically
-        if: steps.check_naive.outputs.skip != 'true' && contains(matrix.target.repo, 'reF1nd')
-        working-directory: sing-box
-        run: |
-          set -euo pipefail
-          
-          git -c http.extraHeader="Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            fetch https://github.com/${{ github.repository }}.git patches:patches 2>/dev/null || true
-          
-          for patch in concurrent_dial make_log_better fix_interrupt_connections; do
-            PATCH_FILE="/tmp/patch_${patch}.patch"
-            > "$PATCH_FILE"
-            
-            if git rev-parse --verify patches >/dev/null 2>&1; then
-              git show "patches:sing-box/${patch}.patch" > "$PATCH_FILE" 2>/dev/null || \
-              git show "patches:${patch}.patch" > "$PATCH_FILE" 2>/dev/null || true
-            fi
-            
-            if [ ! -s "$PATCH_FILE" ]; then
-              url="https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box/${patch}.patch"
-              curl -m ${CURL_TIMEOUT_API} -sfL "$url" > "$PATCH_FILE" 2>/dev/null || true
-            fi
-            
-            if [ ! -s "$PATCH_FILE" ]; then
-              echo "::error::Failed to download/fetch critical patch: $patch"
-              exit 1
-            fi
-            
-            git apply -v --whitespace=fix "$PATCH_FILE" || {
-              git apply -v --3way "$PATCH_FILE" && {
-                if grep -rq "^<<<<<<< " ./; then
-                  echo "::error::Patch $patch left conflicts!"
-                  exit 1
-                fi
-              } || {
-                echo "::error::Patch $patch failed completely!"
-                exit 1
-              }
-            }
-            rm -f "$PATCH_FILE"
-          done
 
       - name: Cache Cronet Toolchain
         if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true'
@@ -666,7 +624,7 @@ jobs:
           path: sing-box
           fetch-depth: 1
 
-      - name: Clean Workspace Before Patches
+      - name: Clean Workspace
         if: ${{ matrix.target.sfa_repo != 'none' && contains(matrix.target.repo, 'reF1nd') }}
         working-directory: sing-box
         run: |
@@ -728,48 +686,6 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
-      - name: Fetch and Apply Core patches atomically
-        if: ${{ matrix.target.sfa_repo != 'none' && contains(matrix.target.repo, 'reF1nd') }}
-        working-directory: sing-box
-        run: |
-          set -euo pipefail
-          
-          git -c http.extraHeader="Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            fetch https://github.com/${{ github.repository }}.git patches:patches 2>/dev/null || true
-          
-          for patch in concurrent_dial make_log_better fix_interrupt_connections; do
-            PATCH_FILE="/tmp/patch_${patch}.patch"
-            > "$PATCH_FILE"
-            
-            if git rev-parse --verify patches >/dev/null 2>&1; then
-              git show "patches:sing-box/${patch}.patch" > "$PATCH_FILE" 2>/dev/null || \
-              git show "patches:${patch}.patch" > "$PATCH_FILE" 2>/dev/null || true
-            fi
-            
-            if [ ! -s "$PATCH_FILE" ]; then
-              url="https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box/${patch}.patch"
-              curl -m ${CURL_TIMEOUT_API} -sfL "$url" > "$PATCH_FILE" 2>/dev/null || true
-            fi
-            
-            if [ ! -s "$PATCH_FILE" ]; then
-              echo "::error::Failed to download/fetch critical patch: $patch"
-              exit 1
-            fi
-            
-            git apply -v --whitespace=fix "$PATCH_FILE" || {
-              git apply -v --3way "$PATCH_FILE" && {
-                if grep -rq "^<<<<<<< " ./; then
-                  echo "::error::Patch $patch left conflicts!"
-                  exit 1
-                fi
-              } || {
-                echo "::error::Patch $patch failed completely!"
-                exit 1
-              }
-            }
-            rm -f "$PATCH_FILE"
-          done
-
       - name: Patch Android Update Checker
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
@@ -823,7 +739,7 @@ jobs:
           
           echo "✅ Patch applied safely without syntax corruption."
 
-      - name: Fix Firebase/GMS Build Errors
+      - name: Fix Firebase/GMS Build Errors & Configuration
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           cd sing-box-for-android
@@ -833,17 +749,17 @@ jobs:
              GRADLE_FILE=$(find app -name "build.gradle" -path "*/app/*" | head -n 1)
           fi
           
-          echo "🔍 Aggressively Remove GMS/Firebase Plugin..."
+          echo "🔍 Step 1: Aggressively Remove GMS/Firebase Plugin..."
           sed -i '/com\.google\.gms\.google-services/d' "$GRADLE_FILE" || true
           sed -i '/firebase-bom/d' "$GRADLE_FILE" || true
           sed -i '/implementation.*firebase/d' "$GRADLE_FILE" || true
           sed -i '/implementation.*analytics/d' "$GRADLE_FILE" || true
           
-          echo "🔧 Apply Version Config..."
+          echo "🔧 Step 2: Apply Version Config..."
           printf 'VERSION_CODE=%s\nVERSION_NAME=%s\nGO_VERSION=%s\n' \
             "${{ needs.init.outputs.version_code }}" "${{ matrix.target.ver }}" "${{ needs.init.outputs.go_version }}" > version.properties
 
-          echo "✅ Patching complete."
+          echo "✅ Patching complete. Ready to build."
 
       - name: Fix Gradle Properties for Modern AGP
         if: ${{ matrix.target.sfa_repo != 'none' }}
@@ -987,12 +903,7 @@ jobs:
           basename_file=$(basename "$apk")
           mv -f "$apk" "apks/SFA-${{ matrix.target.id }}-${arch_abi}-${basename_file}"
           
-          if [[ "${{ matrix.target.repo }}" == *"reF1nd"* ]]; then
-            PATCHES='["concurrent_dial","make_log_better","fix_interrupt_connections"]'
-          else
-            PATCHES='[]'
-          fi
-          
+          PATCHES='[]'
           SIGNING_META="Release"
           
           jq -n \
@@ -1345,15 +1256,6 @@ jobs:
         uses: actions/attest-build-provenance@v1
         with:
           subject-path: './release_files/*'
-
-      - name: Cleanup patches branch
-        if: always()
-        continue-on-error: true
-        run: |
-          git checkout --orphan temp_patches
-          git add -A
-          git commit -m "chore: squash patches history [skip ci]" || true
-          git push -f origin temp_patches:patches
 
       - name: Update release-info branch
         if: always()
