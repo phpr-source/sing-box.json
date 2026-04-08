@@ -227,6 +227,12 @@ jobs:
               return 0
             fi
             
+            # ✅ 只對 reF1nd 版本啟用 Android 構建
+            if [[ "$id" != reF1nd_* ]]; then
+              sfa_repo="none"
+              sfa_branch="none"
+            fi
+            
             local ver="" time=""
             
             if [ -n "$OVERRIDE_VERSION" ]; then
@@ -607,8 +613,7 @@ jobs:
       needs.check.outputs.matrix != '[]' &&
       needs.check.outputs.matrix != '' &&
       github.event.inputs.enable_naive != 'true' &&
-      needs.init.outputs.android_secrets_valid == 'true' &&
-      contains(matrix.target.id, 'reF1nd')
+      needs.init.outputs.android_secrets_valid == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -1379,9 +1384,9 @@ jobs:
           
           | 版本 | 分支 | 平台支持 |
           |------|------|---------|
-          | SagerNet OldStable | oldstable | Linux/Windows/Android (arm64) |
-          | SagerNet Stable | stable | Linux/Windows/Android (arm64) |
-          | SagerNet Testing | testing | Linux/Windows/Android (arm64) |
+          | SagerNet OldStable | oldstable | Linux/Windows |
+          | SagerNet Stable | stable | Linux/Windows |
+          | SagerNet Testing | testing | Linux/Windows |
           | reF1nd OldStable | reF1nd-oldstable | Linux/Windows/Android (arm64) |
           | reF1nd Stable | reF1nd-stable | Linux/Windows/Android (arm64) |
           | reF1nd Testing | reF1nd-testing | Linux/Windows/Android (arm64) |
