@@ -296,7 +296,6 @@ jobs:
             fi
           }
 
-          # 移除了 oldstable，僅保留 stable 和 testing 分支
           check_branch "SagerNet_Stable" "SagerNet/sing-box" "stable" "none" "none"
           check_branch "SagerNet_Testing" "SagerNet/sing-box" "testing" "none" "none"
           check_branch "reF1nd_Stable" "reF1nd/sing-box" "reF1nd-stable" "reF1nd/sing-box-for-android" "reF1nd-stable"
@@ -682,6 +681,7 @@ jobs:
         run: |
           mkdir -p sing-box-for-android/app/libs
           cp sing-box/libbox.aar sing-box-for-android/app/libs/
+          cp sing-box/libbox.aar sing-box-for-android/app/libs/libbox-legacy.aar
 
       - name: Configure Android Version & Package
         if: ${{ matrix.target.sfa_repo != 'none' }}
