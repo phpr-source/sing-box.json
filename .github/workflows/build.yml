@@ -683,51 +683,13 @@ jobs:
           mkdir -p ./sing-box-for-android/app/libs/
           cp -f ./sing-box/*.aar ./sing-box-for-android/app/libs/
 
-      - name: Disable Auto Update Check
-        if: matrix.target.sfa_repo != 'none'
-        run: |
-          set -euo pipefail
-          cd sing-box-for-android
-
-          find . -type f -name "*.kt" -o -name "*.java" | while read file; do
-            sed -i 's/Settings\.checkUpdateEnabled\s*=\s*true/Settings.checkUpdateEnabled = false/g' "$file" 2>/dev/null || true
-            sed -i 's/checkUpdateEnabled\s*=\s*true/checkUpdateEnabled = false/g' "$file" 2>/dev/null || true
-            sed -i 's/Settings\.updateCheckPrompted\s*=\s*false/Settings.updateCheckPrompted = true/g' "$file" 2>/dev/null || true
-            sed -i 's/updateCheckPrompted\s*=\s*false/updateCheckPrompted = true/g' "$file" 2>/dev/null || true
-            sed -i 's/UpdateState\.loadFromCache()/\/\/ UpdateState.loadFromCache()/g' "$file" 2>/dev/null || true
-            sed -i '/Badge(/,/})/ s/^/\/\/ /' "$file" 2>/dev/null || true
-          done
-
-      - name: Change Package Name & Clean Dependencies
-        if: matrix.target.sfa_repo != 'none'
-        run: |
-          cd ./sing-box-for-android
-          GRADLE_FILE="app/build.gradle.kts"
-
-          if [ -f "$GRADLE_FILE" ]; then
-            sed -i 's/applicationId "io.reF1nd.sfa"/applicationId = "io.nekohasekai.sfa.custom"/' "$GRADLE_FILE"
-            sed -i 's/applicationId = "io.reF1nd.sfa"/applicationId = "io.nekohasekai.sfa.custom"/' "$GRADLE_FILE"
-            sed -i 's/namespace("io.nekohasekai.sfa")/namespace("io.nekohasekai.sfa.custom")/' "$GRADLE_FILE"
-            sed -i 's/namespace = "io.nekohasekai.sfa"/namespace = "io.nekohasekai.sfa.custom"/' "$GRADLE_FILE"
-          fi
-
-          sed -i '/com\.google\.gms\.google-services/d' "$GRADLE_FILE" 2>/dev/null || true
-          sed -i '/firebase-bom/d' "$GRADLE_FILE" 2>/dev/null || true
-          sed -i '/implementation.*firebase/d' "$GRADLE_FILE" 2>/dev/null || true
-          sed -i '/implementation.*analytics/d' "$GRADLE_FILE" 2>/dev/null || true
-
-      - name: Fix Gradle Properties
+      - name: Disable Auto Update
         if: matrix.target.sfa_repo != 'none'
         run: |
           cd sing-box-for-android
-
-          echo "android.useAndroidX=true" >> gradle.properties
-          echo "android.nonTransitiveRClass=true" >> gradle.properties
-          echo "org.gradle.jvmargs=-Xmx5120m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8" >> gradle.properties
-          echo "org.gradle.parallel=true" >> gradle.properties
-
-          sed -i 's/minSdkVersion="[^"]*"/minSdkVersion="23"/g' app/src/main/AndroidManifest.xml 2>/dev/null || true
-          sed -i 's/minSdk = [0-9]*/minSdk = 23/g' app/build.gradle.kts 2>/dev/null || true
+          find . -type f -name "Settings.kt" -exec sed -i 's/var checkUpdateEnabled = true/var checkUpdateEnabled = false/g' {} \;
+          find . -type f -name "Settings.kt" -exec sed -i 's/checkUpdateEnabled = true/checkUpdateEnabled = false/g' {} \;
+          find . -type f -name "UpdateState.kt" -exec sed -i 's/fun loadFromCache()/fun loadFromCache() { }/g' {} \;
 
       - name: Decode Keystore
         if: matrix.target.sfa_repo != 'none'
@@ -1422,7 +1384,6 @@ jobs:
               const { data } = await github.rest.repos.getContent({ owner, repo, path, ref: branch });
               sha = data.sha;
             } catch (e) {
-              // File might not exist yet
             }
             
             await github.rest.repos.createOrUpdateFileContents({
