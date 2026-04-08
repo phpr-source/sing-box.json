@@ -10,10 +10,8 @@ on:
         default: ""
         options:
           - ""
-          - "SagerNet_Oldstable"
           - "SagerNet_Stable"
           - "SagerNet_Testing"
-          - "reF1nd_Oldstable"
           - "reF1nd_Stable"
           - "reF1nd_Testing"
           - "PuerNya_Building"
@@ -300,13 +298,12 @@ jobs:
             fi
           }
 
-          check_branch "SagerNet_Oldstable" "SagerNet/sing-box" "oldstable" "none" "none"
-          check_branch "SagerNet_Stable" "SagerNet/sing-box" "stable" "none" "none"
-          check_branch "SagerNet_Testing" "SagerNet/sing-box" "testing" "none" "none"
-          check_branch "reF1nd_Oldstable" "reF1nd/sing-box" "reF1nd-oldstable" "reF1nd/sing-box-for-android" "reF1nd-oldstable"
-          check_branch "reF1nd_Stable" "reF1nd/sing-box" "reF1nd-stable" "reF1nd/sing-box-for-android" "reF1nd-stable"
-          check_branch "reF1nd_Testing" "reF1nd/sing-box" "reF1nd-testing" "reF1nd/sing-box-for-android" "reF1nd-testing"
-          check_branch "PuerNya_Building" "PuerNya/sing-box" "building" "none" "none"
+          # 只保留需要的目標，oldstable 已全部移除
+          check_branch "SagerNet_Stable"   "SagerNet/sing-box" "stable"         "none" "none"
+          check_branch "SagerNet_Testing"  "SagerNet/sing-box" "testing"        "none" "none"
+          check_branch "reF1nd_Stable"     "reF1nd/sing-box"   "reF1nd-stable"  "reF1nd/sing-box-for-android" "reF1nd-stable"
+          check_branch "reF1nd_Testing"    "reF1nd/sing-box"   "reF1nd-testing" "reF1nd/sing-box-for-android" "reF1nd-testing"
+          check_branch "PuerNya_Building"  "PuerNya/sing-box"  "building"       "none" "none"
 
           sed -i '/^ *$/d' release_notes.txt
           if [ ! -s release_notes.txt ]; then
@@ -615,7 +612,14 @@ jobs:
     env:
       JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
     steps:
+      - name: Skip if no Android client
+        if: matrix.target.sfa_repo == 'none'
+        run: |
+          echo "::notice::Skipping Android build for ${{ matrix.target.id }} (no client configured)"
+          exit 0
+
       - name: Checkout Core
+        if: matrix.target.sfa_repo != 'none'
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.target.repo }}
@@ -624,6 +628,7 @@ jobs:
           fetch-depth: 0
 
       - name: Checkout Android Client
+        if: matrix.target.sfa_repo != 'none'
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.target.sfa_repo }}
@@ -631,22 +636,26 @@ jobs:
           path: sing-box-for-android
 
       - name: Setup Go
+        if: matrix.target.sfa_repo != 'none'
         uses: actions/setup-go@v5
         with:
           go-version: ${{ needs.init.outputs.go_version }}
 
       - name: Setup Android NDK
+        if: matrix.target.sfa_repo != 'none'
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
 
       - name: Setup OpenJDK
+        if: matrix.target.sfa_repo != 'none'
         run: |
           sudo apt update && sudo apt install -y openjdk-17-jdk-headless
           /usr/lib/jvm/java-17-openjdk-amd64/bin/java --version
 
       - name: Build Library (libbox.aar)
+        if: matrix.target.sfa_repo != 'none'
         run: |
           cd sing-box
           make lib_install
@@ -670,11 +679,13 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
       - name: Prepare Android Client
+        if: matrix.target.sfa_repo != 'none'
         run: |
           mkdir -p ./sing-box-for-android/app/libs/
           cp -f ./sing-box/*.aar ./sing-box-for-android/app/libs/
 
       - name: Apply Streamline Update Patch
+        if: matrix.target.sfa_repo != 'none'
         run: |
           set -euo pipefail
           cd sing-box-for-android
@@ -684,6 +695,7 @@ jobs:
           git apply ./streamline-update.patch
 
       - name: Change Package Name & Clean Dependencies
+        if: matrix.target.sfa_repo != 'none'
         run: |
           cd ./sing-box-for-android
           GRADLE_FILE="app/build.gradle.kts"
@@ -701,6 +713,7 @@ jobs:
           sed -i '/implementation.*analytics/d' "$GRADLE_FILE" 2>/dev/null || true
 
       - name: Fix Gradle Properties
+        if: matrix.target.sfa_repo != 'none'
         run: |
           cd sing-box-for-android
 
@@ -713,10 +726,12 @@ jobs:
           sed -i 's/minSdk = [0-9]*/minSdk = 23/g' app/build.gradle.kts 2>/dev/null || true
 
       - name: Decode Keystore
+        if: matrix.target.sfa_repo != 'none'
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > ./sing-box-for-android/app/release.keystore
 
       - name: Build SFA APK
+        if: matrix.target.sfa_repo != 'none'
         run: |
           cd ./sing-box-for-android/
           chmod +x gradlew
@@ -729,6 +744,7 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
       - name: Collect APK and Metadata
+        if: matrix.target.sfa_repo != 'none'
         run: |
           cd sing-box-for-android
           mkdir -p apks
@@ -752,6 +768,7 @@ jobs:
             }' > "apks/SFA-${{ matrix.target.id }}-metadata.json"
 
       - name: Upload APK Artifacts
+        if: matrix.target.sfa_repo != 'none'
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ matrix.target.id }}
@@ -1370,12 +1387,10 @@ jobs:
           
           | 版本 | 分支 | 平台支持 |
           |------|------|---------|
-          | SagerNet OldStable | oldstable | Linux/Windows/Android (arm64) |
-          | SagerNet Stable | stable | Linux/Windows/Android (arm64) |
-          | SagerNet Testing | testing | Linux/Windows/Android (arm64) |
-          | reF1nd OldStable | reF1nd-oldstable | Linux/Windows/Android (arm64) |
-          | reF1nd Stable | reF1nd-stable | Linux/Windows/Android (arm64) |
-          | reF1nd Testing | reF1nd-testing | Linux/Windows/Android (arm64) |
+          | SagerNet Stable | stable | Linux/Windows |
+          | SagerNet Testing | testing | Linux/Windows |
+          | reF1nd Stable | reF1nd-stable | Linux/Windows/Android |
+          | reF1nd Testing | reF1nd-testing | Linux/Windows/Android |
           | PuerNya Building | building | Linux/Windows |
           
           ## 🔔 Telegram 通知配置
