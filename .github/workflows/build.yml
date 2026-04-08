@@ -227,12 +227,6 @@ jobs:
               return 0
             fi
             
-            # ✅ 只對 reF1nd 版本啟用 Android 構建
-            if [[ "$id" != reF1nd_* ]]; then
-              sfa_repo="none"
-              sfa_branch="none"
-            fi
-            
             local ver="" time=""
             
             if [ -n "$OVERRIDE_VERSION" ]; then
@@ -621,7 +615,7 @@ jobs:
     env:
       JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
     steps:
-      - name: Checkout `Core`
+      - name: Checkout Core
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.target.repo }}
@@ -629,118 +623,102 @@ jobs:
           path: sing-box
           fetch-depth: 0
 
-      - name: Checkout `Android Client`
+      - name: Checkout Android Client
         uses: actions/checkout@v4
         with:
-          repository: reF1nd/sing-box-for-android
-          ref: ${{ matrix.target.branch }}
+          repository: ${{ matrix.target.sfa_repo }}
+          ref: ${{ matrix.target.sfa_branch }}
           path: sing-box-for-android
 
-      - name: Setup `Go`
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ needs.init.outputs.go_version }}
 
-      - name: Setup `Android NDK`
+      - name: Setup Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
 
-      - name: Setup `OpenJDK`
+      - name: Setup OpenJDK
         run: |
           sudo apt update && sudo apt install -y openjdk-17-jdk-headless
           /usr/lib/jvm/java-17-openjdk-amd64/bin/java --version
 
-      - name: Gradle cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.gradle
-          key: gradle-${{ hashFiles('sing-box-for-android/**/*.gradle*') }}
-
-      - name: Set tag
-        run: |
-          cd sing-box
-          git tag v${{ matrix.target.ver }} -f
-
-      - name: Apply sing-box patches
-        run: |
-          cd sing-box
-          curl -sfL https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box/concurrent_dial.patch | git apply -v || true
-          curl -sfL https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box/make_log_better.patch | git apply -v || true
-          curl -sfL https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box/fix_interrupt_connections.patch | git apply -v || true
-
-      - name: Compute build tags
-        id: env
-        run: |
-          TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_ANDROID_EXTRA }}"
-          TAGS=$(echo "${TAGS}" | tr ',' '\n' | sort -u | paste -sd,)
-          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
-
-      - name: Build library
+      - name: Build Library (libbox.aar)
         run: |
           cd sing-box
           make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
+
+          TAGS_COMBINED="${{ env.TAGS_COMMON }},${{ env.TAGS_ANDROID_EXTRA }}"
+          TAGS_COMBINED=$(echo "${TAGS_COMBINED}" | tr ',' '\n' | sort -u | paste -sd,)
+
           gomobile bind -v \
-            -target android/arm64 \
+            -o libbox.aar \
+            -target android \
             -androidapi 23 \
             -javapkg=io.nekohasekai \
             -libname=box \
             -trimpath \
             -buildvcs=false \
-            -tags="${{ steps.env.outputs.tags }}" \
-            -ldflags="-X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0" \
-            ./experimental/libbox
+            -tags="${TAGS_COMBINED}" \
+            -ldflags="-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid=" \
+            ./experimental/libbox/
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: Verify libbox.aar
+      - name: Prepare Android Client
         run: |
-          cd sing-box
-          if [ ! -f "libbox.aar" ]; then
-            echo "Error: libbox.aar not found!"
-            exit 1
+          mkdir -p ./sing-box-for-android/app/libs/
+          cp -f ./sing-box/*.aar ./sing-box-for-android/app/libs/
+
+      - name: Apply Streamline Update Patch
+        run: |
+          set -euo pipefail
+          cd sing-box-for-android
+
+          echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQKCi0g6ZqQ6JeP6K6+572u6aG16Z2i5Lit5bqU55So5Y2h54mH77yM5LiN5Yig6Zmk5Luj56CB5LuF5bGP6JS95YWl5Y+jCi0g56aB55So5omL5Yqo5qOA5p+l5pu05paw5oyJ6ZKu5ZKM6Ieq5Yqo5pu05paw5byA5YWzCi0g56aB55So5bqU55So5ZCv5Yqo5pe255qE6Ieq5Yqo5pu05paw5qOA5p+lCi0tLQogLi4uL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IHwgMTMgKysrKysrKysrKysrKwogLi4uL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0ICAgIHwgIDggKysrLS0tLS0KIC4uLi9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QgICB8ICA3IC0tLS0tLS0KIDMgZmlsZXMgY2hhbmdlZCwgMTYgaW5zZXJ0aW9ucygrKSwgMTIgZGVsZXRpb25zKC0pCgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0CmluZGV4IDU3NDQyMmIuLjFiMWI2YzkgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9NYWluQWN0aXZpdHkua3QKQEAgLTE5MSw2ICsxOTEsMTUgQEAgY2xhc3MgTWFpbkFjdGl2aXR5IDoKCiAgICAgICAgIGNvbm5lY3Rpb24ucmVjb25uZWN0KCkKCisgICAgICAgIC8vIOW8uuWItuemgeeUqOiHquWKqOabtOaWsOWKn+iDvQorICAgICAgICBTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQgPSBmYWxzZQorICAgICAgICAvLyDmoIforrDkuLrlt7Lmj5DnpLrov4fvvIzpmLLmraLmmL7npLrpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xlr7nor53moYYKKyAgICAgICAgU2V0dGluZ3MudXBkYXRlQ2hlY2tQcm9tcHRlZCA9IHRydWUKKyAgICAgICAgLy8g5riF6Zmk5Lu75L2V57yT5a2Y55qE5pu05paw54q25oCBCisgICAgICAgIFVwZGF0ZVN0YXRlLmNsZWFyKCkKKworICAgICAgICAvLyDoh6rliqjmm7TmlrDmo4Dmn6Xlt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgVXBkYXRlU3RhdGUubG9hZEZyb21DYWNoZSgpCiAgICAgICAgIGlmIChTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQpIHsKICAgICAgICAgICAgIGxpZmVjeWNsZVNjb3BlLmxhdW5jaChEaXNwYXRjaGVycy5JTykgewpAQCAtMjAyLDYgKzIxMSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgfQogICAgICAgICB9CisgICAgICAgICovCgogICAgICAgICBoYW5kbGVJbnRlbnQoaW50ZW50KQoKQEAgLTQ2NSw2ICs0NzUsOCBAQCBjbGFzcyBNYWluQWN0aXZpdHkgOgogICAgICAgICAgICAgKQogICAgICAgICB9CgorICAgICAgICAvLyDpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xmj5DnpLrlr7nor53moYblt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBjaGVjayBwcm9tcHQgZGlhbG9nIChzaG93biBvbmx5IG9uY2Ugb24gZmlyc3QgbGF1bmNoKQogICAgICAgICB2YXIgc2hvd1VwZGF0ZUNoZWNrUHJvbXB0IGJ5IHJlbWVtYmVyIHsgbXV0YWJsZVN0YXRlT2YoIVNldHRpbmdzLnVwZGF0ZUNoZWNrUHJvbXB0ZWQpIH0KICAgICAgICAgaWYgKHNob3dVcGRhdGVDaGVja1Byb21wdCkgewpAQCAtNTEzLDYgKzUyNSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICkKICAgICAgICAgfQorICAgICAgICAqLwoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBhdmFpbGFibGUgZGlhbG9nCiAgICAgICAgIHZhbCB1cGRhdGVJbmZvIGJ5IFVwZGF0ZVN0YXRlLnVwZGF0ZUluZm8KZGlmZiAtLWdpdCBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdAppbmRleCA4YWE2ZDIxLi4xYzJmNzlhIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvQXBwU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0CkBAIC00MDEsMTEgKzQwMSw2IEBAIGZ1biBBcHBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KSB7IFRleHQoIk5ldyIpIH0KLSAgICAgICAgICAgICAgICAgICAgICAgIH0KLSAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgbW9kaWZpZXIgPQogICAgICAgICAgICAgICAgICAgICBNb2RpZmllcgogICAgICAgICAgICAgICAgICAgICAgICAgLmNsaXAoUm91bmRlZENvcm5lclNoYXBlKHRvcFN0YXJ0ID0gMTIuZHAsIHRvcEVuZCA9IDEyLmRwKSksCkBAIC01MzUsNiArNTMwLDggQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgIH0KICAgICAgICAgfQoKKyAgICAgICAgLy8g5bey6ZqQ6JeP5pu05paw6K6+572u5ZKM5pON5L2c5Y2h54mHCisgICAgICAgIC8qCiAgICAgICAgIFNwYWNlcihtb2RpZmllciA9IE1vZGlmaWVyLmhlaWdodCg4LmRwKSkKCiAgICAgICAgIFRleHQoCkBAIC05OTUsNiArOTkyLDcgQEAgZnVuIEFwcFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICB9CiAgICAgICAgIH0KKyAgICAgICAgKi8KICAgICB9CiB9CgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL1NldHRpbmdzU2NyZWVuLmt0CmluZGV4IGY0NjhmNTEuLjJhMzUzMTIgMTAwNjQ0Ci0tLSBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9TZXR0aW5nc1NjcmVlbi5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QKQEAgLTUxLDcgKzUxLDYgQEAgaW1wb3J0IGFuZHJvaWR4Lm5hdmlnYXRpb24uTmF2Q29udHJvbGxlcgogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS5SCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLmNvbXBvc2UudG9wYmFyLk92ZXJyaWRlVG9wQmFyCiBpbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLmRhdGFiYXNlLlNldHRpbmdzCi1pbXBvcnQgaW8ubmVrb2hhc2VrYWkuc2ZhLnVwZGF0ZS5VcGRhdGVTdGF0ZQogaW1wb3J0IGlvLm5la29oYXNla2FpLnNmYS51dGlscy5Ib29rTW9kdWxlVXBkYXRlTm90aWZpZXIKIGltcG9ydCBpby5uZWtvaGFzZWthaS5zZmEudXRpbHMuSG9va1N0YXR1c0NsaWVudAoKQEAgLTY2LDcgKzY1LDYgQEAgZnVuIFNldHRpbmdzU2NyZWVuKG5hdkNvbnRyb2xsZXI6IE5hdkNvbnRyb2xsZXIpIHsKCiAgICAgdmFsIGNvbnRleHQgPSBMb2NhbENvbnRleHQuY3VycmVudAogICAgIHZhbCBzY29wZSA9IHJlbWVtYmVyQ29yb3V0aW5lU2NvcGUoKQotICAgIHZhbCBoYXNVcGRhdGUgYnkgVXBkYXRlU3RhdGUuaGFzVXBkYXRlCiAgICAgdmFsIGhvb2tTdGF0dXMgYnkgSG9va1N0YXR1c0NsaWVudC5zdGF0dXMuY29sbGVjdEFzU3RhdGUoKQogICAgIHZhbCBoYXNQZW5kaW5nUHJpdmlsZWdlRG93bmdyYWRlID0gSG9va01vZHVsZVVwZGF0ZU5vdGlmaWVyLmlzRG93bmdyYWRlKGhvb2tTdGF0dXMpCiAgICAgdmFsIGhhc1BlbmRpbmdQcml2aWxlZ2VVcGRhdGUgPSBIb29rTW9kdWxlVXBkYXRlTm90aWZpZXIuaXNVcGdyYWRlKGhvb2tTdGF0dXMpCkBAIC0xMTUsMTEgKzExMyw2IEBAIGZ1biBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KQotICAgICAgICAgICAgICAgICAgICAgICAgfQotICAgICAgICAgICAgICAgICAgICB9LAogICAgICAgICAgICAgICAgICAgICBtb2RpZmllciA9CiAgICAgICAgICAgICAgICAgICAgIE1vZGlmaWVyCiAgICAgICAgICAgICAgICAgICAgICAgICAuY2xpcChSb3VuZGVkQ29ybmVyU2hhcGUodG9wU3RhcnQgPSAxMi5kcCwgdG9wRW5kID0gMTIuZHApKQotLQoyLjUwLjEgKEFwcGxlIEdpdC0xNTUpCg==" | base64 -d > ./streamline-update.patch
+
+          git apply ./streamline-update.patch
+
+      - name: Change Package Name & Clean Dependencies
+        run: |
+          cd ./sing-box-for-android
+          GRADLE_FILE="app/build.gradle.kts"
+
+          if [ -f "$GRADLE_FILE" ]; then
+            sed -i 's/applicationId "io.reF1nd.sfa"/applicationId = "io.nekohasekai.sfa.custom"/' "$GRADLE_FILE"
+            sed -i 's/applicationId = "io.reF1nd.sfa"/applicationId = "io.nekohasekai.sfa.custom"/' "$GRADLE_FILE"
+            sed -i 's/namespace("io.nekohasekai.sfa")/namespace("io.nekohasekai.sfa.custom")/' "$GRADLE_FILE"
+            sed -i 's/namespace = "io.nekohasekai.sfa"/namespace = "io.nekohasekai.sfa.custom"/' "$GRADLE_FILE"
           fi
-          ls -lh libbox.aar
 
-      - name: Prepare Android client
-        run: |
-          mkdir -p sing-box-for-android/app/libs
-          cp sing-box/libbox.aar sing-box-for-android/app/libs/
+          sed -i '/com\.google\.gms\.google-services/d' "$GRADLE_FILE" 2>/dev/null || true
+          sed -i '/firebase-bom/d' "$GRADLE_FILE" 2>/dev/null || true
+          sed -i '/implementation.*firebase/d' "$GRADLE_FILE" 2>/dev/null || true
+          sed -i '/implementation.*analytics/d' "$GRADLE_FILE" 2>/dev/null || true
 
-      - name: Update package name
+      - name: Fix Gradle Properties
         run: |
           cd sing-box-for-android
-          if [ -f "app/build.gradle.kts" ]; then
-            GRADLE_FILE="app/build.gradle.kts"
-            sed -i 's/applicationId\s*=\s*"io\.reF1nd\.sfa"/applicationId = "com.android.internal.net"/' "$GRADLE_FILE"
-          elif [ -f "app/build.gradle" ]; then
-            GRADLE_FILE="app/build.gradle"
-            sed -i '/applicationId/s/io\.reF1nd\.sfa/com.android.internal.net/' "$GRADLE_FILE"
-          else
-            echo "Error: No build.gradle or build.gradle.kts found!"
-            ls -la app/
-            exit 1
-          fi
-          grep -E "applicationId" "$GRADLE_FILE" || true
 
-      - name: Update version
-        run: |
-          cd sing-box-for-android
-          VERSION="${{ matrix.target.ver }}"
-          VERSION_CODE=$(( ($(date +%s) - 1735689600) / 60 ))
-          printf 'VERSION_CODE=%s\nVERSION_NAME=%s\nGO_VERSION=%s\n' \
-            "$VERSION_CODE" "$VERSION" "${{ needs.init.outputs.go_version }}" > version.properties
-          echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
+          echo "android.useAndroidX=true" >> gradle.properties
+          echo "android.nonTransitiveRClass=true" >> gradle.properties
+          echo "org.gradle.jvmargs=-Xmx5120m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8" >> gradle.properties
+          echo "org.gradle.parallel=true" >> gradle.properties
+
+          sed -i 's/minSdkVersion="[^"]*"/minSdkVersion="23"/g' app/src/main/AndroidManifest.xml 2>/dev/null || true
+          sed -i 's/minSdk = [0-9]*/minSdk = 23/g' app/build.gradle.kts 2>/dev/null || true
 
       - name: Decode Keystore
         run: |
-          echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > sing-box-for-android/app/release.keystore
+          echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > ./sing-box-for-android/app/release.keystore
 
-      - name: Build APK
+      - name: Build SFA APK
         run: |
-          cd sing-box-for-android
+          cd ./sing-box-for-android/
           chmod +x gradlew
           ./gradlew :app:assembleOtherRelease \
             -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
@@ -750,28 +728,36 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: Rename APK and generate metadata
+      - name: Collect APK and Metadata
         run: |
-          cd sing-box-for-android/app/build/outputs/apk/other/release
-          find . -type f -name "*.apk" ! -name "*arm64-v8a*" -delete 2>/dev/null || true
-          APK_FILE=$(ls *arm64-v8a*.apk 2>/dev/null | head -n 1 || ls *.apk 2>/dev/null | head -n 1)
-          TARGET_NAME="SFA-${{ matrix.target.id }}-${{ matrix.target.ver }}-foss-arm64-v8a.apk"
-          if [ -n "$APK_FILE" ] && [ -f "$APK_FILE" ]; then
-            [ "$APK_FILE" != "$TARGET_NAME" ] && mv "$APK_FILE" "$TARGET_NAME"
-            printf '{\n    "version_code": %s,\n    "version_name": "%s"\n}\n' \
-              "${{ env.VERSION_CODE }}" "${{ matrix.target.ver }}" > SFA-version-metadata.json
-          else
-            echo "Error: No APK found!"
-            exit 1
-          fi
+          cd sing-box-for-android
+          mkdir -p apks
+          REL_DIR="app/build/outputs/apk/other/release"
+          [ -d "$REL_DIR" ] || REL_DIR="app/build/outputs/apk/release"
 
-      - name: Upload artifact
+          for apk in "$REL_DIR"/*.apk; do
+            [ -f "$apk" ] || continue
+            new_name="SFA-${{ matrix.target.id }}-$(basename "$apk")"
+            mv -f "$apk" "apks/$new_name"
+          done
+
+          jq -n \
+            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg version_name "${{ matrix.target.ver }}" \
+            --arg target_id "${{ matrix.target.id }}" \
+            '{
+              target_id: $target_id,
+              version_name: $version_name,
+              build_time: $built_at
+            }' > "apks/SFA-${{ matrix.target.id }}-metadata.json"
+
+      - name: Upload APK Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: android-apk-${{ matrix.target.id }}
+          name: apk-${{ matrix.target.id }}
           path: |
-            sing-box-for-android/app/build/outputs/apk/other/release/*.apk
-            sing-box-for-android/app/build/outputs/apk/other/release/SFA-version-metadata.json
+            sing-box-for-android/apks/*.apk
+            sing-box-for-android/apks/*-metadata.json
           retention-days: 1
           compression-level: 0
 
@@ -1244,10 +1230,10 @@ jobs:
           
           escape_tg_markdown() {
             echo "$1" | sed -e 's/\\/\\\\/g' \
-                              -e 's/_/\\_/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' \
-                              -e 's/~/\\~/g' -e 's/`/\\`/g' -e 's/>/\\>/g' -e 's/#/\\#/g' \
-                              -e 's/+/\\+/g' -e 's/-/\\-/g' -e 's/=/\\=/g' -e 's/|/\\|/g' \
-                              -e 's/{/\\{/g' -e 's/}/\\}/g' -e 's/!/\\!/g'
+                            -e 's/_/\\_/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' \
+                            -e 's/~/\\~/g' -e 's/`/\\`/g' -e 's/>/\\>/g' -e 's/#/\\#/g' \
+                            -e 's/+/\\+/g' -e 's/-/\\-/g' -e 's/=/\\=/g' -e 's/|/\\|/g' \
+                            -e 's/{/\\{/g' -e 's/}/\\}/g' -e 's/!/\\!/g'
           }
           
           TG_DETAILS_SAFE=$(escape_tg_markdown "$TG_DETAILS")
@@ -1371,7 +1357,7 @@ jobs:
           
           使用動態路由自動安裝最新版對應架構：
           \`\`\`bash
-          bash <(curl -sSL https://github.com/${{ github.repository }}/releases/download/sing-box/install-linux.sh)
+          bash <(curl -sSL [https://github.com/$](https://github.com/$){{ github.repository }}/releases/download/sing-box/install-linux.sh)
           \`\`\`
           
           ## 📦 文件命名規則
@@ -1384,9 +1370,9 @@ jobs:
           
           | 版本 | 分支 | 平台支持 |
           |------|------|---------|
-          | SagerNet OldStable | oldstable | Linux/Windows |
-          | SagerNet Stable | stable | Linux/Windows |
-          | SagerNet Testing | testing | Linux/Windows |
+          | SagerNet OldStable | oldstable | Linux/Windows/Android (arm64) |
+          | SagerNet Stable | stable | Linux/Windows/Android (arm64) |
+          | SagerNet Testing | testing | Linux/Windows/Android (arm64) |
           | reF1nd OldStable | reF1nd-oldstable | Linux/Windows/Android (arm64) |
           | reF1nd Stable | reF1nd-stable | Linux/Windows/Android (arm64) |
           | reF1nd Testing | reF1nd-testing | Linux/Windows/Android (arm64) |
