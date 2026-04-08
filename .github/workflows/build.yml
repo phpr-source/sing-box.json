@@ -607,7 +607,8 @@ jobs:
       needs.check.outputs.matrix != '[]' &&
       needs.check.outputs.matrix != '' &&
       github.event.inputs.enable_naive != 'true' &&
-      needs.init.outputs.android_secrets_valid == 'true'
+      needs.init.outputs.android_secrets_valid == 'true' &&
+      contains(matrix.target.id, 'reF1nd')
     strategy:
       fail-fast: false
       matrix:
@@ -615,7 +616,7 @@ jobs:
     env:
       JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
     steps:
-      - name: Checkout sing-box core
+      - name: Checkout `Core`
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.target.repo }}
@@ -623,171 +624,149 @@ jobs:
           path: sing-box
           fetch-depth: 0
 
-      - name: Checkout sing-box-for-android
+      - name: Checkout `Android Client`
         uses: actions/checkout@v4
         with:
-          repository: ${{ matrix.target.sfa_repo }}
-          ref: ${{ matrix.target.sfa_branch }}
+          repository: reF1nd/sing-box-for-android
+          ref: ${{ matrix.target.branch }}
           path: sing-box-for-android
 
-      - name: Setup Go
+      - name: Setup `Go`
         uses: actions/setup-go@v5
         with:
           go-version: ${{ needs.init.outputs.go_version }}
 
-      - name: Setup Android NDK
-        id: setup_ndk
+      - name: Setup `Android NDK`
+        id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
 
-      - name: Setup OpenJDK 17
-        run: |-
+      - name: Setup `OpenJDK`
+        run: |
           sudo apt update && sudo apt install -y openjdk-17-jdk-headless
           /usr/lib/jvm/java-17-openjdk-amd64/bin/java --version
 
       - name: Gradle cache
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-android-${{ matrix.target.id }}-${{ hashFiles('sing-box-for-android/**/gradle-wrapper.properties', 'sing-box-for-android/**/*.gradle*') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-android-
+          path: ~/.gradle
+          key: gradle-${{ hashFiles('sing-box-for-android/**/*.gradle*') }}
 
-      - name: Build library (libbox.aar)
-        run: |-
-          set -euo pipefail
-          
-          cd ./sing-box/
-          make lib_install
-          export PATH="$PATH:$(go env GOPATH)/bin"
-          
+      - name: Set tag
+        run: |
+          cd sing-box
+          git tag v${{ matrix.target.ver }} -f
+
+      - name: Apply sing-box patches
+        run: |
+          cd sing-box
+          curl -sfL https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box/concurrent_dial.patch | git apply -v || true
+          curl -sfL https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box/make_log_better.patch | git apply -v || true
+          curl -sfL https://raw.githubusercontent.com/yagh779/sing-box-releases/patches/sing-box/fix_interrupt_connections.patch | git apply -v || true
+
+      - name: Compute build tags
+        id: env
+        run: |
           TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_ANDROID_EXTRA }}"
           TAGS=$(echo "${TAGS}" | tr ',' '\n' | sort -u | paste -sd,)
-          
-          echo "Building with tags: ${TAGS}"
-          
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Build library
+        run: |
+          cd sing-box
+          make lib_install
+          export PATH="$PATH:$(go env GOPATH)/bin"
           gomobile bind -v \
-            -o libbox.aar \
             -target android/arm64 \
             -androidapi 23 \
             -javapkg=io.nekohasekai \
             -libname=box \
             -trimpath \
             -buildvcs=false \
-            -tags="${TAGS}" \
-            -ldflags="-X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} \
-                     -X internal/godebug.defaultGODEBUG=multipattp=0 \
-                     -s -w -buildid= -checklinkname=0" \
-            ./experimental/libbox/
-          
+            -tags="${{ steps.env.outputs.tags }}" \
+            -ldflags="-X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0" \
+            ./experimental/libbox
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+
+      - name: Verify libbox.aar
+        run: |
+          cd sing-box
           if [ ! -f "libbox.aar" ]; then
-            echo "::error::libbox.aar not found!"
+            echo "Error: libbox.aar not found!"
             exit 1
           fi
           ls -lh libbox.aar
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
 
       - name: Prepare Android client
-        run: |-
-          set -euo pipefail
-          
-          mkdir -p ./sing-box-for-android/app/libs/
-          cp -f ./sing-box/libbox.aar ./sing-box-for-android/app/libs/libbox.aar
-          
-          cd sing-box-for-android
-          
-          VERSION="${{ matrix.target.ver }}"
-          VERSION_CODE=$(( ($(date +%s) - 1735689600) / 60 )
-          
-          printf 'VERSION_CODE=%s\nVERSION_NAME=%s\nGO_VERSION=%s\n' \
-            "$VERSION_CODE" \
-            "$VERSION" \
-            "${{ needs.init.outputs.go_version }}" \
-            > version.properties
-          
-          cat version.properties
+        run: |
+          mkdir -p sing-box-for-android/app/libs
+          cp sing-box/libbox.aar sing-box-for-android/app/libs/
 
-      - name: Apply Streamline Update patch
-        run: |-
-          set -euo pipefail
-          
+      - name: Update package name
+        run: |
           cd sing-box-for-android
-          
-          echo "RnJvbSAwYWU1MTEyZTkyNDAwZjQyZGMxYmQxM2QwZmVhZDMzNDY5M2NiOWMxIE1vbiBTZXAgMTcgMDA6MDA6MDAgMjAwMQpGcm9tOiByZUYxbmQgPHJlZjFuZEB0aHVuZGVyLWNsb3VkLmNjPgpEYXRlOiBXZWQsIDI0IERlYyAyMDI1IDIzOjEzOjAyICswODAwClN1YmplY3Q6IFtQQVRDSF0gPT9VVEYtOD9xP2ZlYXQ6PTIwPUU5PTlBPTkwPUU4PTk3PThGPUU4PUFFPUJFPUU3PUJEPUFFPz0KID0/VVRGLTg/cT89RTQ9Qjg9QUQ9RTc9OUE9ODQ9RTU9QkE9OTQ9RTc9OTQ9QTg9RTU9ODU9QTU9RTU9OEY9QTM9RTU9Qjk9QjY/PQogPT9VVEYtOD9xPz1FNz1BNj04MT1FNz05ND1BOD1FOD04Nz1BQT1FNT04QT1BOD1FNj05Qj1CND1FNj05Nj1CMD1FNT04QT05Rj89CiA9P1VURi04P3E/PUU4PTgzPUJEPz0KTUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04CkNvbnRlbnQtVHJhbnNmZXItRW5jb2Rpbmc6IDhiaXQKCi0g6ZqQ6JeP6K6+572u6aG16Z2i5Lit5bqU55So5Y2h54mH77yM5LiN5Yig6Zmk5Luj56CB5LuF5bGP6JS95YWl5Y+jCi0g56aB55So5omL5Yqo5qOA5p+l5pu05paw5oyJ6ZKu5ZKM6Ieq5Yqo5pu05paw5byA5YWzCi0tLQogLi4uL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IHwgMTMgKysrKysrKysrKysrKwogLi4uL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0ICAgIHwgIDggKysrLS0tLS0KIC4uLi9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvU2V0dGluZ3NTY3JlZW4ua3QgICB8ICA3IC0tLS0tLS0KIDMgZmlsZXMgY2hhbmdlZCwgMTYgaW5zZXJ0aW9ucygrKSwgMTIgZGVsZXRpb25zKC0pCgpkaWZmIC0tZ2l0IGEvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2UvTWFpbkFjdGl2aXR5Lmt0IGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL01haW5BY3Rpdml0eS5rdAorKysgYi9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9NYWluQWN0aXZpdHkua3QKQEAgLTE5MSw2ICsxOTEsMTUgQEAgY2xhc3MgTWFpbkFjdGl2aXR5IDoKCiAgICAgICAgIGNvbm5lY3Rpb24ucmVjb25uZWN0KCkKCisgICAgICAgIC8vIOW8uuWItuemgeeUqOiHquWKqOabtOaWsOWKn+iDvQorICAgICAgICBTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQgPSBmYWxzZQorICAgICAgICAvLyDmoIforrDkuLrlt7Lmj5DnpLrov4fvvIzpmLLmraLmmL7npLrpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xlr7nor53moYYKKyAgICAgICAgU2V0dGluZ3MudXBkYXRlQ2hlY2tQcm9tcHRlZCA9IHRydWUKKyAgICAgICAgLy8g5riF6Zmk5Lu75L2V57yT5a2Y55qE5pu05paw54q25oCBCisgICAgICAgIFVwZGF0ZVN0YXRlLmNsZWFyKCkKKworICAgICAgICAvLyDoh6rliqjmm7TmlrDmo4Dmn6Xlt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgVXBkYXRlU3RhdGUubG9hZEZyb21DYWNoZSgpCiAgICAgICAgIGlmIChTZXR0aW5ncy5jaGVja1VwZGF0ZUVuYWJsZWQpIHsKICAgICAgICAgICAgIGxpZmVjeWNsZVNjb3BlLmxhdW5jaChEaXNwYXRjaGVycy5JTykgewpAQCAtMjAyLDYgKzIxMSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgfQogICAgICAgICB9CisgICAgICAgICovCgogICAgICAgICBoYW5kbGVJbnRlbnQoaW50ZW50KQoKQEAgLTQ2NSw2ICs0NzUsOCBAQCBjbGFzcyBNYWluQWN0aXZpdHkgOgogICAgICAgICAgICAgKQogICAgICAgICB9CgorICAgICAgICAvLyDpppbmrKHlkK/liqjnmoTmm7TmlrDmo4Dmn6Xmj5DnpLrlr7nor53moYblt7LnpoHnlKgKKyAgICAgICAgLyoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBjaGVjayBwcm9tcHQgZGlhbG9nIChzaG93biBvbmx5IG9uY2Ugb24gZmlyc3QgbGF1bmNoKQogICAgICAgICB2YXIgc2hvd1VwZGF0ZUNoZWNrUHJvbXB0IGJ5IHJlbWVtYmVyIHsgbXV0YWJsZVN0YXRlT2YoIVNldHRpbmdzLnVwZGF0ZUNoZWNrUHJvbXB0ZWQpIH0KICAgICAgICAgaWYgKHNob3dVcGRhdGVDaGVja1Byb21wdCkgewpAQCAtNTEzLDYgKzUyNSw3IEBAIGNsYXNzIE1haW5BY3Rpdml0eSA6CiAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICkKICAgICAgICAgfQorICAgICAgICAqLwoKICAgICAgICAgLy8gSGFuZGxlIHVwZGF0ZSBhdmFpbGFibGUgZGlhbG9nCiAgICAgICAgIHZhbCB1cGRhdGVJbmZvIGJ5IFVwZGF0ZVN0YXRlLnVwZGF0ZUluZm8KZGlmZiAtLWdpdCBhL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdCBiL3NpbmctYm94LWZvci1hbmRyb2lkL2FwcC9zcmMvbWFpbi9qYXZhL2lvL25la29oYXNla2FpL3NmYS9jb21wb3NlL3NjcmVlbi9zZXR0aW5ncy9BcHBTZXR0aW5nc1NjcmVlbi5rdAppbmRleCA4YWE2ZDIxLi4xYzJmNzlhIDEwMDY0NAotLS0gYS9zaW5nLWJveC1mb3ItYW5kcm9pZC9hcHAvc3JjL21haW4vamF2YS9pby9uZWtvaGFzZWthaS9zZmEvY29tcG9zZS9zY3JlZW4vc2V0dGluZ3MvQXBwU2V0dGluZ3NTY3JlZW4ua3QKKysrIGIvc2luZy1ib3gtZm9yLWFuZHJvaWQvYXBwL3NyYy9tYWluL2phdmEvaW8vbmVrb2hhc2VrYWkvc2ZhL2NvbXBvc2Uvc2NyZWVuL3NldHRpbmdzL0FwcFNldHRpbmdzU2NyZWVuLmt0CkBAIC00MDEsMTEgKzQwMSw2IEBAIGZ1biBBcHBTZXR0aW5nc1NjcmVlbihuYXZDb250cm9sbGVyOiBOYXZDb250cm9sbGVyKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdGludCA9IE1hdGVyaWFsVGhlbWUuY29sb3JTY2hlbWUucHJpbWFyeSwKICAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgfSwKLSAgICAgICAgICAgICAgICAgICAgdHJhaWxpbmdDb250ZW50ID0gewotICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhhc1VwZGF0ZSkgewotICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJhZGdlKGNvbnRhaW5lckNvbG9yID0gTWF0ZXJpYWxUaGVtZS5jb2xvclNjaGVtZS5wcmltYXJ5KSB7IFRleHQoIk5ldyIpIH0KLSAgICAgICAgICAgICAgICAgICAgICAgIH0KLSAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgbW9kaWZpZXIgPQogICAgICAgICAgICAgICAgICAgICAgTW9kaWZpZXIKICAgICAgICAgICAgICAgICAgICAgICAgICAuY2xpcChSb3VuZGVkQ29ybmVyU2hhcGUodG9wU3RhcnQgPSAxMi5kcCwgdG9wRW5kID0gMTIuZHApKQotLQoyLjUwLjEgKEFwcGxlIEdpdC0xNTUpCg==" | base64 -d > ./streamline-update.patch
-          
-          if ! git apply ./streamline-update.patch 2>&1; then
-            echo "::warning::Patch application failed, continuing without patch..."
-            rm -f ./streamline-update.patch
+          if [ -f "app/build.gradle.kts" ]; then
+            GRADLE_FILE="app/build.gradle.kts"
+            sed -i 's/applicationId\s*=\s*"io\.reF1nd\.sfa"/applicationId = "com.android.internal.net"/' "$GRADLE_FILE"
+          elif [ -f "app/build.gradle" ]; then
+            GRADLE_FILE="app/build.gradle"
+            sed -i '/applicationId/s/io\.reF1nd\.sfa/com.android.internal.net/' "$GRADLE_FILE"
           else
-            echo "::notice::Patch applied successfully"
-            rm -f ./streamline-update.patch
-          fi
-
-      - name: Decode Keystore
-        run: |-
-          echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > ./sing-box-for-android/app/release.keystore
-          
-          if [ ! -f "./sing-box-for-android/app/release.keystore" ]; then
-            echo "::error::Keystore file not found!"
+            echo "Error: No build.gradle or build.gradle.kts found!"
+            ls -la app/
             exit 1
           fi
-          ls -lh ./sing-box-for-android/app/release.keystore
+          grep -E "applicationId" "$GRADLE_FILE" || true
 
-      - name: Build SFA APK
-        run: |-
-          set -euo pipefail
-          
-          cd ./sing-box-for-android/
+      - name: Update version
+        run: |
+          cd sing-box-for-android
+          VERSION="${{ matrix.target.ver }}"
+          VERSION_CODE=$(( ($(date +%s) - 1735689600) / 60 ))
+          printf 'VERSION_CODE=%s\nVERSION_NAME=%s\nGO_VERSION=%s\n' \
+            "$VERSION_CODE" "$VERSION" "${{ needs.init.outputs.go_version }}" > version.properties
+          echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
+
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > sing-box-for-android/app/release.keystore
+
+      - name: Build APK
+        run: |
+          cd sing-box-for-android
           chmod +x gradlew
-          
           ./gradlew :app:assembleOtherRelease \
             -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
             -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASS }}" \
             -Pandroid.injected.signing.key.alias="${{ secrets.ALIAS_NAME }}" \
             -Pandroid.injected.signing.key.password="${{ secrets.ALIAS_PASS }}"
-          
-          OUTPUT_DIR="app/build/outputs/apk/other/release"
-          
-          if [ ! -d "$OUTPUT_DIR" ]; then
-            echo "::error::APK output directory not found: $OUTPUT_DIR"
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+
+      - name: Rename APK and generate metadata
+        run: |
+          cd sing-box-for-android/app/build/outputs/apk/other/release
+          find . -type f -name "*.apk" ! -name "*arm64-v8a*" -delete 2>/dev/null || true
+          APK_FILE=$(ls *arm64-v8a*.apk 2>/dev/null | head -n 1 || ls *.apk 2>/dev/null | head -n 1)
+          TARGET_NAME="SFA-${{ matrix.target.id }}-${{ matrix.target.ver }}-foss-arm64-v8a.apk"
+          if [ -n "$APK_FILE" ] && [ -f "$APK_FILE" ]; then
+            [ "$APK_FILE" != "$TARGET_NAME" ] && mv "$APK_FILE" "$TARGET_NAME"
+            printf '{\n    "version_code": %s,\n    "version_name": "%s"\n}\n' \
+              "${{ env.VERSION_CODE }}" "${{ matrix.target.ver }}" > SFA-version-metadata.json
+          else
+            echo "Error: No APK found!"
             exit 1
           fi
-          
-          mkdir -p ../apks
-          find "$OUTPUT_DIR" -maxdepth 1 -name "*.apk" -type f | while read apk; do
-            BASENAME=$(basename "$apk")
-            NEWNAME="SFA-${{ matrix.target.id }}-arm64-v8a-${BASENAME}"
-            cp "$apk" "../apks/$NEWNAME"
-            echo "Processed: $BASENAME -> $NEWNAME"
-          done
-          
-          jq -n \
-            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg version_name "${{ matrix.target.ver }}" \
-            --arg target_id "${{ matrix.target.id }}" \
-            '{
-              target_id: $target_id,
-              version_name: $version_name,
-              build_time: $built_at,
-              platform: "android-arm64"
-            }' > ../apks/SFA-${{ matrix.target.id }}-metadata.json
-          
-          echo "=== APK Build Complete ==="
-          ls -lh ../apks/
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
 
-      - name: Upload APK artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: apk-${{ matrix.target.id }}-arm64-v8a
+          name: android-apk-${{ matrix.target.id }}
           path: |
-            apks/*.apk
-            apks/*-metadata.json
+            sing-box-for-android/app/build/outputs/apk/other/release/*.apk
+            sing-box-for-android/app/build/outputs/apk/other/release/SFA-version-metadata.json
           retention-days: 1
           compression-level: 0
 
@@ -970,11 +949,11 @@ jobs:
 
           if [ ${#TARGETS_LIST[@]} -gt 0 ]; then
             printf '%s\n' "${TARGETS_LIST[@]}" | jq -s --arg run_id "${{ github.run_id }}" --arg commit "${{ github.sha }}" --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
-                global_run_id: $run_id,
-                commit_sha: $commit,
-                built_at: $built_at,
-                targets: (unique_by(.target_id))
-              }' > release_files/build-info.json || echo "{}" > release_files/build-info.json
+              global_run_id: $run_id,
+              commit_sha: $commit,
+              built_at: $built_at,
+              targets: (unique_by(.target_id))
+            }' > release_files/build-info.json || echo "{}" > release_files/build-info.json
           else
             echo "{}" > release_files/build-info.json
           fi
@@ -1011,7 +990,7 @@ jobs:
           
           echo "" >> release_body.txt
           echo "### 📜 歷史更新摘要" >> release_body.txt
-          gh release list --repo "${{ github.repository }}" --limit 3 --json tagName,name,publishedAt --jq '.[] | "- \(.published_at[0:10]) \(.tagName): \(.name)"' >> release_body.txt || echo "- 暫無歷史記錄" >> release_body.txt
+          gh release list --repo "${{ github.repository }}" --limit 3 --json tagName,name,publishedAt --jq '.[] | "- \(.publishedAt[0:10]) \(.tagName): \(.name)"' >> release_body.txt || echo "- 暫無歷史記錄" >> release_body.txt
 
       - name: Generate install scripts
         run: |
@@ -1033,12 +1012,14 @@ jobs:
           echo "Fetching latest release for $FILE_ARCH..."
           
           ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | \
-            jq -r --arg arch "$FILE_ARCH" \
-              '[ .assets[] | select(.name | test($arch) and endswith(".tar.gz") and (contains("original") | not)) ] | first | .browser_download_url // empty')
+            jq -r --arg arch "$FILE_ARCH" '
+              [ .assets[] | select(.name | test($arch) and endswith(".tar.gz") and (contains("original") | not)) ] | first | .browser_download_url // empty
+            ')
           
           [[ -z "$ASSET_URL" ]] && ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | \
-            jq -r --arg arch "$FILE_ARCH" \
-              '[ .assets[] | select(.name | test($arch) and endswith(".tar.gz")) ] | first | .browser_download_url // empty')
+            jq -r --arg arch "$FILE_ARCH" '
+              [ .assets[] | select(.name | test($arch) and endswith(".tar.gz")) ] | first | .browser_download_url // empty
+            ')
           
           [ -z "$ASSET_URL" ] && { echo "❌ No release found for $FILE_ARCH"; exit 1; }
           echo "Downloading $ASSET_URL ..."
@@ -1163,7 +1144,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           DELETE_BEFORE=$(date -u -d "7 days ago" +%Y-%m-%d)
-          gh api "repos/${{ github.repository }}/actions/runs?status=completed&created=<${DELETE_BEFORE}}" \
+          gh api "repos/${{ github.repository }}/actions/runs?status=completed&created=<${DELETE_BEFORE}" \
             --paginate --jq '.workflow_runs[].id' 2>/dev/null | while read run_id; do
             gh api "repos/${{ github.repository }}/actions/runs/$run_id" -X DELETE >/dev/null 2>&1 || true
           done
@@ -1211,7 +1192,15 @@ jobs:
           echo "Fetching failed logs..."
           gh run view ${{ github.run_id }} --repo "${{ github.repository }}" --log-failed --exit-status 0 | tail -n 100 > /tmp/error.log || echo "Failed to fetch logs." > /tmp/error.log
           
-          cat > issue_body.md <> issue_body.md
+          cat > issue_body.md <<EOF
+          構建在工作流 \`${{ github.workflow }}\` 中失敗。
+          
+          [查看完整的 Actions 日誌](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          
+          ### 🔍 錯誤日誌摘要 (Tail 100 lines)
+          \`\`\`log
+          EOF
+          cat /tmp/error.log >> issue_body.md
           echo '```' >> issue_body.md
           
           gh issue create \
@@ -1250,10 +1239,10 @@ jobs:
           
           escape_tg_markdown() {
             echo "$1" | sed -e 's/\\/\\\\/g' \
-                    -e 's/_/\\_/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' \
-                    -e 's/~/\\~/g' -e 's/`/\\`/g' -e 's/>/\\>/g' -e 's/#/\\#/g' \
-                    -e 's/+/\\+/g' -e 's/-/\\-/g' -e 's/=/\\=/g' -e 's/|/\\|/g' \
-                    -e 's/{/\\{/g' -e 's/}/\\}/g' -e 's/!/\\!/g'
+                              -e 's/_/\\_/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' \
+                              -e 's/~/\\~/g' -e 's/`/\\`/g' -e 's/>/\\>/g' -e 's/#/\\#/g' \
+                              -e 's/+/\\+/g' -e 's/-/\\-/g' -e 's/=/\\=/g' -e 's/|/\\|/g' \
+                              -e 's/{/\\{/g' -e 's/}/\\}/g' -e 's/!/\\!/g'
           }
           
           TG_DETAILS_SAFE=$(escape_tg_markdown "$TG_DETAILS")
@@ -1261,22 +1250,22 @@ jobs:
           
           if [ "$TG_STATUS" = "failed" ]; then
             MSG="❌ *sing\-box 自動編譯失敗*
-            
-            *構建詳情：*
-            ${TG_DETAILS_SAFE}
-            
-            *建議操作：*
-            1\. 前往 Actions頁面查看日誌
-            2\. 檢查是否有 GitHub API限流"
+          
+          *構建詳情：*
+          ${TG_DETAILS_SAFE}
+          
+          *建議操作：*
+          1\. 前往 Actions頁面查看日誌
+          2\. 檢查是否有 GitHub API限流"
           else
             MSG="🚀 *sing\-box 自動編譯完成*
-            
-            已檢測到代碼更新或觸發強制編譯，最新內核與 Android APK 已經打包完畢。
-            
-            *構建詳情：*
-            ${TG_DETAILS_SAFE}
-            
-            📥 [點擊前往 GitHub下載](https://github\.com/${REPO_SAFE}/releases/tag/sing\-box)"
+          
+          已檢測到代碼更新或觸發強制編譯，最新內核與 Android APK 已經打包完畢。
+          
+          *構建詳情：*
+          ${TG_DETAILS_SAFE}
+          
+          📥 [點擊前往 GitHub下載](https://github\.com/${REPO_SAFE}/releases/tag/sing\-box)"
           fi
           
           EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1 2>/dev/null || echo "EOM")
@@ -1362,7 +1351,10 @@ jobs:
 
       - name: Generate README
         run: |
-          cat > README.md < 自動檢測並編譯 [SagerNet/sing-box](https://github.com/SagerNet/sing-box)、[reF1nd/sing-box](https://github.com/reF1nd/sing-box) 和 [PuerNya/sing-box](https://github.com/PuerNya/sing-box)
+          cat > README.md <<EOF
+          # 🚀 sing-box 自動編譯系統
+          
+          > 自動檢測並編譯 [SagerNet/sing-box](https://github.com/SagerNet/sing-box)、[reF1nd/sing-box](https://github.com/reF1nd/sing-box) 和 [PuerNya/sing-box](https://github.com/PuerNya/sing-box)
           
           ## 📦 最新版本狀態 ($(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M UTC+8'))
           
@@ -1374,7 +1366,7 @@ jobs:
           
           使用動態路由自動安裝最新版對應架構：
           \`\`\`bash
-          bash <(curl -sSL [https://github.com/$](https://github.com/$){{ github.repository }}/releases/download/sing-box/install-linux.sh)
+          bash <(curl -sSL https://github.com/${{ github.repository }}/releases/download/sing-box/install-linux.sh)
           \`\`\`
           
           ## 📦 文件命名規則
@@ -1420,6 +1412,7 @@ jobs:
               const { data } = await github.rest.repos.getContent({ owner, repo, path, ref: branch });
               sha = data.sha;
             } catch (e) {
+              // File might not exist yet
             }
             
             await github.rest.repos.createOrUpdateFileContents({
