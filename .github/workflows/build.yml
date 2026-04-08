@@ -10,11 +10,8 @@ on:
         default: ""
         options:
           - ""
-          - "SagerNet_Stable"
-          - "SagerNet_Testing"
           - "reF1nd_Stable"
           - "reF1nd_Testing"
-          - "PuerNya_Building"
       build_commit:
         description: "Build specific commit SHA (leave empty for branch HEAD)"
         required: false
@@ -66,7 +63,6 @@ permissions:
 
 env:
   TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard"
-  TAGS_PUERNYA_EXTRA: "with_shadowsocksr,with_ech"
   TAGS_ANDROID_EXTRA: "with_conntrack"
   CURL_TIMEOUT_API: 60
   CURL_TIMEOUT_FILE: 120
@@ -120,66 +116,8 @@ jobs:
             echo "android_secrets_valid=true" >> $GITHUB_OUTPUT
           fi
 
-  puernya_version:
-    runs-on: ubuntu-latest
-    needs: init
-    outputs:
-      version: ${{ steps.puernya.outputs.version }}
-      time: ${{ steps.puernya.outputs.time }}
-    steps:
-      - name: Checkout PuerNya
-        if: ${{ github.event.inputs.skip_version_check != 'true' }}
-        uses: actions/checkout@v4
-        with:
-          repository: PuerNya/sing-box
-          ref: building
-          path: puernya-src
-          fetch-depth: 0
-
-      - name: Setup Go
-        if: ${{ github.event.inputs.skip_version_check != 'true' }}
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ needs.init.outputs.go_version }}
-
-      - name: Get PuerNya version
-        id: puernya
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event.inputs.skip_version_check }}" = "true" ]; then
-            ver="${{ github.event.inputs.override_version }}"
-            [ -z "$ver" ] && ver="unknown"
-            echo "version=$ver" >> $GITHUB_OUTPUT
-            echo "time=$(TZ=Asia/Shanghai date '+%Y-%m-%d')" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          cd puernya-src
-          git remote remove sekai 2>/dev/null || true
-          git remote add sekai https://github.com/SagerNet/sing-box.git
-          GIT_TERMINAL_PROMPT=0 git fetch --tags --force sekai
-          
-          ver=$(CGO_ENABLED=0 go run ./cmd/internal/read_tag 2>/dev/null | sed 's/^v//' || echo "")
-          if [ -z "$ver" ]; then
-            ver=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || git log -1 --format=%h 2>/dev/null || echo "")
-          fi
-          if [ -z "$ver" ]; then
-            commit=$(git rev-parse HEAD)
-            ver="dev-$(echo "$commit" | cut -c1-8)"
-          fi
-          
-          commit_date=$(git log -1 --format=%cd --date=iso-strict 2>/dev/null || echo "")
-          if [ -n "$commit_date" ]; then
-            time=$(TZ=Asia/Shanghai date -d "$commit_date" '+%Y-%m-%d' 2>/dev/null || TZ=Asia/Shanghai date '+%Y-%m-%d')
-          else
-            time=$(TZ=Asia/Shanghai date '+%Y-%m-%d')
-          fi
-          
-          echo "version=${ver}" >> $GITHUB_OUTPUT
-          echo "time=${time}" >> $GITHUB_OUTPUT
-
   check:
-    needs: [init, puernya_version]
+    needs: [init]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -233,24 +171,12 @@ jobs:
             elif [ "$SKIP_CHECK" = "true" ]; then
               ver="unknown"
               time="$(TZ=Asia/Shanghai date '+%Y-%m-%d')"
-            elif [[ "$id" == "PuerNya_Building" ]]; then
-              ver="${{ needs.puernya_version.outputs.version }}"
-              time="${{ needs.puernya_version.outputs.time }}"
             else
-              local release_data=$(api_call_with_retry "https://api.github.com/repos/$repo/releases")
-              if [[ "$repo" == *"reF1nd"* ]]; then
-                local tag_data=$(api_call_with_retry "https://api.github.com/repos/$repo/tags")
-                if [[ "$branch" == *"testing"* ]]; then
-                  ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | type == "string" and contains("reF1nd") and test("alpha|beta|rc"))][0].name // empty' 2>/dev/null | sed 's/^v//' || true)
-                else
-                  ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | type == "string" and contains("reF1nd") and (test("alpha|beta|rc") | not))][0].name // empty' 2>/dev/null | sed 's/^v//' || true)
-                fi
+              local tag_data=$(api_call_with_retry "https://api.github.com/repos/$repo/tags")
+              if [[ "$branch" == *"testing"* ]]; then
+                ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | type == "string" and contains("reF1nd") and test("alpha|beta|rc"))][0].name // empty' 2>/dev/null | sed 's/^v//' || true)
               else
-                if [[ "$branch" == *"testing"* ]]; then
-                  ver=$(echo "$release_data" | jq -r '[.[] | select(.tag_name | type == "string" and test("alpha|beta|rc"))][0].tag_name // empty' 2>/dev/null | sed 's/^v//' || true)
-                else
-                  ver=$(echo "$release_data" | jq -r '[.[] | select(.tag_name | type == "string" and (test("alpha|beta|rc") | not))][0].tag_name // empty' 2>/dev/null | sed 's/^v//' || true)
-                fi
+                ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | type == "string" and contains("reF1nd") and (test("alpha|beta|rc") | not))][0].name // empty' 2>/dev/null | sed 's/^v//' || true)
               fi
               
               if [ -z "$ver" ] || [ "$ver" = "null" ]; then
@@ -298,11 +224,8 @@ jobs:
             fi
           }
 
-          check_branch "SagerNet_Stable"   "SagerNet/sing-box" "stable"         "none" "none"
-          check_branch "SagerNet_Testing"  "SagerNet/sing-box" "testing"        "none" "none"
           check_branch "reF1nd_Stable"     "reF1nd/sing-box"   "reF1nd-stable"  "reF1nd/sing-box-for-android" "reF1nd-stable"
           check_branch "reF1nd_Testing"    "reF1nd/sing-box"   "reF1nd-testing" "reF1nd/sing-box-for-android" "reF1nd-testing"
-          check_branch "PuerNya_Building"  "PuerNya/sing-box"  "building"       "none" "none"
 
           sed -i '/^ *$/d' release_notes.txt
           if [ ! -s release_notes.txt ]; then
@@ -394,7 +317,7 @@ jobs:
           fetch-depth: 1
 
       - name: Clean Workspace
-        if: steps.check_naive.outputs.skip != 'true' && contains(matrix.target.repo, 'reF1nd')
+        if: steps.check_naive.outputs.skip != 'true'
         working-directory: sing-box
         run: |
           git clean -fdx
@@ -408,22 +331,11 @@ jobs:
           cache: true
           cache-dependency-path: 'sing-box/go.sum'
 
-      - name: Fix sniff
-        if: steps.check_naive.outputs.skip != 'true' && contains(matrix.target.repo, 'PuerNya')
-        run: |
-          cd sing-box
-          if [ -f "./experimental/clashapi/trafficontrol/tracker.go" ]; then
-            grep -q "sniffHosts" ./experimental/clashapi/trafficontrol/tracker.go && sed -i 's/sniffHosts/sniffHost/' ./experimental/clashapi/trafficontrol/tracker.go || true
-          fi
-
       - name: Configure Tags and CGO
         if: steps.check_naive.outputs.skip != 'true'
         id: env
         run: |
           FINAL_TAGS="${{ env.TAGS_COMMON }}"
-          if [[ "${{ matrix.target.repo }}" == *"PuerNya"* ]]; then
-            FINAL_TAGS="${FINAL_TAGS},${{ env.TAGS_PUERNYA_EXTRA }}"
-          fi
           
           CGO_VAL="0"
           ARCHIVE_SUFFIX=""
@@ -611,14 +523,7 @@ jobs:
     env:
       JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
     steps:
-      - name: Skip if no Android client
-        if: matrix.target.sfa_repo == 'none'
-        run: |
-          echo "::notice::Skipping Android build for ${{ matrix.target.id }} (no client configured)"
-          exit 0
-
       - name: Checkout Core
-        if: matrix.target.sfa_repo != 'none'
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.target.repo }}
@@ -627,7 +532,6 @@ jobs:
           fetch-depth: 0
 
       - name: Checkout Android Client
-        if: matrix.target.sfa_repo != 'none'
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.target.sfa_repo }}
@@ -635,26 +539,22 @@ jobs:
           path: sing-box-for-android
 
       - name: Setup Go
-        if: matrix.target.sfa_repo != 'none'
         uses: actions/setup-go@v5
         with:
           go-version: ${{ needs.init.outputs.go_version }}
 
       - name: Setup Android NDK
-        if: matrix.target.sfa_repo != 'none'
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
 
       - name: Setup OpenJDK
-        if: matrix.target.sfa_repo != 'none'
         run: |
           sudo apt update && sudo apt install -y openjdk-17-jdk-headless
           /usr/lib/jvm/java-17-openjdk-amd64/bin/java --version
 
       - name: Build Library (libbox.aar)
-        if: matrix.target.sfa_repo != 'none'
         run: |
           cd sing-box
           make lib_install
@@ -678,13 +578,11 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
       - name: Prepare Android Client
-        if: matrix.target.sfa_repo != 'none'
         run: |
           mkdir -p ./sing-box-for-android/app/libs/
           cp -f ./sing-box/*.aar ./sing-box-for-android/app/libs/
 
       - name: Disable Auto Update
-        if: matrix.target.sfa_repo != 'none'
         run: |
           cd sing-box-for-android
           find . -type f -name "Settings.kt" -exec sed -i 's/var checkUpdateEnabled = true/var checkUpdateEnabled = false/g' {} \;
@@ -692,12 +590,10 @@ jobs:
           find . -type f -name "UpdateState.kt" -exec sed -i 's/fun loadFromCache()/fun loadFromCache() { }/g' {} \;
 
       - name: Decode Keystore
-        if: matrix.target.sfa_repo != 'none'
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > ./sing-box-for-android/app/release.keystore
 
       - name: Build SFA APK
-        if: matrix.target.sfa_repo != 'none'
         run: |
           cd ./sing-box-for-android/
           chmod +x gradlew
@@ -710,7 +606,6 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
       - name: Collect APK and Metadata
-        if: matrix.target.sfa_repo != 'none'
         run: |
           cd sing-box-for-android
           mkdir -p apks
@@ -734,7 +629,6 @@ jobs:
             }' > "apks/SFA-${{ matrix.target.id }}-metadata.json"
 
       - name: Upload APK Artifacts
-        if: matrix.target.sfa_repo != 'none'
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ matrix.target.id }}
@@ -1328,7 +1222,7 @@ jobs:
           cat > README.md <<EOF
           # 🚀 sing-box 自動編譯系統
           
-          > 自動檢測並編譯 [SagerNet/sing-box](https://github.com/SagerNet/sing-box)、[reF1nd/sing-box](https://github.com/reF1nd/sing-box) 和 [PuerNya/sing-box](https://github.com/PuerNya/sing-box)
+          > 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的 Stable 和 Testing 分支。
           
           ## 📦 最新版本狀態 ($(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M UTC+8'))
           
@@ -1353,11 +1247,8 @@ jobs:
           
           | 版本 | 分支 | 平台支持 |
           |------|------|---------|
-          | SagerNet Stable | stable | Linux/Windows |
-          | SagerNet Testing | testing | Linux/Windows |
           | reF1nd Stable | reF1nd-stable | Linux/Windows/Android |
           | reF1nd Testing | reF1nd-testing | Linux/Windows/Android |
-          | PuerNya Building | building | Linux/Windows |
           
           ## 🔔 Telegram 通知配置
           若需啟用 Telegram 推送，請在倉庫 Secrets 中配置：
