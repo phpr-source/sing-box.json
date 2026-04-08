@@ -92,11 +92,11 @@ jobs:
           CODE=$(( ($(date +%s) / 60) + ${{ github.run_number }} ))
           echo "code=$CODE" >> $GITHUB_OUTPUT
 
-      - name: Get Go latest version
+      - name: Set Go Version
         id: go
         run: |
-          VERSION=$(curl -m ${CURL_TIMEOUT_API} -sL https://go.dev/VERSION?m=text | head -n 1 | sed 's/go//')
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          # 鎖定為 1.23.x 避免 Go 1.24 嚴格的 linkname 限制導致編譯崩潰
+          echo "version=1.23.x" >> $GITHUB_OUTPUT
 
       - name: Validate Secrets
         id: validate
@@ -549,7 +549,8 @@ jobs:
           BIN_NAME="sing-box"
           if [ "${{ matrix.platform.goos }}" = "windows" ]; then BIN_NAME="sing-box.exe"; fi
           
-          go build -v -trimpath -ldflags "-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid=" -tags "${{ steps.env.outputs.tags }}" -o "dist/$BIN_NAME" ./cmd/sing-box
+          # 修正了單引號問題和確保 checklinkname 在末尾
+          go build -v -trimpath -ldflags "-X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -s -w -buildid= -checklinkname=0" -tags "${{ steps.env.outputs.tags }}" -o "dist/$BIN_NAME" ./cmd/sing-box
           
           echo "{\"target_id\": \"${{ matrix.target.id }}\", \"platform\": \"${{ matrix.platform.name }}\", \"suffix\": \"${{ steps.env.outputs.suffix }}\", \"version_name\": \"${{ matrix.target.ver }}\"}" > dist/artifact-meta.json
 
@@ -669,6 +670,7 @@ jobs:
           FINAL_TAGS=$(echo "${FINAL_TAGS}" | tr ',' '\n' | sort -u | paste -sd,)
           echo "FINAL_TAGS_EXPORT=${FINAL_TAGS}" >> $GITHUB_ENV
           
+          # 完全採用 yagh779 的 gomobile 參數：移除單引號，加入防禦性參數，確保 checklinkname=0 在末尾且生效
           gomobile bind -v \
             -target android/arm64 \
             -androidapi 23 \
@@ -677,7 +679,7 @@ jobs:
             -trimpath \
             -buildvcs=false \
             -tags="${FINAL_TAGS}" \
-            -ldflags="-X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -s -w -buildid=" \
+            -ldflags="-X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0" \
             ./experimental/libbox
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -693,11 +695,9 @@ jobs:
         run: |
           cd sing-box-for-android
           
-          # Create version.properties to cleanly inject version codes
           printf 'VERSION_CODE=%s\nVERSION_NAME=%s\nGO_VERSION=%s\n' \
             "${{ needs.init.outputs.version_code }}" "${{ matrix.target.ver }}" "${{ needs.init.outputs.go_version }}" > version.properties
             
-          # Safely modify the application ID covering both Groovy and KTS
           if [ -f "app/build.gradle.kts" ]; then
             sed -i 's/applicationId\s*=\s*"io\.reF1nd\.sfa"/applicationId = "com.android.internal.net"/' app/build.gradle.kts
             sed -i 's/applicationId\s*=\s*"io\.nekohasekai\.sfa"/applicationId = "com.android.internal.net"/' app/build.gradle.kts
@@ -706,7 +706,6 @@ jobs:
             sed -i 's/applicationId "io\.nekohasekai\.sfa"/applicationId "com.android.internal.net"/' app/build.gradle
           fi
 
-          # Disable annoying internal auto-updater by redirecting release URL
           UPDATE_FILE="app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt"
           if [ -f "$UPDATE_FILE" ]; then
             sed -i 's|reF1nd/sing-box-releases|yagh779/sing-box-releases|g' "$UPDATE_FILE"
@@ -723,7 +722,6 @@ jobs:
           cd sing-box-for-android
           chmod +x gradlew
           
-          # Determine correct build task dynamically based on source variant
           if grep -qi "otherRelease" app/build.gradle* 2>/dev/null; then
             TASK="assembleOtherRelease"
           else
@@ -742,7 +740,6 @@ jobs:
         if: ${{ matrix.target.sfa_repo != 'none' }}
         run: |
           mkdir -p apks
-          # Locate the APK dynamically
           APK_FILE=$(find sing-box-for-android/app/build/outputs/apk -type f -name "*.apk" ! -name "*unaligned*" -print -quit)
           
           if [ -n "$APK_FILE" ]; then
