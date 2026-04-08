@@ -10,10 +10,8 @@ on:
         default: ""
         options:
           - ""
-          - "SagerNet_Oldstable"
           - "SagerNet_Stable"
           - "SagerNet_Testing"
-          - "reF1nd_Oldstable"
           - "reF1nd_Stable"
           - "reF1nd_Testing"
           - "PuerNya_Building"
@@ -94,9 +92,7 @@ jobs:
 
       - name: Set Go Version
         id: go
-        run: |
-          # 鎖定為 1.23.x 避免 Go 1.24 嚴格的 linkname 限制導致編譯崩潰
-          echo "version=1.23.x" >> $GITHUB_OUTPUT
+        run: echo "version=1.23.x" >> $GITHUB_OUTPUT
 
       - name: Validate Secrets
         id: validate
@@ -300,10 +296,9 @@ jobs:
             fi
           }
 
-          check_branch "SagerNet_Oldstable" "SagerNet/sing-box" "oldstable" "none" "none"
+          # 移除了 oldstable，僅保留 stable 和 testing 分支
           check_branch "SagerNet_Stable" "SagerNet/sing-box" "stable" "none" "none"
           check_branch "SagerNet_Testing" "SagerNet/sing-box" "testing" "none" "none"
-          check_branch "reF1nd_Oldstable" "reF1nd/sing-box" "reF1nd-oldstable" "reF1nd/sing-box-for-android" "reF1nd-oldstable"
           check_branch "reF1nd_Stable" "reF1nd/sing-box" "reF1nd-stable" "reF1nd/sing-box-for-android" "reF1nd-stable"
           check_branch "reF1nd_Testing" "reF1nd/sing-box" "reF1nd-testing" "reF1nd/sing-box-for-android" "reF1nd-testing"
           check_branch "PuerNya_Building" "PuerNya/sing-box" "building" "none" "none"
@@ -549,7 +544,6 @@ jobs:
           BIN_NAME="sing-box"
           if [ "${{ matrix.platform.goos }}" = "windows" ]; then BIN_NAME="sing-box.exe"; fi
           
-          # 修正了單引號問題和確保 checklinkname 在末尾
           go build -v -trimpath -ldflags "-X github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }} -s -w -buildid= -checklinkname=0" -tags "${{ steps.env.outputs.tags }}" -o "dist/$BIN_NAME" ./cmd/sing-box
           
           echo "{\"target_id\": \"${{ matrix.target.id }}\", \"platform\": \"${{ matrix.platform.name }}\", \"suffix\": \"${{ steps.env.outputs.suffix }}\", \"version_name\": \"${{ matrix.target.ver }}\"}" > dist/artifact-meta.json
@@ -670,7 +664,6 @@ jobs:
           FINAL_TAGS=$(echo "${FINAL_TAGS}" | tr ',' '\n' | sort -u | paste -sd,)
           echo "FINAL_TAGS_EXPORT=${FINAL_TAGS}" >> $GITHUB_ENV
           
-          # 完全採用 yagh779 的 gomobile 參數：移除單引號，加入防禦性參數，確保 checklinkname=0 在末尾且生效
           gomobile bind -v \
             -target android/arm64 \
             -androidapi 23 \
@@ -697,6 +690,10 @@ jobs:
           
           printf 'VERSION_CODE=%s\nVERSION_NAME=%s\nGO_VERSION=%s\n' \
             "${{ needs.init.outputs.version_code }}" "${{ matrix.target.ver }}" "${{ needs.init.outputs.go_version }}" > version.properties
+          
+          sed -i 's/minSdk = [0-9]*/minSdk = 23/g' app/build.gradle.kts 2>/dev/null || true
+          sed -i 's/minSdkVersion [0-9]*/minSdkVersion 23/g' app/build.gradle 2>/dev/null || true
+          sed -i 's/minSdkVersion="[^"]*"/minSdkVersion="23"/g' app/src/main/AndroidManifest.xml 2>/dev/null || true
             
           if [ -f "app/build.gradle.kts" ]; then
             sed -i 's/applicationId\s*=\s*"io\.reF1nd\.sfa"/applicationId = "com.android.internal.net"/' app/build.gradle.kts
@@ -1378,10 +1375,8 @@ jobs:
           
           | 版本 | 分支 | 平台支持 |
           |------|------|---------|
-          | SagerNet OldStable | oldstable | Linux/Windows/Android (arm64) |
           | SagerNet Stable | stable | Linux/Windows/Android (arm64) |
           | SagerNet Testing | testing | Linux/Windows/Android (arm64) |
-          | reF1nd OldStable | reF1nd-oldstable | Linux/Windows/Android (arm64) |
           | reF1nd Stable | reF1nd-stable | Linux/Windows/Android (arm64) |
           | reF1nd Testing | reF1nd-testing | Linux/Windows/Android (arm64) |
           | PuerNya Building | building | Linux/Windows |
