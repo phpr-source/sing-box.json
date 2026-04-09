@@ -12,7 +12,6 @@ on:
           - ""
           - "reF1nd_Stable"
           - "reF1nd_Testing"
-          - "PuerNya_Building"
       build_commit:
         description: "Build specific commit SHA (leave empty for branch HEAD)"
         required: false
@@ -65,7 +64,6 @@ permissions:
 
 env:
   TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard"
-  TAGS_PUERNYA_EXTRA: "with_shadowsocksr,with_ech"
   TAGS_ANDROID_EXTRA: "with_conntrack"
   CURL_TIMEOUT_API: 60
   CURL_TIMEOUT_FILE: 120
@@ -119,59 +117,8 @@ jobs:
             echo "android_secrets_valid=true" >> $GITHUB_OUTPUT
           fi
 
-  puernya_version:
-    runs-on: ubuntu-latest
-    needs: init
-    outputs:
-      version: ${{ steps.puernya.outputs.version }}
-      time: ${{ steps.puernya.outputs.time }}
-      tags: ${{ steps.puernya.outputs.tags }}
-    steps:
-      - name: Checkout PuerNya
-        if: ${{ github.event.inputs.skip_version_check != 'true' }}
-        uses: actions/checkout@v4
-        with:
-          repository: PuerNya/sing-box
-          ref: building
-          path: puernya-src
-          fetch-depth: 0
-
-      - name: Setup Go
-        if: ${{ github.event.inputs.skip_version_check != 'true' }}
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ needs.init.outputs.go_version }}
-
-      - name: Get PuerNya version
-        id: puernya
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event.inputs.skip_version_check }}" = "true" ]; then
-            ver="${{ github.event.inputs.override_version }}"
-            [ -z "$ver" ] && ver="unknown"
-            echo "version=$ver" >> $GITHUB_OUTPUT
-            echo "time=$(TZ=Asia/Shanghai date '+%Y-%m-%d')" >> $GITHUB_OUTPUT
-            echo "tags=${{ env.TAGS_COMMON }},${{ env.TAGS_PUERNYA_EXTRA }}" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          cd puernya-src
-          git remote add sekai https://github.com/SagerNet/sing-box.git 2>/dev/null || true
-          git fetch --tags --force sekai
-          ver=$(CGO_ENABLED=0 go run ./cmd/internal/read_tag 2>/dev/null | sed 's/^v//')
-          if [ -z "$ver" ]; then
-            ver=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
-          fi
-          if [ -z "$ver" ]; then
-            ver="dev-$(git rev-parse --short HEAD)"
-          fi
-          commit_date=$(git log -1 --format=%cd --date=iso-strict)
-          time=$(TZ=Asia/Shanghai date -d "$commit_date" '+%Y-%m-%d')
-          echo "version=${ver}" >> $GITHUB_OUTPUT
-          echo "time=${time}" >> $GITHUB_OUTPUT
-          echo "tags=${{ env.TAGS_COMMON }},${{ env.TAGS_PUERNYA_EXTRA }}" >> $GITHUB_OUTPUT
-
   check:
-    needs: [init, puernya_version]
+    needs: [init]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -225,9 +172,6 @@ jobs:
             elif [ "$SKIP_CHECK" = "true" ]; then
               ver="unknown"
               time="$(TZ=Asia/Shanghai date '+%Y-%m-%d')"
-            elif [[ "$id" == "PuerNya_Building" ]]; then
-              ver="${{ needs.puernya_version.outputs.version }}"
-              time="${{ needs.puernya_version.outputs.time }}"
             else
               local tag_data=$(api_call_with_retry "https://api.github.com/repos/$repo/tags")
               if [[ "$branch" == *"testing"* ]]; then
@@ -283,7 +227,6 @@ jobs:
 
           check_branch "reF1nd_Stable"     "reF1nd/sing-box"   "reF1nd-stable"  "reF1nd/sing-box-for-android" "reF1nd-stable"
           check_branch "reF1nd_Testing"    "reF1nd/sing-box"   "reF1nd-testing" "reF1nd/sing-box-for-android" "reF1nd-testing"
-          check_branch "PuerNya_Building"  "PuerNya/sing-box"  "building"       "none" "none"
 
           sed -i '/^ *$/d' release_notes.txt
           if [ ! -s release_notes.txt ]; then
@@ -313,7 +256,7 @@ jobs:
           compression-level: 0
 
   build_core:
-    needs: [init, check, puernya_version]
+    needs: [init, check]
     if: >-
       needs.check.outputs.has_update == 'true' &&
       needs.check.outputs.matrix != '[]' &&
@@ -375,7 +318,7 @@ jobs:
           fetch-depth: 1
 
       - name: Clean Workspace
-        if: steps.check_naive.outputs.skip != 'true' && contains(matrix.target.repo, 'reF1nd')
+        if: steps.check_naive.outputs.skip != 'true'
         working-directory: sing-box
         run: |
           git clean -fdx
@@ -389,22 +332,11 @@ jobs:
           cache: true
           cache-dependency-path: 'sing-box/go.sum'
 
-      - name: Fix sniff (PuerNya)
-        if: steps.check_naive.outputs.skip != 'true' && contains(matrix.target.repo, 'PuerNya')
-        run: |
-          cd sing-box
-          if [ -f "./experimental/clashapi/trafficontrol/tracker.go" ]; then
-            grep -q "sniffHosts" ./experimental/clashapi/trafficontrol/tracker.go && sed -i 's/sniffHosts/sniffHost/' ./experimental/clashapi/trafficontrol/tracker.go || true
-          fi
-
       - name: Configure Tags and CGO
         if: steps.check_naive.outputs.skip != 'true'
         id: env
         run: |
           FINAL_TAGS="${{ env.TAGS_COMMON }}"
-          if [[ "${{ matrix.target.repo }}" == *"PuerNya"* ]]; then
-            FINAL_TAGS="${FINAL_TAGS},${{ env.TAGS_PUERNYA_EXTRA }}"
-          fi
           
           CGO_VAL="0"
           ARCHIVE_SUFFIX=""
@@ -767,9 +699,14 @@ jobs:
         run: |
           mkdir -p ./release_files
           
+          declare -A TARGET_VERSIONS
+          declare -A PLATFORM_FILES
+          
           package_windows() {
             local dir="$1"
-            local base="$2"
+            local target_id="$2"
+            local platform="$3"
+            local ver="$4"
             local bin_file=""
             
             if [ -f "$dir/sing-box.exe" ]; then
@@ -779,56 +716,40 @@ jobs:
             fi
             
             if [ -n "$bin_file" ] && [ -f "$bin_file" ]; then
-              mv -f "$bin_file" "sing-box.exe"
-              cp "sing-box.exe" "sing-box-original.exe"
-              
               UPX_SUPPORTED="false"
               [ -f "$dir/upx_supported.txt" ] && UPX_SUPPORTED=$(cat "$dir/upx_supported.txt")
               
+              cp "$bin_file" "sing-box.exe"
               if [ "$UPX_SUPPORTED" = "true" ]; then
                 if file "sing-box.exe" | grep -qiE "^PE32.*executable"; then
-                  if ! upx -t "sing-box.exe" >/dev/null 2>&1 || ! upx --best --lzma "sing-box.exe" 2>/dev/null; then
-                    upx --best "sing-box.exe" 2>/dev/null || cp "sing-box-original.exe" "sing-box.exe"
-                  fi
+                  upx --best --lzma "sing-box.exe" 2>/dev/null || true
                 fi
               fi
               
-              [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" . 2>/dev/null || true
-
-              if [ -f "$dir/libcronet.dll" ]; then
-                mv "$dir/libcronet.dll" .
-                
-                ZIP_ARGS=("sing-box.exe" "libcronet.dll")
-                [ -f "LICENSE" ] && ZIP_ARGS+=("LICENSE")
-                zip -q9 "release_files/sing-box-${base}.zip" "${ZIP_ARGS[@]}"
-                
-                ORIG_ZIP_ARGS=("sing-box-original.exe" "libcronet.dll")
-                [ -f "LICENSE" ] && ORIG_ZIP_ARGS+=("LICENSE")
-                zip -q9 "release_files/sing-box-${base}-original.zip" "${ORIG_ZIP_ARGS[@]}"
-                
-                rm -f libcronet.dll
-              else
-                ZIP_ARGS=("sing-box.exe")
-                [ -f "LICENSE" ] && ZIP_ARGS+=("LICENSE")
-                zip -q9 "release_files/sing-box-${base}.zip" "${ZIP_ARGS[@]}"
-                
-                ORIG_ZIP_ARGS=("sing-box-original.exe")
-                [ -f "LICENSE" ] && ORIG_ZIP_ARGS+=("LICENSE")
-                zip -q9 "release_files/sing-box-${base}-original.zip" "${ORIG_ZIP_ARGS[@]}"
-              fi
+              ZIP_NAME="sing-box-${target_id}-${platform}-${ver}.zip"
+              ZIP_ARGS=("sing-box.exe")
+              [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" . && ZIP_ARGS+=("LICENSE")
+              [ -f "$dir/libcronet.dll" ] && cp "$dir/libcronet.dll" . && ZIP_ARGS+=("libcronet.dll")
+              zip -q9 "release_files/${ZIP_NAME}" "${ZIP_ARGS[@]}"
+              PLATFORM_FILES["${target_id}|${platform}"]="${ZIP_NAME} (UPX)"
               
-              if [ ! -f "release_files/sing-box-${base}.zip" ] || [ "$(stat -c%s "release_files/sing-box-${base}.zip" 2>/dev/null || stat -f%z "release_files/sing-box-${base}.zip" 2>/dev/null)" -lt 1024 ]; then
-                echo "::error::ZIP packaging failed or produced empty file: $base"
-                exit 1
-              fi
+              cp "$bin_file" "sing-box-original.exe"
+              ORIG_ZIP_NAME="sing-box-${target_id}-${platform}-${ver}-original.zip"
+              ORIG_ZIP_ARGS=("sing-box-original.exe")
+              [ -f "LICENSE" ] && ORIG_ZIP_ARGS+=("LICENSE")
+              [ -f "libcronet.dll" ] && ORIG_ZIP_ARGS+=("libcronet.dll")
+              zip -q9 "release_files/${ORIG_ZIP_NAME}" "${ORIG_ZIP_ARGS[@]}"
+              PLATFORM_FILES["${target_id}|${platform}|orig"]="${ORIG_ZIP_NAME} (未压缩)"
               
-              rm -f "sing-box.exe" "sing-box-original.exe" "LICENSE"
+              rm -f "sing-box.exe" "sing-box-original.exe" "LICENSE" "libcronet.dll"
             fi
           }
           
           package_linux() {
             local dir="$1"
-            local base="$2"
+            local target_id="$2"
+            local platform="$3"
+            local ver="$4"
             local bin_file=""
             
             if [ -f "$dir/sing-box" ]; then
@@ -838,39 +759,36 @@ jobs:
             fi
             
             if [ -n "$bin_file" ] && [ -f "$bin_file" ]; then
-              mv -f "$bin_file" "sing-box"
-              chmod +x "sing-box"
-              cp "sing-box" "sing-box-original"
-              
               UPX_SUPPORTED="false"
               [ -f "$dir/upx_supported.txt" ] && UPX_SUPPORTED=$(cat "$dir/upx_supported.txt")
-
+              
+              cp "$bin_file" "sing-box"
+              chmod +x "sing-box"
               if [ "$UPX_SUPPORTED" = "true" ]; then
                 if file "sing-box" | grep -qE "ELF.*executable"; then
-                  if ! upx -t "sing-box" >/dev/null 2>&1 || ! upx --best --lzma "sing-box" 2>/dev/null; then
-                    upx --best "sing-box" 2>/dev/null || cp "sing-box-original" "sing-box"
-                  fi
+                  upx --best --lzma "sing-box" 2>/dev/null || true
                 fi
-                
-                mkdir -p pkg_dir pkg_orig_dir
-                cp "sing-box" pkg_dir/
-                cp "sing-box-original" pkg_orig_dir/sing-box
-                if [ -f "$dir/LICENSE" ]; then 
-                  cp "$dir/LICENSE" pkg_dir/ 2>/dev/null || true
-                  cp "$dir/LICENSE" pkg_orig_dir/ 2>/dev/null || true
-                fi
-
-                tar --no-same-owner -czf "release_files/sing-box-${base}.tar.gz" -C pkg_dir .
-                tar --no-same-owner -czf "release_files/sing-box-${base}-original.tar.gz" -C pkg_orig_dir .
-                rm -rf pkg_dir pkg_orig_dir
-              else
-                mkdir -p pkg_dir
-                cp "sing-box" pkg_dir/
-                if [ -f "$dir/LICENSE" ]; then cp "$dir/LICENSE" pkg_dir/ 2>/dev/null || true; fi
-                tar --no-same-owner -czf "release_files/sing-box-${base}.tar.gz" -C pkg_dir .
-                rm -rf pkg_dir
               fi
-              rm -f "sing-box" "sing-box-original" "LICENSE"
+              
+              mkdir -p pkg_dir
+              cp "sing-box" pkg_dir/
+              [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" pkg_dir/
+              TAR_NAME="sing-box-${target_id}-${platform}-${ver}.tar.gz"
+              tar --no-same-owner -czf "release_files/${TAR_NAME}" -C pkg_dir .
+              PLATFORM_FILES["${target_id}|${platform}"]="${TAR_NAME} (UPX)"
+              rm -rf pkg_dir
+              
+              cp "$bin_file" "sing-box-original"
+              chmod +x "sing-box-original"
+              mkdir -p pkg_orig_dir
+              cp "sing-box-original" pkg_orig_dir/sing-box
+              [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" pkg_orig_dir/
+              ORIG_TAR_NAME="sing-box-${target_id}-${platform}-${ver}-original.tar.gz"
+              tar --no-same-owner -czf "release_files/${ORIG_TAR_NAME}" -C pkg_orig_dir .
+              PLATFORM_FILES["${target_id}|${platform}|orig"]="${ORIG_TAR_NAME} (未压缩)"
+              rm -rf pkg_orig_dir
+              
+              rm -f "sing-box" "sing-box-original"
             fi
           }
 
@@ -879,87 +797,87 @@ jobs:
               if [ -f "$dir/artifact-meta.json" ]; then
                 target_id=$(jq -r '.target_id' "$dir/artifact-meta.json")
                 platform=$(jq -r '.platform' "$dir/artifact-meta.json")
-                suffix=$(jq -r '.suffix' "$dir/artifact-meta.json")
-                if [ -z "$suffix" ] || [ "$suffix" == "null" ]; then
-                  base="${target_id}-${platform}"
+                ver=$(jq -r '.version_name' "$dir/artifact-meta.json")
+                TARGET_VERSIONS["$target_id"]="$ver"
+                
+                if [[ "$platform" == *"windows"* ]]; then
+                  package_windows "$dir" "$target_id" "$platform" "$ver" || true
                 else
-                  base="${target_id}-${platform}${suffix}"
+                  package_linux "$dir" "$target_id" "$platform" "$ver" || true
                 fi
-              else
-                base=$(basename "$dir" | sed 's/core-//' | sed 's/-[0-9]*$//')
-              fi
-              
-              if [[ "$base" == *"windows"* ]]; then
-                package_windows "$dir" "$base" || exit 1
-              else
-                package_linux "$dir" "$base" || exit 1
               fi
             fi
           done
           
           for dir in ./tmp/apk-*; do
-            if [[ -d "$dir" ]]; then mv "$dir"/* release_files/ 2>/dev/null || true; fi
-          done
-
-          shopt -s nullglob
-          APK_META=($(./release_files/*-metadata.json 2>/dev/null || echo ""))
-          shopt -u nullglob
-
-          TARGETS_LIST=()
-          
-          for meta in "${APK_META[@]}"; do
-            TARGETS_LIST+=("$(jq -c '{target_id: .target_id, platform: "android", version_name: .version_name}' "$meta")")
-          done
-          
-          for dir in ./tmp/core-*; do
-            if [ -d "$dir" ] && [ -f "$dir/artifact-meta.json" ]; then
-              TARGETS_LIST+=("$(jq -c '{target_id: .target_id, platform: .platform, version_name: .version_name}' "$dir/artifact-meta.json")")
+            if [[ -d "$dir" ]]; then
+              target_id=$(basename "$dir" | sed 's/^apk-//')
+              ver=""
+              for f in "$dir"/*-metadata.json; do
+                [ -f "$f" ] && ver=$(jq -r '.version_name' "$f") && break
+              done
+              TARGET_VERSIONS["$target_id"]="$ver"
+              
+              for apk in "$dir"/*.apk; do
+                [ -f "$apk" ] || continue
+                APK_NAME="SFA-${target_id}-${ver}.apk"
+                cp "$apk" "release_files/${APK_NAME}"
+                PLATFORM_FILES["${target_id}|android"]="${APK_NAME} (arm64-v8a)"
+              done
+              cp "$dir"/*-metadata.json release_files/ 2>/dev/null || true
             fi
           done
 
+          TARGETS_LIST=()
+          for target_id in "${!TARGET_VERSIONS[@]}"; do
+            TARGETS_LIST+=("{\"target_id\":\"$target_id\",\"version_name\":\"${TARGET_VERSIONS[$target_id]}\"}")
+          done
           if [ ${#TARGETS_LIST[@]} -gt 0 ]; then
             printf '%s\n' "${TARGETS_LIST[@]}" | jq -s --arg run_id "${{ github.run_id }}" --arg commit "${{ github.sha }}" --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
               global_run_id: $run_id,
               commit_sha: $commit,
               built_at: $built_at,
-              targets: (unique_by(.target_id))
-            }' > release_files/build-info.json || echo "{}" > release_files/build-info.json
+              targets: .
+            }' > release_files/build-info.json
           else
             echo "{}" > release_files/build-info.json
           fi
 
-          cat > release_body.txt <<'BODYEOF'
+          cat > release_body.txt <<'BODYHEAD'
           # 🚀 sing-box 自動編譯
-          
+
           > 🔒 此 Release 已通過 [GitHub Artifact Attestations](https://github.com/advanced-security/artifact-attestations) 驗證，防範供應鏈攻擊。
-          > ⚠️ **發佈狀態提示**：此 Release 包含 `testing` (測試版) 和 `stable` (穩定版) 的多分支產物，為防止下游依賴腳本誤抓取不穩定版本，已統一標記為 **Pre-release (預發佈)**。
-          
-          ## 📦 本次更新內容
-          
-          BODYEOF
-          
-          if [ -f "./tmp/workflow-metadata/release_notes.txt" ]; then 
-            cat ./tmp/workflow-metadata/release_notes.txt >> release_body.txt
-          fi
-          
-          cat >> release_body.txt <<'BODYEOF'
-          
-          ### 🔧 構建標籤詳情
-          ```text
-          BODYEOF
-          
-          for dir in ./tmp/core-*; do
-            if [ -d "$dir" ]; then
-              base=$(basename "$dir" | sed 's/core-//')
-              tags="standard tags"
-              [ -f "$dir/build_tags.txt" ] && tags=$(cat "$dir/build_tags.txt")
-              echo "- $base: $tags" >> release_body.txt
-            fi
+          > ⚠️ **發佈狀態提示**：此 Release 同時包含 `stable` 和 `testing` 分支產物，請依需求選擇。
+
+          BODYHEAD
+
+          for target_id in $(printf "%s\n" "${!TARGET_VERSIONS[@]}" | sort); do
+            ver="${TARGET_VERSIONS[$target_id]}"
+            echo "## 📦 ${target_id} (v${ver})" >> release_body.txt
+            echo "" >> release_body.txt
+            echo "| 平台 / 架構 | 文件名 | 說明 |" >> release_body.txt
+            echo "|-------------|--------|------|" >> release_body.txt
+            
+            for key in "${!PLATFORM_FILES[@]}"; do
+              IFS='|' read -r tid plat extra <<< "$key"
+              if [ "$tid" != "$target_id" ]; then continue; fi
+              file_info="${PLATFORM_FILES[$key]}"
+              file_name="${file_info%% (*}"
+              file_desc="${file_info#*\(}"
+              file_desc="${file_desc%)}"
+              plat_display="$plat"
+              [[ "$plat" == "linux-"* ]] && plat_display="Linux ${plat#linux-}"
+              [[ "$plat" == "windows-"* ]] && plat_display="Windows ${plat#windows-}"
+              [[ "$plat" == "android" ]] && plat_display="Android"
+              echo "| ${plat_display} | \`${file_name}\` | ${file_desc} |" >> release_body.txt
+            done
+            echo "" >> release_body.txt
           done
-          echo '```' >> release_body.txt
-          
-          echo "" >> release_body.txt
-          echo "### 📜 歷史更新摘要" >> release_body.txt
+
+          cat >> release_body.txt <<'BODYFOOT'
+          ---
+          ### 📜 歷史更新摘要
+          BODYFOOT
           gh release list --repo "${{ github.repository }}" --limit 3 --json tagName,name,publishedAt --jq '.[] | "- \(.publishedAt[0:10]) \(.tagName): \(.name)"' >> release_body.txt || echo "- 暫無歷史記錄" >> release_body.txt
 
       - name: Generate install scripts
@@ -986,11 +904,6 @@ jobs:
               [ .assets[] | select(.name | test($arch) and endswith(".tar.gz") and (contains("original") | not)) ] | first | .browser_download_url // empty
             ')
           
-          [[ -z "$ASSET_URL" ]] && ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | \
-            jq -r --arg arch "$FILE_ARCH" '
-              [ .assets[] | select(.name | test($arch) and endswith(".tar.gz")) ] | first | .browser_download_url // empty
-            ')
-          
           [ -z "$ASSET_URL" ] && { echo "❌ No release found for $FILE_ARCH"; exit 1; }
           echo "Downloading $ASSET_URL ..."
           curl -fLO "$ASSET_URL" || { echo "❌ Download failed"; exit 1; }
@@ -1006,17 +919,17 @@ jobs:
         run: |
           cd release_files
           for f in *.tar.gz; do
-            if [ -f "$f" ]; then tar -tzf "$f" > /dev/null 2>&1 || exit 1; fi
+            [ -f "$f" ] && tar -tzf "$f" > /dev/null 2>&1 || exit 1
           done
           for f in *.zip; do
-            if [ -f "$f" ]; then unzip -t "$f" > /dev/null 2>&1 || exit 1; fi
+            [ -f "$f" ] && unzip -t "$f" > /dev/null 2>&1 || exit 1
           done
           
           sha256sum *.tar.gz *.zip *.apk 2>/dev/null > SHA256SUMS.txt
           awk '{printf "| `%s` | `%s` |\n", $2, $1}' SHA256SUMS.txt > SHA256SUMS_TABLE.md
           
           cat >> ../release_body.txt <<'BODYEOF'
-          
+
           ## 🔐 SHA256 Checksums
           | 文件名稱 | SHA-256 |
           |----------|---------|
@@ -1026,7 +939,7 @@ jobs:
       - name: Check if release files exist
         id: check_files
         run: |
-          if ls ./release_files/* >/dev/null 2>&1; then
+          if ls ./release_files/*.tar.gz ./release_files/*.zip ./release_files/*.apk >/dev/null 2>&1; then
             echo "files_exist=true" >> $GITHUB_OUTPUT
           else
             echo "files_exist=false" >> $GITHUB_OUTPUT
@@ -1320,7 +1233,7 @@ jobs:
           cat > README.md <<EOF
           # 🚀 sing-box 自動編譯系統
           
-          > 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 和 [PuerNya/sing-box](https://github.com/PuerNya/sing-box)
+          > 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的 Stable 和 Testing 分支。
           
           ## 📦 最新版本狀態 ($(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M UTC+8'))
           
@@ -1347,7 +1260,6 @@ jobs:
           |------|------|---------|
           | reF1nd Stable | reF1nd-stable | Linux/Windows/Android |
           | reF1nd Testing | reF1nd-testing | Linux/Windows/Android |
-          | PuerNya Building | building | Linux/Windows |
           
           ## 🔔 Telegram 通知配置
           若需啟用 Telegram 推送，請在倉庫 Secrets 中配置：
