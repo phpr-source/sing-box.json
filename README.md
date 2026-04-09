@@ -1,16 +1,11 @@
 # 🚀 sing-box 自動編譯系統
 
-> 自動檢測並編譯 [SagerNet/sing-box](https://github.com/SagerNet/sing-box)、[reF1nd/sing-box](https://github.com/reF1nd/sing-box) 和 [PuerNya/sing-box](https://github.com/PuerNya/sing-box)
+> 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的 Stable 和 Testing 分支。
 
-## 📦 最新版本狀態 (2026-04-07 23:38 UTC+8)
+## 📦 最新版本狀態 (2026-04-09 12:22 UTC+8)
 
-- ✨ 更新 **[SagerNet_Oldstable](https://github.com/SagerNet/sing-box/tree/oldstable)** 至 `v1.13.6`，發佈於 2026-03-24 [SagerNet_Oldstable v1.13.6]
-- ✨ 更新 **[SagerNet_Stable](https://github.com/SagerNet/sing-box/tree/stable)** 至 `v1.13.6`，發佈於 2026-04-06 [SagerNet_Stable v1.13.6]
-- ✨ 更新 **[SagerNet_Testing](https://github.com/SagerNet/sing-box/tree/testing)** 至 `v1.14.0-alpha.9`，發佈於 2026-04-07 [SagerNet_Testing v1.14.0-alpha.9]
-- ✨ 更新 **[reF1nd_Oldstable](https://github.com/reF1nd/sing-box/tree/reF1nd-oldstable)** 至 `v1.13.5-reF1nd`，發佈於 2026-04-01 [reF1nd_Oldstable v1.13.5-reF1nd]
 - ✨ 更新 **[reF1nd_Stable](https://github.com/reF1nd/sing-box/tree/reF1nd-stable)** 至 `v1.13.5-reF1nd`，發佈於 2026-04-01 [reF1nd_Stable v1.13.5-reF1nd]
 - ✨ 更新 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** 至 `v1.14.0-alpha.8-reF1nd`，發佈於 2026-04-01 [reF1nd_Testing v1.14.0-alpha.8-reF1nd]
-- ✨ 更新 **[PuerNya_Building](https://github.com/PuerNya/sing-box/tree/building)** 至 `v1.10.0-alpha.29-067c81a7`，發佈於 2024-08-16 [PuerNya_Building v1.10.0-alpha.29-067c81a7]
 
 ---
 
@@ -18,7 +13,7 @@
 
 使用動態路由自動安裝最新版對應架構：
 ```bash
-bash <(curl -sSL https://github.com/phpr-source/sing-box.json/releases/download/sing-box/install-linux.sh)
+bash <(curl -sSL [https://github.com/$](https://github.com/$){{ github.repository }}/releases/download/sing-box/install-linux.sh)
 ```
 
 ## 📦 文件命名規則
@@ -31,13 +26,8 @@ bash <(curl -sSL https://github.com/phpr-source/sing-box.json/releases/download/
 
 | 版本 | 分支 | 平台支持 |
 |------|------|---------|
-| SagerNet OldStable | oldstable | Linux/Windows/Android (arm64) |
-| SagerNet Stable | stable | Linux/Windows/Android (arm64) |
-| SagerNet Testing | testing | Linux/Windows/Android (arm64) |
-| reF1nd OldStable | reF1nd-oldstable | Linux/Windows/Android (arm64) |
-| reF1nd Stable | reF1nd-stable | Linux/Windows/Android (arm64) |
-| reF1nd Testing | reF1nd-testing | Linux/Windows/Android (arm64) |
-| PuerNya Building | building | Linux/Windows |
+| reF1nd Stable | reF1nd-stable | Linux/Windows/Android |
+| reF1nd Testing | reF1nd-testing | Linux/Windows/Android |
 
 ## 🔔 Telegram 通知配置
 若需啟用 Telegram 推送，請在倉庫 Secrets 中配置：
@@ -45,4 +35,4 @@ bash <(curl -sSL https://github.com/phpr-source/sing-box.json/releases/download/
 
 [🔗 前往 Releases 下載](https://github.com/phpr-source/sing-box.json/releases/tag/sing-box)
 
-![Build Status](https://img.shields.io/github/actions/workflow/status/phpr-source/sing-box.json/build.yml?branch=main)
+![Build Status](https://img.shields.io/github/actions/workflow/status/phpr-source/sing-box.json/build-sing-box.yml?branch=main)
