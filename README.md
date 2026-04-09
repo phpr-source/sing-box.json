@@ -2,10 +2,10 @@
 
 > 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的 Stable 和 Testing 分支。
 
-## 📦 最新版本狀態 (2026-04-09 20:19 UTC+8)
+## 📦 最新版本狀態 (2026-04-10 00:54 UTC+8)
 
 - ✨ 更新 **[reF1nd_Stable](https://github.com/reF1nd/sing-box/tree/reF1nd-stable)** 至 `v1.13.6-reF1nd`，發佈於 2026-04-09 [reF1nd_Stable v1.13.6-reF1nd]
-- ✨ 更新 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** 至 `v1.14.0-alpha.8-reF1nd`，發佈於 2026-04-01 [reF1nd_Testing v1.14.0-alpha.8-reF1nd]
+- ✨ 更新 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** 至 `v1.14.0-alpha.9-reF1nd`，發佈於 2026-04-09 [reF1nd_Testing v1.14.0-alpha.9-reF1nd]
 
 ---
 
@@ -13,12 +13,12 @@
 
 使用動態路由自動安裝最新版對應架構：
 ```bash
-bash <(curl -sSL [https://github.com/$](https://github.com/$){{ github.repository }}/releases/download/sing-box-stable/install-linux.sh)
+bash <(curl -sSL https://github.com/phpr-source/sing-box.json/releases/download/sing-box-stable/install-linux.sh)
 ```
 
 若要安裝 Testing 版本，請指定參數：
 ```bash
-bash <(curl -sSL [https://github.com/$](https://github.com/$){{ github.repository }}/releases/download/sing-box-testing/install-linux.sh) testing
+bash <(curl -sSL https://github.com/phpr-source/sing-box.json/releases/download/sing-box-testing/install-linux.sh) testing
 ```
 
 ## 📦 文件命名規則
