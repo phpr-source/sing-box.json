@@ -671,8 +671,11 @@ jobs:
       always() &&
       (needs.init.result == 'success' || needs.init.result == 'skipped') &&
       (needs.check.result == 'success' || needs.check.result == 'skipped') &&
-      needs.check.outputs.has_update == 'true' &&
-      (needs.build_core.result == 'success' || needs.build_core.result == 'partial_success' || needs.build_android.result == 'success' || needs.build_android.result == 'partial_success')
+      needs.check.outputs.has_update == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.check.outputs.matrix) }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -695,18 +698,28 @@ jobs:
         with:
           path: ./tmp/
 
-      - name: Process, Compress & Package
+      - name: Process, Compress & Package (${{ matrix.target.id }})
         run: |
           mkdir -p ./release_files
           
-          declare -A TARGET_VERSIONS
-          declare -A PLATFORM_FILES
+          target_id="${{ matrix.target.id }}"
+          ver="${{ matrix.target.ver }}"
+          
+          if [[ "$target_id" == *"Testing"* ]]; then
+            tag_name="sing-box-testing"
+            prerelease="true"
+            make_latest="false"
+            release_title="sing-box Testing Build"
+          else
+            tag_name="sing-box-stable"
+            prerelease="false"
+            make_latest="true"
+            release_title="sing-box Stable Build"
+          fi
           
           package_windows() {
             local dir="$1"
-            local target_id="$2"
-            local platform="$3"
-            local ver="$4"
+            local platform="$2"
             local bin_file=""
             
             if [ -f "$dir/sing-box.exe" ]; then
@@ -731,7 +744,7 @@ jobs:
               [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" . && ZIP_ARGS+=("LICENSE")
               [ -f "$dir/libcronet.dll" ] && cp "$dir/libcronet.dll" . && ZIP_ARGS+=("libcronet.dll")
               zip -q9 "release_files/${ZIP_NAME}" "${ZIP_ARGS[@]}"
-              PLATFORM_FILES["${target_id}|${platform}"]="${ZIP_NAME} (UPX)"
+              echo "PLATFORM_FILES[\"${target_id}|${platform}\"]=\"${ZIP_NAME} (UPX)\"" >> /tmp/platform_files.env
               
               cp "$bin_file" "sing-box-original.exe"
               ORIG_ZIP_NAME="sing-box-${target_id}-${platform}-${ver}-original.zip"
@@ -739,7 +752,7 @@ jobs:
               [ -f "LICENSE" ] && ORIG_ZIP_ARGS+=("LICENSE")
               [ -f "libcronet.dll" ] && ORIG_ZIP_ARGS+=("libcronet.dll")
               zip -q9 "release_files/${ORIG_ZIP_NAME}" "${ORIG_ZIP_ARGS[@]}"
-              PLATFORM_FILES["${target_id}|${platform}|orig"]="${ORIG_ZIP_NAME} (未压缩)"
+              echo "PLATFORM_FILES[\"${target_id}|${platform}|orig\"]=\"${ORIG_ZIP_NAME} (未压缩)\"" >> /tmp/platform_files.env
               
               rm -f "sing-box.exe" "sing-box-original.exe" "LICENSE" "libcronet.dll"
             fi
@@ -747,9 +760,7 @@ jobs:
           
           package_linux() {
             local dir="$1"
-            local target_id="$2"
-            local platform="$3"
-            local ver="$4"
+            local platform="$2"
             local bin_file=""
             
             if [ -f "$dir/sing-box" ]; then
@@ -775,7 +786,7 @@ jobs:
               [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" pkg_dir/
               TAR_NAME="sing-box-${target_id}-${platform}-${ver}.tar.gz"
               tar --no-same-owner -czf "release_files/${TAR_NAME}" -C pkg_dir .
-              PLATFORM_FILES["${target_id}|${platform}"]="${TAR_NAME} (UPX)"
+              echo "PLATFORM_FILES[\"${target_id}|${platform}\"]=\"${TAR_NAME} (UPX)\"" >> /tmp/platform_files.env
               rm -rf pkg_dir
               
               cp "$bin_file" "sing-box-original"
@@ -785,109 +796,101 @@ jobs:
               [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" pkg_orig_dir/
               ORIG_TAR_NAME="sing-box-${target_id}-${platform}-${ver}-original.tar.gz"
               tar --no-same-owner -czf "release_files/${ORIG_TAR_NAME}" -C pkg_orig_dir .
-              PLATFORM_FILES["${target_id}|${platform}|orig"]="${ORIG_TAR_NAME} (未压缩)"
+              echo "PLATFORM_FILES[\"${target_id}|${platform}|orig\"]=\"${ORIG_TAR_NAME} (未压缩)\"" >> /tmp/platform_files.env
               rm -rf pkg_orig_dir
               
               rm -f "sing-box" "sing-box-original"
             fi
           }
 
-          for dir in ./tmp/core-*; do
+          for dir in ./tmp/core-${target_id}-*; do
             if [[ -d "$dir" ]]; then
               if [ -f "$dir/artifact-meta.json" ]; then
-                target_id=$(jq -r '.target_id' "$dir/artifact-meta.json")
                 platform=$(jq -r '.platform' "$dir/artifact-meta.json")
-                ver=$(jq -r '.version_name' "$dir/artifact-meta.json")
-                TARGET_VERSIONS["$target_id"]="$ver"
-                
                 if [[ "$platform" == *"windows"* ]]; then
-                  package_windows "$dir" "$target_id" "$platform" "$ver" || true
+                  package_windows "$dir" "$platform" || true
                 else
-                  package_linux "$dir" "$target_id" "$platform" "$ver" || true
+                  package_linux "$dir" "$platform" || true
                 fi
               fi
             fi
           done
           
-          for dir in ./tmp/apk-*; do
-            if [[ -d "$dir" ]]; then
-              target_id=$(basename "$dir" | sed 's/^apk-//')
-              ver=""
-              for f in "$dir"/*-metadata.json; do
-                [ -f "$f" ] && ver=$(jq -r '.version_name' "$f") && break
-              done
-              TARGET_VERSIONS["$target_id"]="$ver"
-              
-              for apk in "$dir"/*.apk; do
-                [ -f "$apk" ] || continue
-                APK_NAME="SFA-${target_id}-${ver}.apk"
-                cp "$apk" "release_files/${APK_NAME}"
-                PLATFORM_FILES["${target_id}|android"]="${APK_NAME} (arm64-v8a)"
-              done
-              cp "$dir"/*-metadata.json release_files/ 2>/dev/null || true
-            fi
-          done
-
-          TARGETS_LIST=()
-          for target_id in "${!TARGET_VERSIONS[@]}"; do
-            TARGETS_LIST+=("{\"target_id\":\"$target_id\",\"version_name\":\"${TARGET_VERSIONS[$target_id]}\"}")
-          done
-          if [ ${#TARGETS_LIST[@]} -gt 0 ]; then
-            printf '%s\n' "${TARGETS_LIST[@]}" | jq -s --arg run_id "${{ github.run_id }}" --arg commit "${{ github.sha }}" --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
-              global_run_id: $run_id,
-              commit_sha: $commit,
-              built_at: $built_at,
-              targets: .
-            }' > release_files/build-info.json
-          else
-            echo "{}" > release_files/build-info.json
+          apk_dir="./tmp/apk-${target_id}"
+          if [[ -d "$apk_dir" ]]; then
+            for apk in "$apk_dir"/*.apk; do
+              [ -f "$apk" ] || continue
+              APK_NAME="SFA-${target_id}-${ver}.apk"
+              cp "$apk" "release_files/${APK_NAME}"
+              echo "PLATFORM_FILES[\"${target_id}|android\"]=\"${APK_NAME} (arm64-v8a)\"" >> /tmp/platform_files.env
+            done
+            cp "$apk_dir"/*-metadata.json release_files/ 2>/dev/null || true
           fi
 
-          cat > release_body.txt <<'BODYHEAD'
-          # 🚀 sing-box 自動編譯
+          jq -n --arg target_id "$target_id" --arg ver "$ver" --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
+            target_id: $target_id,
+            version_name: $ver,
+            built_at: $built_at
+          }' > release_files/build-info.json
 
+          source /tmp/platform_files.env
+          
+          cat > release_body.txt <<EOF
+          # 🚀 ${release_title}
+          
           > 🔒 此 Release 已通過 [GitHub Artifact Attestations](https://github.com/advanced-security/artifact-attestations) 驗證，防範供應鏈攻擊。
-          > ⚠️ **發佈狀態提示**：此 Release 同時包含 `stable` 和 `testing` 分支產物，請依需求選擇。
+          
+          ## 📦 ${target_id} (v${ver})
+          
+          <details>
+          <summary><b>📥 點擊展開下載列表</b></summary>
+          <br>
+          
+          | 平台 / 架構 | 文件名 | 說明 |
+          |-------------|--------|------|
+          EOF
 
-          BODYHEAD
-
-          for target_id in $(printf "%s\n" "${!TARGET_VERSIONS[@]}" | sort); do
-            ver="${TARGET_VERSIONS[$target_id]}"
-            echo "## 📦 ${target_id} (v${ver})" >> release_body.txt
-            echo "" >> release_body.txt
-            echo "| 平台 / 架構 | 文件名 | 說明 |" >> release_body.txt
-            echo "|-------------|--------|------|" >> release_body.txt
-            
-            for key in "${!PLATFORM_FILES[@]}"; do
-              IFS='|' read -r tid plat extra <<< "$key"
-              if [ "$tid" != "$target_id" ]; then continue; fi
-              file_info="${PLATFORM_FILES[$key]}"
-              file_name="${file_info%% (*}"
-              file_desc="${file_info#*\(}"
-              file_desc="${file_desc%)}"
-              plat_display="$plat"
-              [[ "$plat" == "linux-"* ]] && plat_display="Linux ${plat#linux-}"
-              [[ "$plat" == "windows-"* ]] && plat_display="Windows ${plat#windows-}"
-              [[ "$plat" == "android" ]] && plat_display="Android"
-              echo "| ${plat_display} | \`${file_name}\` | ${file_desc} |" >> release_body.txt
-            done
-            echo "" >> release_body.txt
+          for key in "${!PLATFORM_FILES[@]}"; do
+            IFS='|' read -r tid plat extra <<< "$key"
+            if [ "$tid" != "$target_id" ]; then continue; fi
+            file_info="${PLATFORM_FILES[$key]}"
+            file_name="${file_info%% (*}"
+            file_desc="${file_info#*\(}"
+            file_desc="${file_desc%)}"
+            plat_display="$plat"
+            [[ "$plat" == "linux-"* ]] && plat_display="Linux ${plat#linux-}"
+            [[ "$plat" == "windows-"* ]] && plat_display="Windows ${plat#windows-}"
+            [[ "$plat" == "android" ]] && plat_display="Android"
+            echo "| ${plat_display} | \`${file_name}\` | ${file_desc} |" >> release_body.txt
           done
-
-          cat >> release_body.txt <<'BODYFOOT'
+          
+          cat >> release_body.txt <<EOF
+          
+          </details>
+          
           ---
           ### 📜 歷史更新摘要
-          BODYFOOT
+          EOF
+          
           gh release list --repo "${{ github.repository }}" --limit 3 --json tagName,name,publishedAt --jq '.[] | "- \(.publishedAt[0:10]) \(.tagName): \(.name)"' >> release_body.txt || echo "- 暫無歷史記錄" >> release_body.txt
 
-      - name: Generate install scripts
+          echo "TAG_NAME=${tag_name}" >> $GITHUB_ENV
+          echo "PRERELEASE=${prerelease}" >> $GITHUB_ENV
+          echo "MAKE_LATEST=${make_latest}" >> $GITHUB_ENV
+
+      - name: Generate install script (${{ matrix.target.id }})
         run: |
           cat > release_files/install-linux.sh << 'EOF'
           #!/bin/bash
           set -euo pipefail
           if [ "$(id -u)" -ne 0 ]; then SUDO_CMD="sudo"; else SUDO_CMD=""; fi
           REPO="${{ github.repository }}"
-          TAG="sing-box"
+          TAG="${1:-stable}"
+          if [ "$TAG" = "testing" ]; then
+            TAG="sing-box-testing"
+          else
+            TAG="sing-box-stable"
+          fi
           ARCH=$(uname -m)
           case "$ARCH" in
             x86_64|amd64) FILE_ARCH="amd64-v3" ;;
@@ -897,7 +900,7 @@ jobs:
             mips*) FILE_ARCH="mips" ;;
             *) echo "Unsupported arch: $ARCH"; exit 1 ;;
           esac
-          echo "Fetching latest release for $FILE_ARCH..."
+          echo "Fetching latest release for $FILE_ARCH (tag: $TAG)..."
           
           ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | \
             jq -r --arg arch "$FILE_ARCH" '
@@ -946,15 +949,15 @@ jobs:
             exit 1
           fi
 
-      - name: Publish Release (Atomic Overwrite)
+      - name: Publish Release (${{ matrix.target.id }})
         if: steps.check_files.outputs.files_exist == 'true'
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          name: sing-box
-          tag_name: sing-box
-          make_latest: true
-          prerelease: true
+          name: ${{ matrix.target.id }}
+          tag_name: ${{ env.TAG_NAME }}
+          make_latest: ${{ env.MAKE_LATEST }}
+          prerelease: ${{ env.PRERELEASE }}
           body_path: release_body.txt
           files: ./release_files/*
           fail_on_unmatched_files: true
@@ -966,7 +969,7 @@ jobs:
           subject-path: './release_files/*'
 
       - name: Cleanup patches branch
-        if: always()
+        if: matrix.target.id == 'reF1nd_Stable'
         continue-on-error: true
         run: |
           git checkout --orphan temp_patches
@@ -983,7 +986,7 @@ jobs:
           git add build-info.json
           
           if ! git diff --cached --quiet; then
-            git commit -m "build: update release metadata" || true
+            git commit -m "build: update release metadata for ${{ matrix.target.id }}" || true
             git branch -M release-info
             git push origin release-info --force 2>/dev/null || true
           fi
@@ -1245,7 +1248,12 @@ jobs:
           
           使用動態路由自動安裝最新版對應架構：
           \`\`\`bash
-          bash <(curl -sSL [https://github.com/$](https://github.com/$){{ github.repository }}/releases/download/sing-box/install-linux.sh)
+          bash <(curl -sSL [https://github.com/$](https://github.com/$){{ github.repository }}/releases/download/sing-box-stable/install-linux.sh)
+          \`\`\`
+          
+          若要安裝 Testing 版本，請指定參數：
+          \`\`\`bash
+          bash <(curl -sSL [https://github.com/$](https://github.com/$){{ github.repository }}/releases/download/sing-box-testing/install-linux.sh) testing
           \`\`\`
           
           ## 📦 文件命名規則
@@ -1256,16 +1264,16 @@ jobs:
           
           ## 🛠️ 支持的版本與特性
           
-          | 版本 | 分支 | 平台支持 |
-          |------|------|---------|
-          | reF1nd Stable | reF1nd-stable | Linux/Windows/Android |
-          | reF1nd Testing | reF1nd-testing | Linux/Windows/Android |
+          | 版本 | 分支 | 平台支持 | Release 標籤 |
+          |------|------|---------|-------------|
+          | reF1nd Stable | reF1nd-stable | Linux/Windows/Android | \`sing-box-stable\` (Latest) |
+          | reF1nd Testing | reF1nd-testing | Linux/Windows/Android | \`sing-box-testing\` (Pre-release) |
           
           ## 🔔 Telegram 通知配置
           若需啟用 Telegram 推送，請在倉庫 Secrets 中配置：
           - \`TELEGRAM_BOT_TOKEN\`, \`CHAT_ID\`, \`API_ID\`, \`API_HASH\`
           
-          [🔗 前往 Releases 下載](https://github.com/${{ github.repository }}/releases/tag/sing-box)
+          [🔗 前往 Releases 下載](https://github.com/${{ github.repository }}/releases)
           
           ![Build Status](https://img.shields.io/github/actions/workflow/status/${{ github.repository }}/build-sing-box.yml?branch=${{ github.ref_name }})
           EOF
