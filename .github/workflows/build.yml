@@ -1248,12 +1248,12 @@ jobs:
 
           使用動態路由自動安裝最新版對應架構：
           \`\`\`bash
-          bash <(curl -sSL https://github.com/${{ github.repository }}/releases/download/sing-box-stable/install-linux.sh)
+          bash <(curl -sSL [https://github.com/$](https://github.com/$){{ github.repository }}/releases/download/sing-box-stable/install-linux.sh)
           \`\`\`
 
           若要安裝 Testing 版本，請指定參數：
           \`\`\`bash
-          bash <(curl -sSL https://github.com/${{ github.repository }}/releases/download/sing-box-testing/install-linux.sh) testing
+          bash <(curl -sSL [https://github.com/$](https://github.com/$){{ github.repository }}/releases/download/sing-box-testing/install-linux.sh) testing
           \`\`\`
 
           ## 📦 文件命名規則
