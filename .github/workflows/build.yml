@@ -659,6 +659,11 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Configure Git User
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Setup UPX
         uses: crazy-max/ghaction-upx@v4
         with:
@@ -973,8 +978,6 @@ jobs:
       - name: Update release-info branch
         if: always()
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout --orphan release-info-temp
           git rm -rf . 2>/dev/null || true
           cp release_files/build-info.json ./ 2>/dev/null || echo "{}" > build-info.json
@@ -989,8 +992,6 @@ jobs:
       - name: Update build-artifacts branch
         if: always()
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout --orphan build-artifacts-temp
           git rm -rf . 2>/dev/null || true
           
