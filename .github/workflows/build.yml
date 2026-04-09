@@ -169,11 +169,11 @@ jobs:
             if [ -n "$OVERRIDE_VERSION" ]; then
               ver="${OVERRIDE_VERSION}"
               time="$(TZ=Asia/Shanghai date '+%Y-%m-%d')"
-              commit_msg="Manual override"
+              commit_msg="Manual override build"
             elif [ "$SKIP_CHECK" = "true" ]; then
               ver="unknown"
               time="$(TZ=Asia/Shanghai date '+%Y-%m-%d')"
-              commit_msg="Version check skipped"
+              commit_msg="Manual build (version check skipped)"
             else
               local tag_data=$(api_call_with_retry "https://api.github.com/repos/$repo/tags")
               if [[ "$branch" == *"testing"* ]]; then
@@ -190,8 +190,8 @@ jobs:
               if [ -n "$ver" ] && [ "$ver" != "null" ]; then
                 local commit_info=$(api_call_with_retry "https://api.github.com/repos/$repo/commits/$branch")
                 local commit_date=$(echo "$commit_info" | jq -r '.commit.committer.date // empty' 2>/dev/null || echo "")
-                commit_msg=$(echo "$commit_info" | jq -r '.commit.message // empty' 2>/dev/null | head -n 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                [ -z "$commit_msg" ] && commit_msg="No commit message"
+                commit_msg=$(echo "$commit_info" | jq -r '.commit.message // empty' 2>/dev/null | head -n 1 | tr -d '\n\r"' | sed 's/"/\\"/g')
+                [ -z "$commit_msg" ] && commit_msg="Routine update"
                 if [ -n "$commit_date" ] && [ "$commit_date" != "null" ]; then
                   time=$(TZ=Asia/Shanghai date -d "$commit_date" '+%Y-%m-%d' 2>/dev/null || TZ=Asia/Shanghai date '+%Y-%m-%d')
                 else
@@ -221,11 +221,11 @@ jobs:
 
             if [ "$FORCE_BUILD" = "true" ] || [ -n "$OVERRIDE_VERSION" ] || [ -n "$TARGET_FILTER" ] || [ "$SKIP_CHECK" = "true" ]; then
               echo "true" > /tmp/has_update_flag
-              echo "- 🔄 Forced build **[$display_name]($branch_url)** \`v$ver\` ($time) $marker" >> release_notes.txt
+              echo "- 🔄 強制構建 **[$display_name]($branch_url)** \`v$ver\` ($time) $marker" >> release_notes.txt
               jq -n -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" --arg commit_msg "$commit_msg" '{id:$id, repo:$repo, branch:$branch, sfa_repo:$sfa_repo, sfa_branch:$sfa_branch, ver:$ver, time:$time, commit_msg:$commit_msg}' >> /tmp/matrix.jsonl
             elif [ "$LAST_VER" != "$ver" ] || [ -z "$LAST_VER" ]; then
               echo "true" > /tmp/has_update_flag
-              echo "- ✨ Updated **[$display_name]($branch_url)** to \`v$ver\` ($time) $marker" >> release_notes.txt
+              echo "- ✨ 更新 **[$display_name]($branch_url)** 至 \`v$ver\`，發佈於 $time $marker" >> release_notes.txt
               jq -n -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" --arg commit_msg "$commit_msg" '{id:$id, repo:$repo, branch:$branch, sfa_repo:$sfa_repo, sfa_branch:$sfa_branch, ver:$ver, time:$time, commit_msg:$commit_msg}' >> /tmp/matrix.jsonl
             fi
           }
@@ -235,7 +235,7 @@ jobs:
 
           sed -i '/^ *$/d' release_notes.txt
           if [ ! -s release_notes.txt ]; then
-            echo "- 📝 No version changes detected." > release_notes.txt
+            echo "- 📝 自動構建完成（無版本變更檢測）" > release_notes.txt
           fi
 
           VALIDATED_MATRIX=$(jq -s -c '[.[] | select(.ver != null and .ver != "" and .time != null and .time != "")]' /tmp/matrix.jsonl 2>/dev/null || echo "[]")
@@ -685,6 +685,11 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Configure Git User
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Setup UPX
         uses: crazy-max/ghaction-upx@v4
         with:
@@ -753,7 +758,7 @@ jobs:
               [ -f "LICENSE" ] && ORIG_ZIP_ARGS+=("LICENSE")
               [ -f "libcronet.dll" ] && ORIG_ZIP_ARGS+=("libcronet.dll")
               zip -q9 "release_files/${ORIG_ZIP_NAME}" "${ORIG_ZIP_ARGS[@]}"
-              echo "PLATFORM_FILES[\"${target_id}|${platform}|orig\"]=\"${ORIG_ZIP_NAME} (Uncompressed)\"" >> /tmp/platform_files.env
+              echo "PLATFORM_FILES[\"${target_id}|${platform}|orig\"]=\"${ORIG_ZIP_NAME} (未压缩)\"" >> /tmp/platform_files.env
 
               rm -f "sing-box.exe" "sing-box-original.exe" "LICENSE" "libcronet.dll"
             fi
@@ -797,7 +802,7 @@ jobs:
               [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" pkg_orig_dir/
               ORIG_TAR_NAME="sing-box-${target_id}-${platform}-${ver}-original.tar.gz"
               tar --no-same-owner -czf "release_files/${ORIG_TAR_NAME}" -C pkg_orig_dir .
-              echo "PLATFORM_FILES[\"${target_id}|${platform}|orig\"]=\"${ORIG_TAR_NAME} (Uncompressed)\"" >> /tmp/platform_files.env
+              echo "PLATFORM_FILES[\"${target_id}|${platform}|orig\"]=\"${ORIG_TAR_NAME} (未压缩)\"" >> /tmp/platform_files.env
               rm -rf pkg_orig_dir
 
               rm -f "sing-box" "sing-box-original"
@@ -834,27 +839,24 @@ jobs:
             built_at: $built_at
           }' > release_files/build-info.json
 
-          echo "${target_id}|${ver}" > /tmp/target_version.txt
-
           declare -A PLATFORM_FILES
           [ -f /tmp/platform_files.env ] && source /tmp/platform_files.env
 
           cat > release_body.txt <<EOF
           # 🚀 ${release_title}
 
-          > 🔒 This release has been attested via [GitHub Artifact Attestations](https://github.com/advanced-security/artifact-attestations).
+          > 🔒 此 Release 已通過 [GitHub Artifact Attestations](https://github.com/advanced-security/artifact-attestations) 驗證，防範供應鏈攻擊。
 
-          ## 📝 Changes
-          > \`${commit_msg}\`
+          ## 📝 更新內容
+          > ${commit_msg}
 
           ## 📦 ${target_id} (v${ver})
 
-          <details open>
-          <summary><b>📥 Download Assets</b></summary>
-          <br>
+          <details>
+          <summary><b>📥 點擊展開下載列表</b></summary>
 
-          | Platform / Arch | Filename | Notes |
-          |-----------------|----------|-------|
+          | 平台 / 架構 | 文件名 | 說明 |
+          |-------------|--------|------|
           EOF
 
           for key in "${!PLATFORM_FILES[@]}"; do
@@ -876,10 +878,10 @@ jobs:
           </details>
 
           ---
-          ### 📜 Release History
+          ### 📜 歷史更新摘要
           EOF
 
-          gh release list --repo "${{ github.repository }}" --limit 3 --json tagName,name,publishedAt --jq '.[] | "- \(.publishedAt[0:10]) \(.tagName): \(.name)"' >> release_body.txt || echo "- No history yet" >> release_body.txt
+          gh release list --repo "${{ github.repository }}" --limit 3 --json tagName,name,publishedAt --jq '.[] | "- \(.publishedAt[0:10]) \(.tagName): \(.name)"' >> release_body.txt || echo "- 暫無歷史記錄" >> release_body.txt
 
           echo "TAG_NAME=${tag_name}" >> $GITHUB_ENV
           echo "PRERELEASE=${prerelease}" >> $GITHUB_ENV
@@ -909,10 +911,11 @@ jobs:
           esac
           echo "Fetching latest release for $FILE_ARCH (tag: $TAG)..."
 
-          ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | \
-            jq -r --arg arch "$FILE_ARCH" '
-              [ .assets[] | select(.name | test($arch) and endswith(".tar.gz") and (contains("original") | not)) ] | first | .browser_download_url // empty
-            ')
+          ASSET_PATH=$(curl -sSL "https://github.com/$REPO/releases/expanded_assets/$TAG" | \
+            grep -oE "href=\"/$REPO/releases/download/[^\"]+\"" | \
+            grep "$FILE_ARCH" | grep "\.tar\.gz" | grep -v "original" | head -n 1 | \
+            cut -d '"' -f 2)
+          ASSET_URL="https://github.com${ASSET_PATH}"
 
           [ -z "$ASSET_URL" ] && { echo "❌ No release found for $FILE_ARCH"; exit 1; }
           echo "Downloading $ASSET_URL ..."
@@ -941,7 +944,7 @@ jobs:
           cat >> ../release_body.txt <<EOF
 
           ## 🔐 SHA256 Checksums
-          | Filename | SHA-256 |
+          | 文件名稱 | SHA-256 |
           |----------|---------|
           EOF
           cat SHA256SUMS_TABLE.md >> ../release_body.txt
@@ -975,169 +978,22 @@ jobs:
         with:
           subject-path: './release_files/*'
 
-      - name: Upload build-info for finalize
+      - name: Upload build-info for merge
+        if: steps.check_files.outputs.files_exist == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: build-info-${{ matrix.target.id }}
-          path: |
-            release_files/build-info.json
-            /tmp/target_version.txt
+          path: release_files/build-info.json
           retention-days: 1
-          compression-level: 0
 
-  finalize:
-    runs-on: ubuntu-latest
-    needs: [check, publish]
-    if: >-
-      always() &&
-      needs.check.result == 'success' &&
-      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
-
-      - name: Configure Git User
+      - name: Cleanup patches branch
+        if: matrix.target.id == 'reF1nd_Stable'
+        continue-on-error: true
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Clean temp dir
-        run: rm -rf ./metadata ./build-infos || true
-
-      - name: Download Metadata
-        uses: actions/download-artifact@v4
-        with:
-          name: workflow-metadata
-          path: ./metadata/
-
-      - name: Download all build-infos
-        uses: actions/download-artifact@v4
-        with:
-          pattern: build-info-*
-          path: ./build-infos/
-          merge-multiple: true
-
-      - name: Merge build-infos and update branches
-        run: |
-          TARGETS_LIST=()
-          for info_file in ./build-infos/build-info.json; do
-            [ -f "$info_file" ] || continue
-            TARGETS_LIST+=("$(jq -c '.' "$info_file")")
-          done
-
-          if [ ${#TARGETS_LIST[@]} -gt 0 ]; then
-            printf '%s\n' "${TARGETS_LIST[@]}" | jq -s --arg run_id "${{ github.run_id }}" --arg commit "${{ github.sha }}" --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
-              global_run_id: $run_id,
-              commit_sha: $commit,
-              built_at: $built_at,
-              targets: .
-            }' > merged-build-info.json
-          else
-            echo "{}" > merged-build-info.json
-          fi
-
           git checkout --orphan temp_patches
           git add -A
           git commit -m "chore: squash patches history [skip ci]" || true
-          git push -f origin temp_patches:patches 2>/dev/null || true
-
-          git checkout --orphan release-info-temp
-          git rm -rf . 2>/dev/null || true
-          cp merged-build-info.json build-info.json
-          git add build-info.json
-          if ! git diff --cached --quiet; then
-            git commit -m "build: update release metadata" || true
-            git branch -M release-info
-            git push origin release-info --force 2>/dev/null || true
-          fi
-
-          git checkout --orphan build-artifacts-temp
-          git rm -rf . 2>/dev/null || true
-          git checkout ${{ github.ref_name }} -- README.md LICENSE .github/workflows/ 2>/dev/null || true
-          echo "* text=auto" > .gitattributes
-          git add -A
-          if ! git diff --cached --quiet; then
-            git commit -m "build: update artifacts from successful workflow" || true
-            git branch -M build-artifacts
-            git push origin build-artifacts --force 2>/dev/null || true
-          fi
-
-      - name: Generate README
-        run: |
-          mkdir -p ./metadata
-          cat > README.md <<EOF
-          # 🚀 sing-box Automated Builds
-
-          > Automatically builds [reF1nd/sing-box](https://github.com/reF1nd/sing-box) Stable and Testing branches.
-
-          ## 📦 Latest Status ($(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M UTC+8'))
-
-          $(cat ./metadata/release_notes.txt 2>/dev/null || echo "No updates yet")
-
-          ---
-
-          ## 📥 Quick Install (Linux)
-
-          Install the latest stable build:
-          \`\`\`bash
-          bash <(curl -sSL https://github.com/${{ github.repository }}/releases/download/sing-box-stable/install-linux.sh)
-          \`\`\`
-
-          For the testing build:
-          \`\`\`bash
-          bash <(curl -sSL https://github.com/${{ github.repository }}/releases/download/sing-box-testing/install-linux.sh) testing
-          \`\`\`
-
-          ## 📦 File Naming
-
-          - **Default** (\`xxx.tar.gz\` / \`xxx.zip\`): UPX compressed (smaller)
-          - **Original** (\`xxx-original.tar.gz\` / \`xxx-original.zip\`): Uncompressed (better compatibility)
-          - MIPS/ARMv5/v6: Original only (UPX unsupported)
-
-          ## 🛠️ Supported Versions
-
-          | Version | Branch | Platforms | Release Tag |
-          |---------|--------|-----------|-------------|
-          | reF1nd Stable | reF1nd-stable | Linux/Windows/Android | \`sing-box-stable\` (Latest) |
-          | reF1nd Testing | reF1nd-testing | Linux/Windows/Android | \`sing-box-testing\` (Pre-release) |
-
-          ## 🔔 Telegram Notifications
-          Configure the following secrets to enable:
-          - \`TELEGRAM_BOT_TOKEN\`, \`CHAT_ID\`, \`API_ID\`, \`API_HASH\`
-
-          [🔗 Releases](https://github.com/${{ github.repository }}/releases)
-
-          ![Build Status](https://img.shields.io/github/actions/workflow/status/${{ github.repository }}/build-sing-box.yml?branch=${{ github.ref_name }})
-          EOF
-
-      - name: Commit and Push README
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const readme = fs.readFileSync('README.md', 'utf8');
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const path = 'README.md';
-            const branch = '${{ github.ref_name }}';
-
-            let sha;
-            try {
-              const { data } = await github.rest.repos.getContent({ owner, repo, path, ref: branch });
-              sha = data.sha;
-            } catch (e) {
-            }
-
-            await github.rest.repos.createOrUpdateFileContents({
-              owner, repo, path,
-              message: 'docs: update README with latest build info',
-              content: Buffer.from(readme).toString('base64'),
-              branch,
-              ...(sha && { sha }),
-              headers: { 'X-GitHub-Api-Version': '2022-11-28' }
-            });
+          git push -f origin temp_patches:patches
 
       - name: Clean old releases
         if: always()
@@ -1173,8 +1029,28 @@ jobs:
           CUTOFF_DATE=$(date -u -d "7 days ago" +%Y-%m-%dT%H:%M:%SZ)
           gh api "repos/${{ github.repository }}/actions/caches" --paginate -q ".actions_caches[] | select(.created_at < \"$CUTOFF_DATE\") | .id" | xargs -I {} gh api -X DELETE "repos/${{ github.repository }}/actions/caches/{}" || true
 
+      - name: Log Build Summary
+        if: always()
+        run: |
+          echo "### 📊 構建摘要" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 任務 | 執行狀態 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 核心編譯 | ${{ needs.build_core.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 客戶端編譯 | ${{ needs.build_android.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 發佈打包 | ${{ needs.publish.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "#### 📦 產物詳情" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 目標 | 版本 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|------|" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "release_files/build-info.json" ]; then
+            jq -r '.targets[]? | "| \(.target_id) | \(.version_name) |"' release_files/build-info.json >> "$GITHUB_STEP_SUMMARY" || true
+          else
+            echo "| N/A | N/A |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   create_issue_on_failure:
-    needs: [build_core, build_android, publish, finalize]
+    needs: [build_core, build_android, publish]
     if: failure() && (github.event_name == 'schedule' || github.event_name == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1187,11 +1063,11 @@ jobs:
           gh run view ${{ github.run_id }} --repo "${{ github.repository }}" --log-failed --exit-status 0 | tail -n 100 > /tmp/error.log || echo "Failed to fetch logs." > /tmp/error.log
 
           cat > issue_body.md <<EOF
-          Workflow \`${{ github.workflow }}\` failed.
+          構建在工作流 \`${{ github.workflow }}\` 中失敗。
 
-          [View full logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          [查看完整的 Actions 日誌](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
-          ### 🔍 Log tail (last 100 lines)
+          ### 🔍 錯誤日誌摘要 (Tail 100 lines)
           \`\`\`log
           EOF
           cat /tmp/error.log >> issue_body.md
@@ -1199,12 +1075,12 @@ jobs:
 
           gh issue create \
             --repo "${{ github.repository }}" \
-            --title "🔴 Scheduled build failed: sing-box" \
+            --title "🔴 定時構建失敗: sing-box" \
             --body-file issue_body.md \
             --label "bug" || true
 
   telegram_notify:
-    needs: [build_core, build_android, publish, finalize]
+    needs: [build_core, build_android, publish]
     runs-on: ubuntu-latest
     if: always() && (github.event.inputs.enable_telegram == 'true' || github.event_name == 'schedule')
     steps:
@@ -1214,12 +1090,11 @@ jobs:
           TG_STATUS="success"
           declare -a STATUS_LINES
 
-          for job in build_core build_android publish finalize; do
+          for job in build_core build_android publish; do
             RESULT=""
             if [ "$job" = "build_core" ]; then RESULT="${{ needs.build_core.result }}"
             elif [ "$job" = "build_android" ]; then RESULT="${{ needs.build_android.result }}"
             elif [ "$job" = "publish" ]; then RESULT="${{ needs.publish.result }}"
-            elif [ "$job" = "finalize" ]; then RESULT="${{ needs.finalize.result }}"
             fi
 
             case "$RESULT" in
@@ -1244,23 +1119,23 @@ jobs:
           REPO_SAFE=$(escape_tg_markdown "${{ github.repository }}")
 
           if [ "$TG_STATUS" = "failed" ]; then
-            MSG="❌ *sing\-box build failed*
+            MSG="❌ *sing\-box 自動編譯失敗*
 
-          *Job details:*
+          *構建詳情：*
           ${TG_DETAILS_SAFE}
 
-          *Actions:*
-          1\. Check the logs
-          2\. Verify API limits"
+          *建議操作：*
+          1\. 前往 Actions頁面查看日誌
+          2\. 檢查是否有 GitHub API限流"
           else
-            MSG="🚀 *sing\-box build completed*
+            MSG="🚀 *sing\-box 自動編譯完成*
 
-          New binaries and APKs have been published.
+          已檢測到代碼更新或觸發強制編譯，最新內核與 Android APK 已經打包完畢。
 
-          *Job details:*
+          *構建詳情：*
           ${TG_DETAILS_SAFE}
 
-          📥 [Download from GitHub](https://github\.com/${REPO_SAFE}/releases)"
+          📥 [點擊前往 GitHub下載](https://github\.com/${REPO_SAFE}/releases)"
           fi
 
           EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1 2>/dev/null || echo "EOM")
@@ -1321,3 +1196,135 @@ jobs:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+  update_readme:
+    needs: [check, publish]
+    runs-on: ubuntu-latest
+    if: >-
+      always() &&
+      needs.check.result == 'success' &&
+      needs.publish.result == 'success' &&
+      needs.check.outputs.has_update == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git User
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Clean temp dir
+        run: rm -rf ./metadata/* || true
+
+      - name: Download Metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: workflow-metadata
+          path: ./metadata/
+
+      - name: Download all build-info artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: build-info-*
+          path: ./build-info-temp/
+          merge-multiple: true
+
+      - name: Merge build-info and push to release-info branch
+        run: |
+          jq -s '.' ./build-info-temp/*.json > merged-build-info.json 2>/dev/null || echo "{}" > merged-build-info.json
+          git checkout --orphan release-info-temp
+          git rm -rf . 2>/dev/null || true
+          cp merged-build-info.json build-info.json
+          git add build-info.json
+          if ! git diff --cached --quiet; then
+            git commit -m "build: update release metadata for all targets"
+            git branch -M release-info
+            git push origin release-info --force
+          fi
+
+          git checkout --orphan build-artifacts-temp
+          git rm -rf . 2>/dev/null || true
+          git checkout ${{ github.ref_name }} -- README.md LICENSE .github/workflows/ 2>/dev/null || true
+          echo "* text=auto" > .gitattributes
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "build: update artifacts from successful workflow"
+            git branch -M build-artifacts
+            git push origin build-artifacts --force
+          fi
+
+      - name: Generate README
+        run: |
+          cat > README.md <<EOF
+          # 🚀 sing-box 自動編譯系統
+
+          > 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的 Stable 和 Testing 分支。
+
+          ## 📦 最新版本狀態 ($(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M UTC+8'))
+
+          $(cat ./metadata/release_notes.txt 2>/dev/null || echo "暫無更新記錄")
+
+          ---
+
+          ## 📥 快速安裝 (Linux)
+
+          使用動態路由自動安裝最新版對應架構：
+          \`\`\`bash
+          bash <(curl -sSL https://github.com/${{ github.repository }}/releases/download/sing-box-stable/install-linux.sh)
+          \`\`\`
+
+          若要安裝 Testing 版本，請指定參數：
+          \`\`\`bash
+          bash <(curl -sSL https://github.com/${{ github.repository }}/releases/download/sing-box-testing/install-linux.sh) testing
+          \`\`\`
+
+          ## 📦 文件命名規則
+
+          - **默認版本** (\`xxx.tar.gz\` / \`xxx.zip\`): UPX壓縮版（體積小）
+          - **原始版本** (\`xxx-original.tar.gz\` / \`xxx-original.zip\`): 未壓縮版（兼容性好）
+          - MIPS/ARMv5/v6: 僅提供原始版本（UPX不支持這些架構）
+
+          ## 🛠️ 支持的版本與特性
+
+          | 版本 | 分支 | 平台支持 | Release 標籤 |
+          |------|------|---------|-------------|
+          | reF1nd Stable | reF1nd-stable | Linux/Windows/Android | \`sing-box-stable\` (Latest) |
+          | reF1nd Testing | reF1nd-testing | Linux/Windows/Android | \`sing-box-testing\` (Pre-release) |
+
+          ## 🔔 Telegram 通知配置
+          若需啟用 Telegram 推送，請在倉庫 Secrets 中配置：
+          - \`TELEGRAM_BOT_TOKEN\`, \`CHAT_ID\`, \`API_ID\`, \`API_HASH\`
+
+          [🔗 前往 Releases 下載](https://github.com/${{ github.repository }}/releases)
+
+          ![Build Status](https://img.shields.io/github/actions/workflow/status/${{ github.repository }}/build-sing-box.yml?branch=${{ github.ref_name }})
+          EOF
+
+      - name: Commit and Push README
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const readme = fs.readFileSync('README.md', 'utf8');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const path = 'README.md';
+            const branch = '${{ github.ref_name }}';
+
+            let sha;
+            try {
+              const { data } = await github.rest.repos.getContent({ owner, repo, path, ref: branch });
+              sha = data.sha;
+            } catch (e) {
+            }
+
+            await github.rest.repos.createOrUpdateFileContents({
+              owner, repo, path,
+              message: 'docs: update README with latest build info',
+              content: Buffer.from(readme).toString('base64'),
+              branch,
+              ...(sha && { sha }),
+              headers: { 'X-GitHub-Api-Version': '2022-11-28' }
+            });
