@@ -164,16 +164,14 @@ jobs:
               return 0
             fi
 
-            local ver="" time="" commit_msg=""
+            local ver="" time=""
 
             if [ -n "$OVERRIDE_VERSION" ]; then
               ver="${OVERRIDE_VERSION}"
               time="$(TZ=Asia/Shanghai date '+%Y-%m-%d')"
-              commit_msg="Manual override build"
             elif [ "$SKIP_CHECK" = "true" ]; then
               ver="unknown"
               time="$(TZ=Asia/Shanghai date '+%Y-%m-%d')"
-              commit_msg="Manual build (version check skipped)"
             else
               local tag_data=$(api_call_with_retry "https://api.github.com/repos/$repo/tags")
               if [[ "$branch" == *"testing"* ]]; then
@@ -188,10 +186,7 @@ jobs:
               fi
 
               if [ -n "$ver" ] && [ "$ver" != "null" ]; then
-                local commit_info=$(api_call_with_retry "https://api.github.com/repos/$repo/commits/$branch")
-                local commit_date=$(echo "$commit_info" | jq -r '.commit.committer.date // empty' 2>/dev/null || echo "")
-                commit_msg=$(echo "$commit_info" | jq -r '.commit.message // empty' 2>/dev/null | head -n 1 | tr -d '\n\r"' | sed 's/"/\\"/g')
-                [ -z "$commit_msg" ] && commit_msg="Routine update"
+                local commit_date=$(api_call_with_retry "https://api.github.com/repos/$repo/commits/$branch" | jq -r '.commit.committer.date // empty' 2>/dev/null || echo "")
                 if [ -n "$commit_date" ] && [ "$commit_date" != "null" ]; then
                   time=$(TZ=Asia/Shanghai date -d "$commit_date" '+%Y-%m-%d' 2>/dev/null || TZ=Asia/Shanghai date '+%Y-%m-%d')
                 else
@@ -222,11 +217,11 @@ jobs:
             if [ "$FORCE_BUILD" = "true" ] || [ -n "$OVERRIDE_VERSION" ] || [ -n "$TARGET_FILTER" ] || [ "$SKIP_CHECK" = "true" ]; then
               echo "true" > /tmp/has_update_flag
               echo "- 🔄 強制構建 **[$display_name]($branch_url)** \`v$ver\` ($time) $marker" >> release_notes.txt
-              jq -n -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" --arg commit_msg "$commit_msg" '{id:$id, repo:$repo, branch:$branch, sfa_repo:$sfa_repo, sfa_branch:$sfa_branch, ver:$ver, time:$time, commit_msg:$commit_msg}' >> /tmp/matrix.jsonl
+              jq -n -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" '{id:$id, repo:$repo, branch:$branch, sfa_repo:$sfa_repo, sfa_branch:$sfa_branch, ver:$ver, time:$time}' >> /tmp/matrix.jsonl
             elif [ "$LAST_VER" != "$ver" ] || [ -z "$LAST_VER" ]; then
               echo "true" > /tmp/has_update_flag
               echo "- ✨ 更新 **[$display_name]($branch_url)** 至 \`v$ver\`，發佈於 $time $marker" >> release_notes.txt
-              jq -n -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" --arg commit_msg "$commit_msg" '{id:$id, repo:$repo, branch:$branch, sfa_repo:$sfa_repo, sfa_branch:$sfa_branch, ver:$ver, time:$time, commit_msg:$commit_msg}' >> /tmp/matrix.jsonl
+              jq -n -c --arg id "$id" --arg repo "$repo" --arg branch "$branch" --arg sfa_repo "$sfa_repo" --arg sfa_branch "$sfa_branch" --arg ver "$ver" --arg time "$time" '{id:$id, repo:$repo, branch:$branch, sfa_repo:$sfa_repo, sfa_branch:$sfa_branch, ver:$ver, time:$time}' >> /tmp/matrix.jsonl
             fi
           }
 
@@ -709,7 +704,6 @@ jobs:
 
           target_id="${{ matrix.target.id }}"
           ver="${{ matrix.target.ver }}"
-          commit_msg="${{ matrix.target.commit_msg }}"
 
           if [[ "$target_id" == *"Testing"* ]]; then
             tag_name="sing-box-testing"
@@ -847,9 +841,6 @@ jobs:
 
           > 🔒 此 Release 已通過 [GitHub Artifact Attestations](https://github.com/advanced-security/artifact-attestations) 驗證，防範供應鏈攻擊。
 
-          ## 📝 更新內容
-          > ${commit_msg}
-
           ## 📦 ${target_id} (v${ver})
 
           <details>
@@ -911,11 +902,10 @@ jobs:
           esac
           echo "Fetching latest release for $FILE_ARCH (tag: $TAG)..."
 
-          ASSET_PATH=$(curl -sSL "https://github.com/$REPO/releases/expanded_assets/$TAG" | \
-            grep -oE "href=\"/$REPO/releases/download/[^\"]+\"" | \
-            grep "$FILE_ARCH" | grep "\.tar\.gz" | grep -v "original" | head -n 1 | \
-            cut -d '"' -f 2)
-          ASSET_URL="https://github.com${ASSET_PATH}"
+          ASSET_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | \
+            jq -r --arg arch "$FILE_ARCH" '
+              [ .assets[] | select(.name | test($arch) and endswith(".tar.gz") and (contains("original") | not)) ] | first | .browser_download_url // empty
+            ')
 
           [ -z "$ASSET_URL" ] && { echo "❌ No release found for $FILE_ARCH"; exit 1; }
           echo "Downloading $ASSET_URL ..."
@@ -978,14 +968,6 @@ jobs:
         with:
           subject-path: './release_files/*'
 
-      - name: Upload build-info for merge
-        if: steps.check_files.outputs.files_exist == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-info-${{ matrix.target.id }}
-          path: release_files/build-info.json
-          retention-days: 1
-
       - name: Cleanup patches branch
         if: matrix.target.id == 'reF1nd_Stable'
         continue-on-error: true
@@ -994,6 +976,36 @@ jobs:
           git add -A
           git commit -m "chore: squash patches history [skip ci]" || true
           git push -f origin temp_patches:patches
+
+      - name: Update release-info branch
+        if: always()
+        run: |
+          git checkout --orphan release-info-temp
+          git rm -rf . 2>/dev/null || true
+          cp release_files/build-info.json ./ 2>/dev/null || echo "{}" > build-info.json
+          git add build-info.json
+
+          if ! git diff --cached --quiet; then
+            git commit -m "build: update release metadata for ${{ matrix.target.id }}" || true
+            git branch -M release-info
+            git push origin release-info --force 2>/dev/null || true
+          fi
+
+      - name: Update build-artifacts branch
+        if: always()
+        run: |
+          git checkout --orphan build-artifacts-temp
+          git rm -rf . 2>/dev/null || true
+
+          git checkout ${{ github.ref_name }} -- README.md LICENSE .github/workflows/ 2>/dev/null || true
+          echo "* text=auto" > .gitattributes
+
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "build: update artifacts from successful workflow" || true
+            git branch -M build-artifacts
+            git push origin build-artifacts --force 2>/dev/null || true
+          fi
 
       - name: Clean old releases
         if: always()
@@ -1210,11 +1222,6 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configure Git User
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
       - name: Clean temp dir
         run: rm -rf ./metadata/* || true
 
@@ -1223,37 +1230,6 @@ jobs:
         with:
           name: workflow-metadata
           path: ./metadata/
-
-      - name: Download all build-info artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: build-info-*
-          path: ./build-info-temp/
-          merge-multiple: true
-
-      - name: Merge build-info and push to release-info branch
-        run: |
-          jq -s '.' ./build-info-temp/*.json > merged-build-info.json 2>/dev/null || echo "{}" > merged-build-info.json
-          git checkout --orphan release-info-temp
-          git rm -rf . 2>/dev/null || true
-          cp merged-build-info.json build-info.json
-          git add build-info.json
-          if ! git diff --cached --quiet; then
-            git commit -m "build: update release metadata for all targets"
-            git branch -M release-info
-            git push origin release-info --force
-          fi
-
-          git checkout --orphan build-artifacts-temp
-          git rm -rf . 2>/dev/null || true
-          git checkout ${{ github.ref_name }} -- README.md LICENSE .github/workflows/ 2>/dev/null || true
-          echo "* text=auto" > .gitattributes
-          git add -A
-          if ! git diff --cached --quiet; then
-            git commit -m "build: update artifacts from successful workflow"
-            git branch -M build-artifacts
-            git push origin build-artifacts --force
-          fi
 
       - name: Generate README
         run: |
