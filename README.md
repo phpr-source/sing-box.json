@@ -1,11 +1,12 @@
 # 🚀 sing-box 自動編譯系統
 
-> 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的 Stable 和 Testing 分支。
+> 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 和 [PuerNya/sing-box](https://github.com/PuerNya/sing-box)
 
-## 📦 最新版本狀態 (2026-04-09 13:09 UTC+8)
+## 📦 最新版本狀態 (2026-04-09 15:29 UTC+8)
 
 - ✨ 更新 **[reF1nd_Stable](https://github.com/reF1nd/sing-box/tree/reF1nd-stable)** 至 `v1.13.5-reF1nd`，發佈於 2026-04-01 [reF1nd_Stable v1.13.5-reF1nd]
 - ✨ 更新 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** 至 `v1.14.0-alpha.8-reF1nd`，發佈於 2026-04-01 [reF1nd_Testing v1.14.0-alpha.8-reF1nd]
+- ✨ 更新 **[PuerNya_Building](https://github.com/PuerNya/sing-box/tree/building)** 至 `v1.10.0-alpha.29-067c81a7`，發佈於 2024-08-16 [PuerNya_Building v1.10.0-alpha.29-067c81a7]
 
 ---
 
@@ -28,6 +29,7 @@ bash <(curl -sSL [https://github.com/$](https://github.com/$){{ github.repositor
 |------|------|---------|
 | reF1nd Stable | reF1nd-stable | Linux/Windows/Android |
 | reF1nd Testing | reF1nd-testing | Linux/Windows/Android |
+| PuerNya Building | building | Linux/Windows |
 
 ## 🔔 Telegram 通知配置
 若需啟用 Telegram 推送，請在倉庫 Secrets 中配置：
