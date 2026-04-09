@@ -1,0 +1,2 @@
+- ✨ 更新 **[reF1nd_Stable](https://github.com/reF1nd/sing-box/tree/reF1nd-stable)** 至 `v1.13.6-reF1nd`，發佈於 2026-04-09 [reF1nd_Stable v1.13.6-reF1nd]
+- ✨ 更新 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** 至 `v1.14.0-alpha.8-reF1nd`，發佈於 2026-04-09 [reF1nd_Testing v1.14.0-alpha.8-reF1nd]

@@ -1,0 +1,45 @@
+name: Advanced Cleanup
+
+on:
+  schedule:
+    - cron: '0 2 * * 0' # 每週日執行
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  cleanup-workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          retain_days: 7
+          keep_minimum_runs: 3
+          delete_workflow_pattern: "Build sing-box reFind"
+
+  cleanup-releases:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Delete Prereleases older than 30 days (Uncapped)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          while true; do
+            OLD_RELEASES=$(gh release list --limit 100 --exclude-drafts --repo ${{ github.repository }} --json tagName,publishedAt,isPrerelease --jq '.[] | select(.isPrerelease == true and (.publishedAt | fromdateiso8601) < (now - 2592000)) | .tagName')
+            if [ -z "$OLD_RELEASES" ]; then
+              echo "No more old prereleases found."
+              break
+            fi
+            for TAG in $OLD_RELEASES; do
+              echo "Deleting release $TAG..."
+              gh release delete "$TAG" --cleanup-tag -y
+            done
+          done

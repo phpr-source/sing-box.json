@@ -1,0 +1,55 @@
+name: Custom Rule Merge
+
+on:
+  workflow_run:
+    workflows: ["Update All Rules (Geosite & GeoIP)"]
+    types:
+      - completed
+  workflow_dispatch:
+
+jobs:
+  merge:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests urllib3 orjson msgpack blake3 z3-solver
+          wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
+          chmod +x sb-core
+
+      - name: Clean Old Merged Rules
+        run: |
+          mkdir -p rules/merged-json rules/merged-srs
+          rm -f rules/merged-json/*
+          rm -f rules/merged-srs/*
+
+      - name: Run Custom Merge
+        env:
+          SB_CORE_PATH: ./sb-core
+        run: python scripts/merge_custom.py
+
+      - name: Commit and Push
+        run: |
+          rm -f sb-core
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add .
+          if git diff --staged --quiet; then
+            echo "No changes"
+          else
+            git commit -m "Update Custom Merged Rules (Hybrid V4) $(date +'%Y-%m-%d')"
+            git pull --rebase origin main
+            git push origin main
+          fi

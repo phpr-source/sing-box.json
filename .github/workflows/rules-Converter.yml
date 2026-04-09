@@ -1,0 +1,73 @@
+name: Update All Rules (Geosite & GeoIP)
+
+on:
+  schedule:
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+
+env:
+  FORMAT_VER: 4
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install Tools
+        run: |
+          go install github.com/runetfreedom/geodat2srs@latest
+          cp $(go env GOPATH)/bin/geodat2srs .
+          wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
+          chmod +x geodat2srs sb-core
+
+      - name: Download & Process
+        run: |
+          mkdir -p temp rules/geosite-srs rules/geosite-json rules/geoip-srs rules/geoip-json
+          rm -f rules/geosite-srs/* rules/geosite-json/*
+          rm -f rules/geoip-srs/* rules/geoip-json/*
+
+          wget -q -O temp/geosite.dat https://github.com/elysias123/geosite/releases/latest/download/geosite.dat
+          wget -q -O temp/geoip.dat https://github.com/elysias123/geosite/releases/latest/download/geoip.dat
+
+          WANTED_IP="cn cloudflare cloudfront facebook fastly google netflix telegram twitter"
+
+          ./geodat2srs geosite -i temp/geosite.dat -o temp_site --prefix ""
+          for f in temp_site/*.srs; do
+            rule=$(basename "$f" .srs)
+            ./sb-core rule-set decompile --output temp.json "$f"
+            jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geosite-json/$rule.json"
+            ./sb-core rule-set compile --output "rules/geosite-srs/$rule.srs" "rules/geosite-json/$rule.json"
+          done
+
+          ./geodat2srs geoip -i temp/geoip.dat -o temp_ip --prefix ""
+          for rule in $WANTED_IP; do
+            if [ -f "temp_ip/$rule.srs" ]; then
+              ./sb-core rule-set decompile --output temp.json "temp_ip/$rule.srs"
+              jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geoip-json/$rule.json"
+              ./sb-core rule-set compile --output "rules/geoip-srs/$rule.srs" "rules/geoip-json/$rule.json"
+            fi
+          done
+          rm -rf temp temp_site temp_ip temp.json
+
+      - name: Commit and Push
+        run: |
+          rm -f geodat2srs sb-core
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add .
+          if git diff --staged --quiet; then
+            echo "No changes"
+          else
+            git commit -m "Auto-update: Base Rules (Format V4) $(date +'%Y-%m-%d')"
+            git pull --rebase origin main
+            git push origin main
+          fi
