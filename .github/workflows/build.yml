@@ -64,7 +64,7 @@ permissions:
 
 env:
   TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard"
-  TAGS_ANDROID_EXTRA: "with_conntrack"
+  TAGS_ANDROID_EXTRA: "with_conntrack,with_naive_outbound"
   CURL_TIMEOUT_API: 60
   CURL_TIMEOUT_FILE: 120
 
@@ -551,7 +551,7 @@ jobs:
           echo "::notice::Skipping Android build for ${{ matrix.target.id }} (no client configured)"
           exit 0
 
-      - name: Checkout Core (Ensure sync with Tag)
+      - name: Checkout Core
         if: matrix.target.sfa_repo != 'none'
         uses: actions/checkout@v4
         with:
@@ -1178,8 +1178,6 @@ jobs:
       - name: Update release-info branch
         run: |
           git checkout --orphan release-info-temp
-          git rm -rfq . || true
-          git clean -fdx || true
           git add build-info.json
 
           if ! git diff --cached --quiet; then
@@ -1570,7 +1568,6 @@ jobs:
           ### 🔍 錯誤日誌摘要 (Tail 100 lines)
           \`\`\`log
           EOF
-          sed -i 's/^[ \t]*//' issue_body.md
           cat /tmp/error.log >> issue_body.md
           echo '```' >> issue_body.md
 
