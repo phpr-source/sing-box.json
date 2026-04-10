@@ -418,7 +418,7 @@ jobs:
           fi
 
       - name: Cache Chromium toolchain
-        if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true'
+        if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
         uses: actions/cache@v4
         with:
           path: |
@@ -448,7 +448,7 @@ jobs:
           echo "CXX=ccache g++" >> "$GITHUB_ENV"
 
       - name: Setup cronet-go
-        if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true'
+        if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && (matrix.platform.goos == 'linux' || matrix.platform.goos == 'windows')
         timeout-minutes: 25
         run: |
           set -euo pipefail
@@ -719,16 +719,6 @@ jobs:
         with:
           build-root-directory: sing-box-for-android
           cache-read-only: false
-
-      - name: Configure Gradle Properties
-        if: matrix.target.sfa_repo != 'none'
-        run: |
-          mkdir -p ~/.gradle
-          cat >> ~/.gradle/gradle.properties <<'EOF'
-          org.gradle.caching=true
-          org.gradle.parallel=true
-          org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
-          EOF
 
       - name: Setup OpenJDK
         if: matrix.target.sfa_repo != 'none'
