@@ -2,7 +2,7 @@
 
 > 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的 Stable 和 Testing 分支。
 
-## 📦 最新版本狀態 (2026-04-10 18:16 UTC+8)
+## 📦 最新版本狀態 (2026-04-11 02:13 UTC+8)
 
 暫無更新記錄
 
@@ -22,8 +22,8 @@ bash <(curl -sSL https://github.com/phpr-source/sing-box.json/releases/download/
 
 ## 📦 文件命名規則
 
-- **默認版本** (`xxx.tar.gz` / `xxx.zip`): UPX壓縮版（體積小）
-- **原始版本** (`xxx-original.tar.gz` / `xxx-original.zip`): 未壓縮版（兼容性好）
+- **打包版本** (`xxx.tar.gz` / `xxx.zip`): 包含 LICENSE 的標準發行版
+- **獨立二進制** (`xxx.upx` / `xxx`): 可直接替換執行檔，方便軟路由使用
 
 ## 🛠️ 支持的版本與特性
 
