@@ -64,7 +64,7 @@ permissions:
 
 env:
   TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard"
-  TAGS_SFA_EXTRA: "ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird,with_naive_outbound"
+  TAGS_ANDROID_EXTRA: "with_conntrack"
   CURL_TIMEOUT_API: 60
   CURL_TIMEOUT_FILE: 120
 
@@ -87,7 +87,7 @@ jobs:
           CODE=$(( ($(date +%s) / 60) + ${{ github.run_number }} ))
           echo "code=$CODE" >> $GITHUB_OUTPUT
 
-      - name: Get Go version
+      - name: Get Go latest version
         id: go
         run: |
           VERSION=$(curl -m ${CURL_TIMEOUT_API} -sL https://go.dev/VERSION?m=text | head -n 1 | sed 's/go//')
@@ -274,19 +274,15 @@ jobs:
       matrix:
         target: ${{ fromJson(needs.check.outputs.matrix) }}
         platform:
-          - { name: linux-amd64-v1, goos: linux, goarch: amd64, goamd64: v1, upx: true }
           - { name: linux-amd64-v3, goos: linux, goarch: amd64, goamd64: v3, upx: true }
-          - { name: linux-armv5, goos: linux, goarch: arm, goarm: 5, upx: false }
-          - { name: linux-armv6, goos: linux, goarch: arm, goarm: 6, upx: false }
-          - { name: linux-armv7, goos: linux, goarch: arm, goarm: 7, upx: true }
           - { name: linux-arm64, goos: linux, goarch: arm64, upx: true }
-          - { name: linux-mips-softfloat, goos: linux, goarch: mips, gomips: softfloat, upx: false }
-          - { name: linux-mipsle-softfloat, goos: linux, goarch: mipsle, gomips: softfloat, upx: false }
-          - { name: linux-mipsle-hardfloat, goos: linux, goarch: mipsle, gomips: hardfloat, upx: false }
-          - { name: windows-amd64-v1, goos: windows, goarch: amd64, goamd64: v1, upx: false }
+          - { name: linux-armv7, goos: linux, goarch: arm, goarm: 7, upx: true }
           - { name: windows-amd64-v3, goos: windows, goarch: amd64, goamd64: v3, upx: false }
           - { name: windows-arm64, goos: windows, goarch: arm64, upx: false }
-    runs-on: ubuntu-latest
+          - { name: darwin-amd64-v3, goos: darwin, goarch: amd64, goamd64: v3, upx: false, cgo: "1" }
+          - { name: darwin-arm64, goos: darwin, goarch: arm64, upx: false, cgo: "1" }
+          - { name: android-arm64, goos: android, goarch: arm64, upx: false, cgo: "1", cc_triple: "aarch64-linux-android23" }
+    runs-on: ${{ matrix.platform.goos == 'darwin' && 'macos-latest' || 'ubuntu-latest' }}
     env:
       GOOS: ${{ matrix.platform.goos }}
       GOARCH: ${{ matrix.platform.goarch }}
@@ -344,7 +340,7 @@ jobs:
         run: |
           FINAL_TAGS="${{ env.TAGS_COMMON }}"
 
-          CGO_VAL="0"
+          CGO_VAL="${{ matrix.platform.cgo || '0' }}"
           ARCHIVE_SUFFIX=""
           ENABLE_NAIVE="${{ github.event.inputs.enable_naive || 'false' }}"
 
@@ -362,6 +358,13 @@ jobs:
           echo "tags=${FINAL_TAGS}" >> $GITHUB_OUTPUT
           echo "suffix=${ARCHIVE_SUFFIX}" >> $GITHUB_OUTPUT
           echo "cgo_val=${CGO_VAL}" >> $GITHUB_OUTPUT
+
+      - name: Setup Android NDK
+        if: matrix.platform.goos == 'android'
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
 
       - name: Cache Cronet Toolchain
         if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true'
@@ -433,6 +436,24 @@ jobs:
             CGO_ENABLED=0 go run -v ./cmd/build-naive extract-lib --target="windows/${{ matrix.platform.goarch }}" -o "$GITHUB_WORKSPACE/sing-box/dist"
           fi
 
+      - name: Log Build Environment
+        if: steps.check_naive.outputs.skip != 'true'
+        run: |
+          echo "=============================================="
+          echo "🌍 Build Environment"
+          echo "=============================================="
+          echo "Target:        ${{ matrix.target.id }}"
+          echo "Version:       ${{ matrix.target.ver }}"
+          echo "Platform:      ${{ matrix.platform.name }}"
+          echo "GOOS/GOARCH:   ${{ matrix.platform.goos }}/${{ matrix.platform.goarch }}"
+          echo "GOAMD64:       ${{ matrix.platform.goamd64 }}"
+          echo "GOARM:         ${{ matrix.platform.goarm }}"
+          echo "CGO_ENABLED:   ${{ steps.env.outputs.cgo_val }}"
+          echo "Tags:          ${{ steps.env.outputs.tags }}"
+          echo "UPX Supported: ${{ matrix.platform.upx }}"
+          echo "Naive Enabled: ${{ github.event.inputs.enable_naive || 'false' }}"
+          echo "=============================================="
+
       - name: Build Core
         if: steps.check_naive.outputs.skip != 'true'
         env:
@@ -442,6 +463,10 @@ jobs:
           cd sing-box
           mkdir -p dist
           cp LICENSE dist/ 2>/dev/null || true
+
+          if [[ -n "${{ matrix.platform.cc_triple }}" ]]; then
+            export CC="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.platform.cc_triple }}-clang"
+          fi
 
           TAGS_STR="${{ steps.env.outputs.tags }}"
           ENABLE_NAIVE="${{ github.event.inputs.enable_naive || 'false' }}"
@@ -572,34 +597,36 @@ jobs:
           sudo apt update && sudo apt install -y openjdk-17-jdk-headless
           /usr/lib/jvm/java-17-openjdk-amd64/bin/java --version
 
-      - name: Build Library (libbox & libbox-legacy)
+      - name: Log Build Environment
+        if: matrix.target.sfa_repo != 'none'
+        run: |
+          echo "=============================================="
+          echo "🌍 Android Build Environment"
+          echo "=============================================="
+          echo "Target:        ${{ matrix.target.id }}"
+          echo "Version:       ${{ matrix.target.ver }}"
+          echo "Core Ref:      ${{ matrix.target.core_ref }}"
+          echo "SFA Branch:    ${{ matrix.target.sfa_branch }}"
+          echo "Tags Common:   ${{ env.TAGS_COMMON }}"
+          echo "Tags Android:  ${{ env.TAGS_ANDROID_EXTRA }}"
+          echo "NDK Version:   r28"
+          echo "Java:          $(java -version 2>&1 | head -n 1)"
+          echo "=============================================="
+
+      - name: Build Library (libbox.aar)
         if: matrix.target.sfa_repo != 'none'
         run: |
           cd sing-box
           make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
 
-          TAGS_COMBINED="${{ env.TAGS_COMMON }},${{ env.TAGS_SFA_EXTRA }}"
+          TAGS_COMBINED="${{ env.TAGS_COMMON }},${{ env.TAGS_ANDROID_EXTRA }}"
           TAGS_COMBINED=$(echo "${TAGS_COMBINED}" | tr ',' '\n' | sort -u | paste -sd,)
 
-          # Build Standard Library
           gomobile bind -v \
             -o libbox.aar \
             -target android \
             -androidapi 23 \
-            -javapkg=io.nekohasekai \
-            -libname=box \
-            -trimpath \
-            -buildvcs=false \
-            -tags="${TAGS_COMBINED}" \
-            -ldflags="-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid=" \
-            ./experimental/libbox/
-
-          # Build Legacy Library
-          gomobile bind -v \
-            -o libbox-legacy.aar \
-            -target android \
-            -androidapi 21 \
             -javapkg=io.nekohasekai \
             -libname=box \
             -trimpath \
@@ -626,7 +653,7 @@ jobs:
         run: |
           cd ./sing-box-for-android/
           chmod +x gradlew
-          ./gradlew :app:assembleOtherRelease :app:assembleOtherLegacyRelease \
+          ./gradlew :app:assembleOtherRelease \
             -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
             -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASS }}" \
             -Pandroid.injected.signing.key.alias="${{ secrets.ALIAS_NAME }}" \
@@ -639,20 +666,12 @@ jobs:
         run: |
           cd sing-box-for-android
           mkdir -p apks
-          
           REL_DIR="app/build/outputs/apk/other/release"
           [ -d "$REL_DIR" ] || REL_DIR="app/build/outputs/apk/release"
 
           for apk in "$REL_DIR"/*.apk; do
             [ -f "$apk" ] || continue
             new_name="SFA-${{ matrix.target.id }}-$(basename "$apk")"
-            mv -f "$apk" "apks/$new_name"
-          done
-          
-          LEGACY_DIR="app/build/outputs/apk/otherLegacy/release"
-          for apk in "$LEGACY_DIR"/*.apk; do
-            [ -f "$apk" ] || continue
-            new_name="SFA-${{ matrix.target.id }}-Legacy-$(basename "$apk")"
             mv -f "$apk" "apks/$new_name"
           done
 
@@ -713,7 +732,7 @@ jobs:
 
       - name: Process, Compress & Package (${{ matrix.target.id }})
         run: |
-          mkdir -p ./release_files
+          mkdir -p ./release_files/{linux,windows,darwin,android}
 
           target_id="${{ matrix.target.id }}"
           ver="${{ matrix.target.ver }}"
@@ -724,11 +743,13 @@ jobs:
             prerelease="true"
             make_latest="false"
             release_title="sing-box Testing Build"
+            tag_label="#testing"
           else
             tag_name="sing-box-stable"
             prerelease="false"
             make_latest="true"
             release_title="sing-box Stable Build"
+            tag_label="#stable"
           fi
 
           package_windows() {
@@ -757,16 +778,16 @@ jobs:
               ZIP_ARGS=("sing-box.exe")
               [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" . && ZIP_ARGS+=("LICENSE")
               [ -f "$dir/libcronet.dll" ] && cp "$dir/libcronet.dll" . && ZIP_ARGS+=("libcronet.dll")
-              zip -q9 "release_files/${ZIP_NAME}" "${ZIP_ARGS[@]}"
-              echo "PLATFORM_FILES[\"${target_id}|${platform}\"]=\"${ZIP_NAME} (UPX)\"" >> /tmp/platform_files.env
+              zip -q9 "release_files/windows/${ZIP_NAME}" "${ZIP_ARGS[@]}"
+              echo "WINDOWS_FILES[\"${platform}\"]=\"${ZIP_NAME} (UPX)\"" >> /tmp/platform_files.env
 
               cp "$bin_file" "sing-box-original.exe"
               ORIG_ZIP_NAME="sing-box-${target_id}-${platform}-${ver}-original.zip"
               ORIG_ZIP_ARGS=("sing-box-original.exe")
               [ -f "LICENSE" ] && ORIG_ZIP_ARGS+=("LICENSE")
               [ -f "libcronet.dll" ] && ORIG_ZIP_ARGS+=("libcronet.dll")
-              zip -q9 "release_files/${ORIG_ZIP_NAME}" "${ORIG_ZIP_ARGS[@]}"
-              echo "PLATFORM_FILES[\"${target_id}|${platform}|orig\"]=\"${ORIG_ZIP_NAME} (未压缩)\"" >> /tmp/platform_files.env
+              zip -q9 "release_files/windows/${ORIG_ZIP_NAME}" "${ORIG_ZIP_ARGS[@]}"
+              echo "WINDOWS_FILES[\"${platform}|orig\"]=\"${ORIG_ZIP_NAME} (未压缩)\"" >> /tmp/platform_files.env
 
               rm -f "sing-box.exe" "sing-box-original.exe" "LICENSE" "libcronet.dll"
             fi
@@ -799,8 +820,8 @@ jobs:
               cp "sing-box" pkg_dir/
               [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" pkg_dir/
               TAR_NAME="sing-box-${target_id}-${platform}-${ver}.tar.gz"
-              tar --no-same-owner -czf "release_files/${TAR_NAME}" -C pkg_dir .
-              echo "PLATFORM_FILES[\"${target_id}|${platform}\"]=\"${TAR_NAME} (UPX)\"" >> /tmp/platform_files.env
+              tar --no-same-owner -czf "release_files/linux/${TAR_NAME}" -C pkg_dir .
+              echo "LINUX_FILES[\"${platform}\"]=\"${TAR_NAME} (UPX)\"" >> /tmp/platform_files.env
               rm -rf pkg_dir
 
               cp "$bin_file" "sing-box-original"
@@ -809,11 +830,38 @@ jobs:
               cp "sing-box-original" pkg_orig_dir/sing-box
               [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" pkg_orig_dir/
               ORIG_TAR_NAME="sing-box-${target_id}-${platform}-${ver}-original.tar.gz"
-              tar --no-same-owner -czf "release_files/${ORIG_TAR_NAME}" -C pkg_orig_dir .
-              echo "PLATFORM_FILES[\"${target_id}|${platform}|orig\"]=\"${ORIG_TAR_NAME} (未压缩)\"" >> /tmp/platform_files.env
+              tar --no-same-owner -czf "release_files/linux/${ORIG_TAR_NAME}" -C pkg_orig_dir .
+              echo "LINUX_FILES[\"${platform}|orig\"]=\"${ORIG_TAR_NAME} (未压缩)\"" >> /tmp/platform_files.env
               rm -rf pkg_orig_dir
 
               rm -f "sing-box" "sing-box-original"
+            fi
+          }
+
+          package_darwin() {
+            local dir="$1"
+            local platform="$2"
+            local bin_file=""
+
+            if [ -f "$dir/sing-box" ]; then
+              bin_file="$dir/sing-box"
+            else
+              bin_file=$(find "$dir" -maxdepth 1 -type f \( -name 'sing-box' -o -name 'sing-box.exe' \) -print -quit 2>/dev/null || echo "")
+            fi
+
+            if [ -n "$bin_file" ] && [ -f "$bin_file" ]; then
+              cp "$bin_file" "sing-box"
+              chmod +x "sing-box"
+
+              mkdir -p pkg_dir
+              cp "sing-box" pkg_dir/
+              [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" pkg_dir/
+              TAR_NAME="sing-box-${target_id}-${platform}-${ver}.tar.gz"
+              tar --no-same-owner -czf "release_files/darwin/${TAR_NAME}" -C pkg_dir .
+              echo "DARWIN_FILES[\"${platform}\"]=\"${TAR_NAME}\"" >> /tmp/platform_files.env
+              rm -rf pkg_dir
+
+              rm -f "sing-box"
             fi
           }
 
@@ -823,6 +871,8 @@ jobs:
                 platform=$(jq -r '.platform' "$dir/artifact-meta.json")
                 if [[ "$platform" == *"windows"* ]]; then
                   package_windows "$dir" "$platform" || true
+                elif [[ "$platform" == *"darwin"* ]]; then
+                  package_darwin "$dir" "$platform" || true
                 else
                   package_linux "$dir" "$platform" || true
                 fi
@@ -835,10 +885,10 @@ jobs:
             for apk in "$apk_dir"/*.apk; do
               [ -f "$apk" ] || continue
               APK_NAME="SFA-${target_id}-${ver}.apk"
-              cp "$apk" "release_files/${APK_NAME}"
-              echo "PLATFORM_FILES[\"${target_id}|android\"]=\"${APK_NAME} (arm64-v8a)\"" >> /tmp/platform_files.env
+              cp "$apk" "release_files/android/${APK_NAME}"
+              echo "ANDROID_FILES[\"apk\"]=\"${APK_NAME}\"" >> /tmp/platform_files.env
             done
-            cp "$apk_dir"/*-metadata.json release_files/ 2>/dev/null || true
+            cp "$apk_dir"/*-metadata.json release_files/android/ 2>/dev/null || true
           fi
 
           jq -n --arg target_id "$target_id" --arg ver "$ver" --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
@@ -847,7 +897,7 @@ jobs:
             built_at: $built_at
           }' > release_files/build-info.json
 
-          declare -A PLATFORM_FILES
+          declare -A LINUX_FILES WINDOWS_FILES DARWIN_FILES ANDROID_FILES
           [ -f /tmp/platform_files.env ] && source /tmp/platform_files.env
 
           cat > release_body.txt <<EOF
@@ -861,33 +911,92 @@ jobs:
           \`\`\`
 
           ## 📦 Assets (產物下載)
-
-          <details>
-          <summary><b>📥 點擊展開詳細下載列表</b></summary>
-
-          | 平台 / 架構 | 文件名 | 說明 |
-          |-------------|--------|------|
           EOF
 
-          for key in "${!PLATFORM_FILES[@]}"; do
-            IFS='|' read -r tid plat extra <<< "$key"
-            if [ "$tid" != "$target_id" ]; then continue; fi
-            file_info="${PLATFORM_FILES[$key]}"
-            file_name="${file_info%% (*}"
-            file_desc="${file_info#*\(}"
-            file_desc="${file_desc%)}"
-            
-            plat_display="$plat"
-            if [[ "$plat" == "linux-"* ]]; then plat_display="🐧 Linux ${plat#linux-}"; fi
-            if [[ "$plat" == "windows-"* ]]; then plat_display="🪟 Windows ${plat#windows-}"; fi
-            if [[ "$plat" == "android" ]]; then plat_display="🤖 Android"; fi
-            
-            echo "| ${plat_display} | \`${file_name}\` | ${file_desc} |" >> release_body.txt
-          done
+          # Linux
+          if [ ${#LINUX_FILES[@]} -gt 0 ]; then
+            cat >> release_body.txt <<EOF
+
+          <details>
+          <summary><b>🐧 Linux 產物</b></summary>
+
+          | 架構 | 文件名 | 說明 |
+          |------|--------|------|
+          EOF
+            for key in "${!LINUX_FILES[@]}"; do
+              IFS='|' read -r plat extra <<< "$key"
+              file_info="${LINUX_FILES[$key]}"
+              file_name="${file_info%% (*}"
+              file_desc="${file_info#*\(}"
+              file_desc="${file_desc%)}"
+              plat_display="${plat#linux-}"
+              echo "| ${plat_display} | \`${file_name}\` | ${file_desc} |" >> release_body.txt
+            done
+            echo "</details>" >> release_body.txt
+          fi
+
+          # Windows
+          if [ ${#WINDOWS_FILES[@]} -gt 0 ]; then
+            cat >> release_body.txt <<EOF
+
+          <details>
+          <summary><b>🪟 Windows 產物</b></summary>
+
+          | 架構 | 文件名 | 說明 |
+          |------|--------|------|
+          EOF
+            for key in "${!WINDOWS_FILES[@]}"; do
+              IFS='|' read -r plat extra <<< "$key"
+              file_info="${WINDOWS_FILES[$key]}"
+              file_name="${file_info%% (*}"
+              file_desc="${file_info#*\(}"
+              file_desc="${file_desc%)}"
+              plat_display="${plat#windows-}"
+              echo "| ${plat_display} | \`${file_name}\` | ${file_desc} |" >> release_body.txt
+            done
+            echo "</details>" >> release_body.txt
+          fi
+
+          # Darwin
+          if [ ${#DARWIN_FILES[@]} -gt 0 ]; then
+            cat >> release_body.txt <<EOF
+
+          <details>
+          <summary><b>🍎 Darwin 產物</b></summary>
+
+          | 架構 | 文件名 | 說明 |
+          |------|--------|------|
+          EOF
+            for key in "${!DARWIN_FILES[@]}"; do
+              IFS='|' read -r plat extra <<< "$key"
+              file_info="${DARWIN_FILES[$key]}"
+              file_name="${file_info%% (*}"
+              file_desc="${file_info#*\(}"
+              file_desc="${file_desc%)}"
+              plat_display="${plat#darwin-}"
+              echo "| ${plat_display} | \`${file_name}\` | ${file_desc} |" >> release_body.txt
+            done
+            echo "</details>" >> release_body.txt
+          fi
+
+          # Android
+          if [ ${#ANDROID_FILES[@]} -gt 0 ]; then
+            cat >> release_body.txt <<EOF
+
+          <details>
+          <summary><b>🤖 Android 產物</b></summary>
+
+          | 類型 | 文件名 |
+          |------|--------|
+          EOF
+            for key in "${!ANDROID_FILES[@]}"; do
+              file_name="${ANDROID_FILES[$key]}"
+              echo "| SFA APK | \`${file_name}\` |" >> release_body.txt
+            done
+            echo "</details>" >> release_body.txt
+          fi
 
           cat >> release_body.txt <<EOF
-
-          </details>
 
           ---
           ### 📜 History (歷史更新)
@@ -898,10 +1007,11 @@ jobs:
           echo "TAG_NAME=${tag_name}" >> $GITHUB_ENV
           echo "PRERELEASE=${prerelease}" >> $GITHUB_ENV
           echo "MAKE_LATEST=${make_latest}" >> $GITHUB_ENV
+          echo "TAG_LABEL=${tag_label}" >> $GITHUB_ENV
 
       - name: Generate install script (${{ matrix.target.id }})
         run: |
-          cat > release_files/install-linux.sh << 'EOF'
+          cat > release_files/linux/install-linux.sh << 'EOF'
           #!/bin/bash
           set -euo pipefail
           if [ "$(id -u)" -ne 0 ]; then SUDO_CMD="sudo"; else SUDO_CMD=""; fi
@@ -936,19 +1046,12 @@ jobs:
           $SUDO_CMD mv sing-box /usr/local/bin/
           echo "✅ Installation complete."
           EOF
-          chmod +x release_files/install-linux.sh
+          chmod +x release_files/linux/install-linux.sh
 
       - name: Verify post-UPX integrity and Generate SHA256
         run: |
           cd release_files
-          for f in *.tar.gz; do
-            [ -f "$f" ] && tar -tzf "$f" > /dev/null 2>&1 || exit 1
-          done
-          for f in *.zip; do
-            [ -f "$f" ] && unzip -t "$f" > /dev/null 2>&1 || exit 1
-          done
-
-          sha256sum *.tar.gz *.zip *.apk 2>/dev/null > SHA256SUMS.txt
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" \) -exec sha256sum {} \; > SHA256SUMS.txt
           awk '{printf "| `%s` | `%s` |\n", $2, $1}' SHA256SUMS.txt > SHA256SUMS_TABLE.md
 
           cat >> ../release_body.txt <<EOF
@@ -962,11 +1065,29 @@ jobs:
       - name: Check if release files exist
         id: check_files
         run: |
-          if ls ./release_files/*.tar.gz ./release_files/*.zip ./release_files/*.apk >/dev/null 2>&1; then
+          if find ./release_files -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" \) | grep -q .; then
             echo "files_exist=true" >> $GITHUB_OUTPUT
           else
             echo "files_exist=false" >> $GITHUB_OUTPUT
             exit 1
+          fi
+
+      - name: Delete existing tag and release if exists
+        if: steps.check_files.outputs.files_exist == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ env.TAG_NAME }}"
+          echo "Checking if release/tag $TAG exists..."
+
+          if gh release view "$TAG" --json id -q '.id' 2>/dev/null; then
+            echo "Deleting existing release $TAG..."
+            gh release delete "$TAG" --yes --cleanup-tag
+          fi
+
+          if git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
+            echo "Deleting stray tag $TAG..."
+            git push origin ":refs/tags/$TAG"
           fi
 
       - name: Publish Release (${{ matrix.target.id }})
@@ -979,14 +1100,18 @@ jobs:
           make_latest: ${{ env.MAKE_LATEST }}
           prerelease: ${{ env.PRERELEASE }}
           body_path: release_body.txt
-          files: ./release_files/*
+          files: |
+            release_files/**/*.tar.gz
+            release_files/**/*.zip
+            release_files/**/*.apk
+            release_files/**/install-linux.sh
           fail_on_unmatched_files: true
 
       - name: Generate Build Provenance
         if: steps.check_files.outputs.files_exist == 'true'
         uses: actions/attest-build-provenance@v1
         with:
-          subject-path: './release_files/*'
+          subject-path: './release_files/**/*'
 
       - name: Upload Build Info Artifact
         if: always()
@@ -994,6 +1119,18 @@ jobs:
         with:
           name: build-info-${{ matrix.target.id }}
           path: release_files/build-info.json
+          retention-days: 1
+          compression-level: 0
+
+      - name: Upload Release Files Artifact for Telegram
+        if: steps.check_files.outputs.files_exist == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files-${{ matrix.target.id }}
+          path: |
+            release_files/**/*.tar.gz
+            release_files/**/*.zip
+            release_files/**/*.apk
           retention-days: 1
           compression-level: 0
 
@@ -1015,13 +1152,35 @@ jobs:
         run: |
           mkdir -p metadata
           mv ./downloads/workflow-metadata/release_notes.txt ./metadata/ 2>/dev/null || echo "" > ./metadata/release_notes.txt
-          
-          cat ./downloads/build-info-*/build-info.json 2>/dev/null | jq -s '{targets: ., built_at: .[0].built_at}' > build-info.json || echo "{}" > build-info.json
+
+          jq -n \
+            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg run_id "${{ github.run_id }}" \
+            --arg commit "${{ github.sha }}" \
+            '{
+              built_at: $built_at,
+              run_id: $run_id,
+              commit_sha: $commit,
+              targets: []
+            }' > build-info-base.json
+
+          for f in ./downloads/build-info-*/build-info.json; do
+            if [ -f "$f" ]; then
+              target=$(jq -r '.target_id' "$f")
+              version=$(jq -r '.version_name' "$f")
+              jq --arg target "$target" --arg version "$version" \
+                '.targets += [{"target_id": $target, "version_name": $version}]' \
+                build-info-base.json > tmp.json && mv tmp.json build-info-base.json
+            fi
+          done
+
+          mv build-info-base.json build-info.json
 
       - name: Update release-info branch
         run: |
           git checkout --orphan release-info-temp
           git rm -rf . 2>/dev/null || true
+          cp build-info.json build-info.json
           git add build-info.json
 
           if ! git diff --cached --quiet; then
@@ -1126,14 +1285,13 @@ jobs:
 
           - **默認版本** (\`xxx.tar.gz\` / \`xxx.zip\`): UPX壓縮版（體積小）
           - **原始版本** (\`xxx-original.tar.gz\` / \`xxx-original.zip\`): 未壓縮版（兼容性好）
-          - MIPS/ARMv5/v6: 僅提供原始版本（UPX不支持這些架構）
 
           ## 🛠️ 支持的版本與特性
 
           | 版本 | 分支 | 平台支持 | Release 標籤 |
           |------|------|---------|-------------|
-          | reF1nd Stable | reF1nd-stable | Linux/Windows/Android | \`sing-box-stable\` (Latest) |
-          | reF1nd Testing | reF1nd-testing | Linux/Windows/Android | \`sing-box-testing\` (Pre-release) |
+          | reF1nd Stable | reF1nd-stable | Linux/Windows/macOS/Android | \`sing-box-stable\` (Latest) |
+          | reF1nd Testing | reF1nd-testing | Linux/Windows/macOS/Android | \`sing-box-testing\` (Pre-release) |
 
           ## 🔔 Telegram 通知配置
           若需啟用 Telegram 推送，請在倉庫 Secrets 中配置：
@@ -1241,49 +1399,150 @@ jobs:
         if: ${{ steps.status.outputs.status == 'success' }}
         uses: actions/download-artifact@v4
         with:
+          pattern: release-files-*
           path: dist
           merge-multiple: true
 
-      - name: Find key files for TG
+      - name: Prepare SFA TG Files
         if: ${{ steps.status.outputs.status == 'success' }}
-        id: find_files
         run: |
-          mapfile -t TG_FILES < <(find dist -maxdepth 1 -type f \( -name "*.apk" -o -name "*.tar.gz" -o -name "*.zip" \) ! -name "*-original*" -print 2>/dev/null)
-          > /tmp/tg_files.txt
-          for f in "${TG_FILES[@]}"; do
-             echo "$f" >> /tmp/tg_files.txt
-          done
-
-          if [ -s /tmp/tg_files.txt ]; then
-            EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1 2>/dev/null || echo "EOM")
-            echo "files_list<<$EOF_MARKER" >> "$GITHUB_OUTPUT"
-            cat /tmp/tg_files.txt >> "$GITHUB_OUTPUT"
-            echo "$EOF_MARKER" >> "$GITHUB_OUTPUT"
-            echo "skip_tg_file_upload=false" >> "$GITHUB_ENV"
-          else
-            echo "skip_tg_file_upload=true" >> "$GITHUB_ENV"
+          files=$(find dist -type f -name "SFA-*.apk" 2>/dev/null | head -10)
+          if [ -n "$files" ]; then
+            [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
+            EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
+            echo "TG_APK_FILES<<$EOF_MARKER" >> $GITHUB_ENV
+            echo "$files" >> $GITHUB_ENV
+            echo "$EOF_MARKER" >> $GITHUB_ENV
+            echo "TG_APK_TAG=$TAG" >> $GITHUB_ENV
+            echo "SEND_APK=true" >> $GITHUB_ENV
           fi
 
-      - name: Telegram notification (with files)
-        if: ${{ (steps.status.outputs.status == 'success' || steps.status.outputs.status == 'failed') && env.skip_tg_file_upload != 'true' }}
-        continue-on-error: true
+      - name: Send SFA APKs to Telegram
+        if: env.SEND_APK == 'true'
         uses: xz-dev/TelegramFileUploader@v1
+        continue-on-error: true
         with:
           to-who: "${{ secrets.CHAT_ID }}"
-          message: ${{ env.TG_MESSAGE }}
-          files: ${{ steps.find_files.outputs.files_list }}
+          message: |
+            🤖 *SFA APK 更新*
+            `${{ env.TG_APK_TAG }}`
+          files: ${{ env.TG_APK_FILES }}
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
-      - name: Telegram notification (text only)
-        if: ${{ (steps.status.outputs.status == 'success' || steps.status.outputs.status == 'failed') && env.skip_tg_file_upload == 'true' }}
-        continue-on-error: true
+      - name: Prepare Android CLI TG Files
+        if: ${{ steps.status.outputs.status == 'success' }}
+        run: |
+          files=$(find dist -type f -name "sing-box-*-android-*.tar.gz" ! -name "*-original*" 2>/dev/null | head -10)
+          if [ -n "$files" ]; then
+            [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
+            EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
+            echo "TG_ACLI_FILES<<$EOF_MARKER" >> $GITHUB_ENV
+            echo "$files" >> $GITHUB_ENV
+            echo "$EOF_MARKER" >> $GITHUB_ENV
+            echo "TG_ACLI_TAG=$TAG" >> $GITHUB_ENV
+            echo "SEND_ACLI=true" >> $GITHUB_ENV
+          fi
+
+      - name: Send Android CLI binaries to Telegram
+        if: env.SEND_ACLI == 'true'
         uses: xz-dev/TelegramFileUploader@v1
+        continue-on-error: true
         with:
           to-who: "${{ secrets.CHAT_ID }}"
-          message: ${{ env.TG_MESSAGE }}
+          message: |
+            📱 *Android CLI 二進制*
+            `${{ env.TG_ACLI_TAG }}`
+          files: ${{ env.TG_ACLI_FILES }}
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+      - name: Prepare Linux TG Files
+        if: ${{ steps.status.outputs.status == 'success' }}
+        run: |
+          files=$(find dist -type f -name "sing-box-*-linux-*.tar.gz" ! -name "*-original*" 2>/dev/null | head -10)
+          if [ -n "$files" ]; then
+            [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
+            EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
+            echo "TG_LINUX_FILES<<$EOF_MARKER" >> $GITHUB_ENV
+            echo "$files" >> $GITHUB_ENV
+            echo "$EOF_MARKER" >> $GITHUB_ENV
+            echo "TG_LINUX_TAG=$TAG" >> $GITHUB_ENV
+            echo "SEND_LINUX=true" >> $GITHUB_ENV
+          fi
+
+      - name: Send Linux binaries to Telegram
+        if: env.SEND_LINUX == 'true'
+        uses: xz-dev/TelegramFileUploader@v1
+        continue-on-error: true
+        with:
+          to-who: "${{ secrets.CHAT_ID }}"
+          message: |
+            🐧 *Linux 二進制*
+            `${{ env.TG_LINUX_TAG }}`
+          files: ${{ env.TG_LINUX_FILES }}
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+      - name: Prepare Windows TG Files
+        if: ${{ steps.status.outputs.status == 'success' }}
+        run: |
+          files=$(find dist -type f -name "sing-box-*-windows-*.zip" ! -name "*-original*" 2>/dev/null | head -10)
+          if [ -n "$files" ]; then
+            [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
+            EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
+            echo "TG_WIN_FILES<<$EOF_MARKER" >> $GITHUB_ENV
+            echo "$files" >> $GITHUB_ENV
+            echo "$EOF_MARKER" >> $GITHUB_ENV
+            echo "TG_WIN_TAG=$TAG" >> $GITHUB_ENV
+            echo "SEND_WIN=true" >> $GITHUB_ENV
+          fi
+
+      - name: Send Windows binaries to Telegram
+        if: env.SEND_WIN == 'true'
+        uses: xz-dev/TelegramFileUploader@v1
+        continue-on-error: true
+        with:
+          to-who: "${{ secrets.CHAT_ID }}"
+          message: |
+            🪟 *Windows 二進制*
+            `${{ env.TG_WIN_TAG }}`
+          files: ${{ env.TG_WIN_FILES }}
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+      - name: Prepare Darwin TG Files
+        if: ${{ steps.status.outputs.status == 'success' }}
+        run: |
+          files=$(find dist -type f -name "sing-box-*-darwin-*.tar.gz" ! -name "*-original*" 2>/dev/null | head -10)
+          if [ -n "$files" ]; then
+            [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
+            EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
+            echo "TG_DARWIN_FILES<<$EOF_MARKER" >> $GITHUB_ENV
+            echo "$files" >> $GITHUB_ENV
+            echo "$EOF_MARKER" >> $GITHUB_ENV
+            echo "TG_DARWIN_TAG=$TAG" >> $GITHUB_ENV
+            echo "SEND_DARWIN=true" >> $GITHUB_ENV
+          fi
+
+      - name: Send Darwin binaries to Telegram
+        if: env.SEND_DARWIN == 'true'
+        uses: xz-dev/TelegramFileUploader@v1
+        continue-on-error: true
+        with:
+          to-who: "${{ secrets.CHAT_ID }}"
+          message: |
+            🍎 *Darwin 二進制*
+            `${{ env.TG_DARWIN_TAG }}`
+          files: ${{ env.TG_DARWIN_FILES }}
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
