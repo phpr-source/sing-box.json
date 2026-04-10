@@ -401,13 +401,13 @@ jobs:
           ndk-version: r28
 
       - name: Setup Zig for CGO cross compilation
-        if: steps.check_naive.outputs.skip != 'true' && matrix.platform.goarch != 'amd64' && steps.env.outputs.cgo_val == '1' && matrix.platform.goos != 'android'
+        if: steps.check_naive.outputs.skip != 'true' && matrix.platform.goarch != 'amd64' && steps.env.outputs.cgo_val == '1' && matrix.platform.goos == 'linux'
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.11.0
 
       - name: Export Zig CC
-        if: steps.check_naive.outputs.skip != 'true' && matrix.platform.goarch == 'arm64' && steps.env.outputs.cgo_val == '1' && matrix.platform.goos != 'android'
+        if: steps.check_naive.outputs.skip != 'true' && matrix.platform.goarch == 'arm64' && steps.env.outputs.cgo_val == '1' && matrix.platform.goos == 'linux'
         run: |
           if [ "${{ matrix.platform.variant }}" = "musl" ]; then
             echo "CC=zig cc -target aarch64-linux-musl" >> "$GITHUB_ENV"
@@ -728,7 +728,6 @@ jobs:
           org.gradle.caching=true
           org.gradle.parallel=true
           org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
-          android.enableBuildCache=true
           EOF
 
       - name: Setup OpenJDK
