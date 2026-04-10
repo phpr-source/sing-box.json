@@ -353,7 +353,7 @@ jobs:
             fi
           fi
 
-          TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^$' | sort -u | paste -sd,)
+          TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
           echo "suffix=${ARCHIVE_SUFFIX}" >> $GITHUB_OUTPUT
           echo "cgo_val=${CGO_VAL}" >> $GITHUB_OUTPUT
@@ -620,7 +620,7 @@ jobs:
           export PATH="$PATH:$(go env GOPATH)/bin"
 
           TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_ANDROID_EXTRA }}"
-          TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^$' | sort -u | paste -sd,)
+          TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
 
           gomobile bind -v \
             -o libbox.aar \
