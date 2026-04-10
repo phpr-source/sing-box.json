@@ -38,10 +38,18 @@ on:
         type: boolean
         default: false
       enable_naive:
-        description: "Enable naive outbound (Linux/Windows amd64-v3 only)"
+        description: "Enable naive outbound (Linux/Windows only)"
         required: false
         type: boolean
         default: false
+      publish_type:
+        description: "Release publishing strategy"
+        required: false
+        type: choice
+        default: "rolling"
+        options:
+          - "rolling"
+          - "versioned"
   schedule:
     - cron: "0 0 * * *"
   push:
@@ -63,7 +71,9 @@ permissions:
   attestations: write
 
 env:
-  TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard"
+  TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard,with_tailscale"
+  TAGS_CLI_EXTRA: "with_dhcp,with_acme,with_ccm,with_ocm"
+  TAGS_SFA_EXTRA: "ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird"
   TAGS_ANDROID_EXTRA: "with_conntrack,with_naive_outbound"
   CURL_TIMEOUT_API: 60
   CURL_TIMEOUT_FILE: 120
@@ -274,9 +284,12 @@ jobs:
       matrix:
         target: ${{ fromJson(needs.check.outputs.matrix) }}
         platform:
-          - { name: linux-amd64-v3, goos: linux, goarch: amd64, goamd64: v3, upx: true }
-          - { name: linux-arm64, goos: linux, goarch: arm64, upx: true }
-          - { name: linux-armv7, goos: linux, goarch: arm, goarm: 7, upx: true }
+          - { name: linux-amd64-v3-glibc, goos: linux, goarch: amd64, goamd64: v3, variant: glibc, cgo: 1, upx: true }
+          - { name: linux-amd64-v3-musl,  goos: linux, goarch: amd64, goamd64: v3, variant: musl,  cgo: 1, upx: true, cc: musl-gcc }
+          - { name: linux-amd64-v3-purego,goos: linux, goarch: amd64, goamd64: v3, variant: purego,cgo: 0, upx: true, tags_extra: with_purego }
+          - { name: linux-arm64-glibc,   goos: linux, goarch: arm64, variant: glibc, cgo: 1, upx: true }
+          - { name: linux-arm64-musl,    goos: linux, goarch: arm64, variant: musl,  cgo: 1, upx: true }
+          - { name: linux-arm64-purego,  goos: linux, goarch: arm64, variant: purego,cgo: 0, upx: true, tags_extra: with_purego }
           - { name: windows-amd64-v3, goos: windows, goarch: amd64, goamd64: v3, upx: false }
           - { name: windows-arm64, goos: windows, goarch: arm64, upx: false }
           - { name: darwin-amd64-v3, goos: darwin, goarch: amd64, goamd64: v3, upx: false, cgo: "1" }
@@ -293,10 +306,13 @@ jobs:
       - name: Check Naive Compatibility
         id: check_naive
         run: |
-          if [ "${{ github.event.inputs.enable_naive }}" = "true" ] && \
-             [ "${{ matrix.platform.name }}" != "linux-amd64-v3" ] && \
-             [ "${{ matrix.platform.name }}" != "windows-amd64-v3" ]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
+          if [ "${{ github.event.inputs.enable_naive }}" = "true" ]; then
+            if [[ "${{ matrix.platform.goos }}" != "linux" && "${{ matrix.platform.goos }}" != "windows" ]]; then
+              echo "skip=true" >> $GITHUB_OUTPUT
+              echo "::notice::Naive outbound not supported on ${{ matrix.platform.goos }}. Skipping."
+            else
+              echo "skip=false" >> $GITHUB_OUTPUT
+            fi
           else
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
@@ -338,20 +354,39 @@ jobs:
         if: steps.check_naive.outputs.skip != 'true'
         id: env
         run: |
-          TAGS="${{ env.TAGS_COMMON }}"
+          TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_CLI_EXTRA }}"
           CGO_VAL="${{ matrix.platform.cgo || '0' }}"
           ARCHIVE_SUFFIX=""
           ENABLE_NAIVE="${{ github.event.inputs.enable_naive || 'false' }}"
+
+          if [ -n "${{ matrix.platform.tags_extra }}" ]; then
+            TAGS="${TAGS},${{ matrix.platform.tags_extra }}"
+          fi
 
           if [ "$ENABLE_NAIVE" = "true" ]; then
             TAGS="${TAGS},with_naive_outbound"
             if [ "${{ matrix.platform.goos }}" = "windows" ]; then
               TAGS="${TAGS},with_purego"
-            elif [ "${{ matrix.platform.goos }}" = "linux" ]; then
-              ARCHIVE_SUFFIX="-glibc"
-              CGO_VAL="1"
             fi
           fi
+
+          case "${{ matrix.platform.variant }}" in
+            musl)
+              ARCHIVE_SUFFIX="-musl"
+              if [ "${{ matrix.platform.goarch }}" = "amd64" ]; then
+                sudo apt-get update && sudo apt-get install -y musl-tools
+                echo "CC=musl-gcc" >> $GITHUB_ENV
+              fi
+              ;;
+            purego)
+              ARCHIVE_SUFFIX="-purego"
+              ;;
+            glibc)
+              ARCHIVE_SUFFIX="-glibc"
+              ;;
+            *)
+              ;;
+          esac
 
           TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
@@ -364,17 +399,36 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
+          local-cache: true
 
-      - name: Cache Cronet Toolchain
+      - name: Setup Zig for CGO cross compilation
+        if: steps.check_naive.outputs.skip != 'true' && matrix.platform.goarch != 'amd64' && steps.env.outputs.cgo_val == '1' && matrix.platform.goos != 'android'
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.11.0
+
+      - name: Export Zig CC
+        if: steps.check_naive.outputs.skip != 'true' && matrix.platform.goarch == 'arm64' && steps.env.outputs.cgo_val == '1' && matrix.platform.goos != 'android'
+        run: |
+          if [ "${{ matrix.platform.variant }}" = "musl" ]; then
+            echo "CC=zig cc -target aarch64-linux-musl" >> "$GITHUB_ENV"
+            echo "CXX=zig c++ -target aarch64-linux-musl" >> "$GITHUB_ENV"
+          else
+            echo "CC=zig cc -target aarch64-linux-gnu" >> "$GITHUB_ENV"
+            echo "CXX=zig c++ -target aarch64-linux-gnu" >> "$GITHUB_ENV"
+          fi
+
+      - name: Cache Chromium toolchain
         if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true'
         uses: actions/cache@v4
         with:
           path: |
-            ~/cronet-go
-          key: ${{ runner.os }}-cronet-${{ matrix.platform.goos }}-${{ matrix.platform.goarch }}-${{ hashFiles('sing-box/.github/CRONET_GO_VERSION') }}
-          restore-keys: |
-            ${{ runner.os }}-cronet-${{ matrix.platform.goos }}-${{ matrix.platform.goarch }}-
-            ${{ runner.os }}-cronet-
+            ~/cronet-go/naiveproxy/src/third_party/llvm-build/
+            ~/cronet-go/naiveproxy/src/gn/out/
+            ~/cronet-go/naiveproxy/src/chrome/build/pgo_profiles/
+            ~/cronet-go/naiveproxy/src/out/sysroot-build/
+          key: chromium-toolchain-${{ matrix.platform.goarch }}-${{ matrix.platform.variant || 'default' }}-${{ hashFiles('sing-box/.github/CRONET_GO_VERSION') }}
+          restore-keys: chromium-toolchain-${{ matrix.platform.goarch }}-${{ matrix.platform.variant || 'default' }}-
 
       - name: Free disk space for cronet toolchain
         if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
@@ -451,6 +505,8 @@ jobs:
           echo "Tags:          ${{ steps.env.outputs.tags }}"
           echo "UPX Supported: ${{ matrix.platform.upx }}"
           echo "Naive Enabled: ${{ github.event.inputs.enable_naive || 'false' }}"
+          echo "CC:            ${CC:-not set}"
+          echo "CXX:           ${CXX:-not set}"
           echo "=============================================="
 
       - name: Build Core
@@ -468,11 +524,6 @@ jobs:
           fi
 
           TAGS_STR="${{ steps.env.outputs.tags }}"
-          ENABLE_NAIVE="${{ github.event.inputs.enable_naive || 'false' }}"
-          if [ "$ENABLE_NAIVE" = "true" ]; then
-            if [ "${{ matrix.platform.goos }}" = "windows" ]; then TAGS_STR="${TAGS_STR} (requires libcronet.dll)"; fi
-            if [ "${{ matrix.platform.goos }}" = "linux" ]; then TAGS_STR="${TAGS_STR} (requires glibc)"; fi
-          fi
           echo "$TAGS_STR" > dist/build_tags.txt
           echo "${{ matrix.platform.upx }}" > dist/upx_supported.txt
 
@@ -481,7 +532,7 @@ jobs:
 
           go build -v -trimpath -ldflags "-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid=" -tags "${{ steps.env.outputs.tags }}" -o "dist/$BIN_NAME" ./cmd/sing-box
 
-          echo "{\"target_id\": \"${{ matrix.target.id }}\", \"platform\": \"${{ matrix.platform.name }}\", \"suffix\": \"${{ steps.env.outputs.suffix }}\", \"version_name\": \"${{ matrix.target.ver }}\"}" > dist/artifact-meta.json
+          echo "{\"target_id\": \"${{ matrix.target.id }}\", \"platform\": \"${{ matrix.platform.name }}\", \"suffix\": \"${{ steps.env.outputs.suffix }}\", \"version_name\": \"${{ matrix.target.ver }}\", \"tags\": \"${{ steps.env.outputs.tags }}\"}" > dist/artifact-meta.json
 
       - name: Verify Binary Integrity
         if: steps.check_naive.outputs.skip != 'true'
@@ -519,12 +570,86 @@ jobs:
 
           echo "✅ Verification passed."
 
-      - name: Upload Core
+      - name: Compress and Package
+        if: steps.check_naive.outputs.skip != 'true'
+        run: |
+          cd sing-box/dist
+          BIN_NAME="sing-box"
+          [ "${{ matrix.platform.goos }}" = "windows" ] && BIN_NAME="sing-box.exe"
+          TARGET_ID="${{ matrix.target.id }}"
+          PLATFORM="${{ matrix.platform.name }}"
+          VER="${{ matrix.target.ver }}"
+          UPX_SUPPORTED="${{ matrix.platform.upx }}"
+          SUFFIX="${{ steps.env.outputs.suffix }}"
+
+          mkdir -p release_files
+          
+          STANDALONE_NAME="sing-box-${TARGET_ID}-${PLATFORM}${SUFFIX}-${VER}"
+
+          if [ "$UPX_SUPPORTED" = "true" ]; then
+            if [ "${{ matrix.platform.goos }}" = "windows" ]; then
+              file "$BIN_NAME" | grep -qiE "^PE32.*executable" && upx --best --lzma "$BIN_NAME" 2>/dev/null || true
+            else
+              file "$BIN_NAME" | grep -qE "ELF.*executable" && upx --best --lzma "$BIN_NAME" 2>/dev/null || true
+            fi
+            cp "$BIN_NAME" "../${STANDALONE_NAME}.upx"
+            echo "standalone_bin=${STANDALONE_NAME}.upx" >> $GITHUB_ENV
+          else
+            if [ "${{ matrix.platform.goos }}" = "windows" ]; then
+              cp "$BIN_NAME" "../${STANDALONE_NAME}.exe"
+              echo "standalone_bin=${STANDALONE_NAME}.exe" >> $GITHUB_ENV
+            else
+              cp "$BIN_NAME" "../${STANDALONE_NAME}"
+              echo "standalone_bin=${STANDALONE_NAME}" >> $GITHUB_ENV
+            fi
+          fi
+
+          cd ..
+          if [ "${{ matrix.platform.goos }}" = "windows" ]; then
+            ZIP_NAME="${STANDALONE_NAME}.zip"
+            if [ -f "dist/libcronet.dll" ]; then
+              cp "dist/libcronet.dll" .
+              zip -q9 "release_files/${ZIP_NAME}" "${BIN_NAME}" "libcronet.dll" LICENSE 2>/dev/null || zip -q9 "release_files/${ZIP_NAME}" "${BIN_NAME}" "libcronet.dll"
+            else
+              zip -q9 "release_files/${ZIP_NAME}" "${BIN_NAME}" LICENSE 2>/dev/null || zip -q9 "release_files/${ZIP_NAME}" "${BIN_NAME}"
+            fi
+            echo "package_file=${ZIP_NAME}" >> $GITHUB_ENV
+          else
+            TAR_NAME="${STANDALONE_NAME}.tar.gz"
+            if [ -f "dist/libcronet.so" ]; then
+              cp "dist/libcronet.so" .
+              tar --no-same-owner -czf "release_files/${TAR_NAME}" "${BIN_NAME}" "libcronet.so" LICENSE 2>/dev/null || tar --no-same-owner -czf "release_files/${TAR_NAME}" "${BIN_NAME}" "libcronet.so"
+            else
+              tar --no-same-owner -czf "release_files/${TAR_NAME}" "${BIN_NAME}" LICENSE 2>/dev/null || tar --no-same-owner -czf "release_files/${TAR_NAME}" "${BIN_NAME}"
+            fi
+            echo "package_file=${TAR_NAME}" >> $GITHUB_ENV
+          fi
+
+      - name: Upload Package Artifact
         if: steps.check_naive.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: core-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
-          path: sing-box/dist/*
+          name: pkg-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
+          path: |
+            sing-box/release_files/*
+          retention-days: 1
+          compression-level: 0
+
+      - name: Upload Standalone Binary Artifact
+        if: steps.check_naive.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
+          path: sing-box/${{ env.standalone_bin }}
+          retention-days: 1
+          compression-level: 0
+
+      - name: Upload Metadata Artifact
+        if: steps.check_naive.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: meta-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
+          path: sing-box/dist/artifact-meta.json
           retention-days: 1
           compression-level: 0
 
@@ -573,6 +698,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ needs.init.outputs.go_version }}
+          cache: true
+          cache-dependency-path: 'sing-box/go.sum'
 
       - name: Setup Android NDK
         if: matrix.target.sfa_repo != 'none'
@@ -580,15 +707,25 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
+          local-cache: true
 
-      - name: Gradle cache
+      - name: Setup Gradle
         if: matrix.target.sfa_repo != 'none'
-        uses: actions/cache@v4
+        uses: gradle/actions/setup-gradle@v4
         with:
-          path: ~/.gradle/caches
-          key: gradle-${{ runner.os }}-${{ hashFiles('sing-box-for-android/**/*.gradle*') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
+          build-root-directory: sing-box-for-android
+          cache-read-only: false
+
+      - name: Configure Gradle Properties
+        if: matrix.target.sfa_repo != 'none'
+        run: |
+          mkdir -p ~/.gradle
+          cat >> ~/.gradle/gradle.properties <<'EOF'
+          org.gradle.caching=true
+          org.gradle.parallel=true
+          org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
+          android.enableBuildCache=true
+          EOF
 
       - name: Setup OpenJDK
         if: matrix.target.sfa_repo != 'none'
@@ -607,6 +744,7 @@ jobs:
           echo "Core Ref:      ${{ matrix.target.core_ref }}"
           echo "SFA Branch:    ${{ matrix.target.sfa_branch }}"
           echo "Tags Common:   ${{ env.TAGS_COMMON }}"
+          echo "Tags SFA Extra:${{ env.TAGS_SFA_EXTRA }}"
           echo "Tags Android:  ${{ env.TAGS_ANDROID_EXTRA }}"
           echo "NDK Version:   r28"
           echo "Java:          $(java -version 2>&1 | head -n 1)"
@@ -619,7 +757,7 @@ jobs:
           make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
 
-          TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_ANDROID_EXTRA }}"
+          TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_SFA_EXTRA }},${{ env.TAGS_ANDROID_EXTRA }}"
           TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
 
           gomobile bind -v \
@@ -674,14 +812,19 @@ jobs:
             mv -f "$apk" "apks/$new_name"
           done
 
+          TAGS_USED="${{ env.TAGS_COMMON }},${{ env.TAGS_SFA_EXTRA }},${{ env.TAGS_ANDROID_EXTRA }}"
+          TAGS_USED=$(echo "$TAGS_USED" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
+
           jq -n \
             --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg version_name "${{ matrix.target.ver }}" \
             --arg target_id "${{ matrix.target.id }}" \
+            --arg tags "$TAGS_USED" \
             '{
               target_id: $target_id,
               version_name: $version_name,
-              build_time: $built_at
+              build_time: $built_at,
+              build_tags: $tags
             }' > "apks/SFA-${{ matrix.target.id }}-metadata.json"
 
       - name: Upload APK Artifacts
@@ -716,11 +859,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Setup UPX
-        uses: crazy-max/ghaction-upx@v4
-        with:
-          install-only: true
-
       - name: Clean temp dir
         run: rm -rf ./tmp/* || true
 
@@ -729,7 +867,7 @@ jobs:
         with:
           path: ./tmp/
 
-      - name: Process, Compress & Package (${{ matrix.target.id }})
+      - name: Process, Collect & Prepare Release (${{ matrix.target.id }})
         run: |
           mkdir -p ./release_files/{linux,windows,darwin,android}
 
@@ -737,144 +875,81 @@ jobs:
           ver="${{ matrix.target.ver }}"
           commit_msg="${{ matrix.target.msg }}"
 
-          if [[ "$target_id" == *"Testing"* ]]; then
-            tag_name="sing-box-testing"
-            prerelease="true"
-            make_latest="false"
-            release_title="sing-box Testing Build"
-            tag_label="#testing"
+          PUBLISH_TYPE="${{ github.event.inputs.publish_type || 'rolling' }}"
+
+          if [ "$PUBLISH_TYPE" = "versioned" ]; then
+            tag_name="v${ver}"
+            if [[ "$ver" =~ (alpha|beta|rc) ]]; then
+              prerelease="true"
+              make_latest="false"
+            else
+              prerelease="false"
+              make_latest="true"
+            fi
+            release_title="${target_id} v${ver}"
+            tag_label="#versioned"
           else
-            tag_name="sing-box-stable"
-            prerelease="false"
-            make_latest="true"
-            release_title="sing-box Stable Build"
-            tag_label="#stable"
+            if [[ "$target_id" == *"Testing"* ]]; then
+              tag_name="sing-box-testing"
+              prerelease="true"
+              make_latest="false"
+              release_title="sing-box Testing Build"
+              tag_label="#testing"
+            else
+              tag_name="sing-box-stable"
+              prerelease="false"
+              make_latest="true"
+              release_title="sing-box Stable Build"
+              tag_label="#stable"
+            fi
           fi
 
-          package_windows() {
-            local dir="$1"
-            local platform="$2"
-            local bin_file=""
+          declare -A BUILDTAGS_MAP
+          declare -A LINUX_FILES WINDOWS_FILES DARWIN_FILES ANDROID_FILES
 
-            if [ -f "$dir/sing-box.exe" ]; then
-              bin_file="$dir/sing-box.exe"
-            else
-              bin_file=$(find "$dir" -maxdepth 1 -type f \( -name 'sing-box' -o -name 'sing-box.exe' \) -print -quit 2>/dev/null || echo "")
-            fi
-
-            if [ -n "$bin_file" ] && [ -f "$bin_file" ]; then
-              UPX_SUPPORTED="false"
-              [ -f "$dir/upx_supported.txt" ] && UPX_SUPPORTED=$(cat "$dir/upx_supported.txt")
-
-              cp "$bin_file" "sing-box.exe"
-              if [ "$UPX_SUPPORTED" = "true" ]; then
-                if file "sing-box.exe" | grep -qiE "^PE32.*executable"; then
-                  upx --best --lzma "sing-box.exe" 2>/dev/null || true
-                fi
-              fi
-
-              ZIP_NAME="sing-box-${target_id}-${platform}-${ver}.zip"
-              ZIP_ARGS=("sing-box.exe")
-              [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" . && ZIP_ARGS+=("LICENSE")
-              [ -f "$dir/libcronet.dll" ] && cp "$dir/libcronet.dll" . && ZIP_ARGS+=("libcronet.dll")
-              zip -q9 "release_files/windows/${ZIP_NAME}" "${ZIP_ARGS[@]}"
-              echo "WINDOWS_FILES[\"${platform}\"]=\"${ZIP_NAME} (UPX)\"" >> /tmp/platform_files.env
-
-              cp "$bin_file" "sing-box-original.exe"
-              ORIG_ZIP_NAME="sing-box-${target_id}-${platform}-${ver}-original.zip"
-              ORIG_ZIP_ARGS=("sing-box-original.exe")
-              [ -f "LICENSE" ] && ORIG_ZIP_ARGS+=("LICENSE")
-              [ -f "libcronet.dll" ] && ORIG_ZIP_ARGS+=("libcronet.dll")
-              zip -q9 "release_files/windows/${ORIG_ZIP_NAME}" "${ORIG_ZIP_ARGS[@]}"
-              echo "WINDOWS_FILES[\"${platform}|orig\"]=\"${ORIG_ZIP_NAME} (未压缩)\"" >> /tmp/platform_files.env
-
-              rm -f "sing-box.exe" "sing-box-original.exe" "LICENSE" "libcronet.dll"
-            fi
-          }
-
-          package_linux() {
-            local dir="$1"
-            local platform="$2"
-            local bin_file=""
-
-            if [ -f "$dir/sing-box" ]; then
-              bin_file="$dir/sing-box"
-            else
-              bin_file=$(find "$dir" -maxdepth 1 -type f \( -name 'sing-box' -o -name 'sing-box.exe' \) -print -quit 2>/dev/null || echo "")
-            fi
-
-            if [ -n "$bin_file" ] && [ -f "$bin_file" ]; then
-              UPX_SUPPORTED="false"
-              [ -f "$dir/upx_supported.txt" ] && UPX_SUPPORTED=$(cat "$dir/upx_supported.txt")
-
-              cp "$bin_file" "sing-box"
-              chmod +x "sing-box"
-              if [ "$UPX_SUPPORTED" = "true" ]; then
-                if file "sing-box" | grep -qE "ELF.*executable"; then
-                  upx --best --lzma "sing-box" 2>/dev/null || true
-                fi
-              fi
-
-              mkdir -p pkg_dir
-              cp "sing-box" pkg_dir/
-              [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" pkg_dir/
-              TAR_NAME="sing-box-${target_id}-${platform}-${ver}.tar.gz"
-              tar --no-same-owner -czf "release_files/linux/${TAR_NAME}" -C pkg_dir .
-              echo "LINUX_FILES[\"${platform}\"]=\"${TAR_NAME} (UPX)\"" >> /tmp/platform_files.env
-              rm -rf pkg_dir
-
-              cp "$bin_file" "sing-box-original"
-              chmod +x "sing-box-original"
-              mkdir -p pkg_orig_dir
-              cp "sing-box-original" pkg_orig_dir/sing-box
-              [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" pkg_orig_dir/
-              ORIG_TAR_NAME="sing-box-${target_id}-${platform}-${ver}-original.tar.gz"
-              tar --no-same-owner -czf "release_files/linux/${ORIG_TAR_NAME}" -C pkg_orig_dir .
-              echo "LINUX_FILES[\"${platform}|orig\"]=\"${ORIG_TAR_NAME} (未压缩)\"" >> /tmp/platform_files.env
-              rm -rf pkg_orig_dir
-
-              rm -f "sing-box" "sing-box-original"
-            fi
-          }
-
-          package_darwin() {
-            local dir="$1"
-            local platform="$2"
-            local bin_file=""
-
-            if [ -f "$dir/sing-box" ]; then
-              bin_file="$dir/sing-box"
-            else
-              bin_file=$(find "$dir" -maxdepth 1 -type f \( -name 'sing-box' -o -name 'sing-box.exe' \) -print -quit 2>/dev/null || echo "")
-            fi
-
-            if [ -n "$bin_file" ] && [ -f "$bin_file" ]; then
-              cp "$bin_file" "sing-box"
-              chmod +x "sing-box"
-
-              mkdir -p pkg_dir
-              cp "sing-box" pkg_dir/
-              [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" pkg_dir/
-              TAR_NAME="sing-box-${target_id}-${platform}-${ver}.tar.gz"
-              tar --no-same-owner -czf "release_files/darwin/${TAR_NAME}" -C pkg_dir .
-              echo "DARWIN_FILES[\"${platform}\"]=\"${TAR_NAME}\"" >> /tmp/platform_files.env
-              rm -rf pkg_dir
-
-              rm -f "sing-box"
-            fi
-          }
-
-          for dir in ./tmp/core-${target_id}-*; do
-            if [[ -d "$dir" ]]; then
-              if [ -f "$dir/artifact-meta.json" ]; then
-                platform=$(jq -r '.platform' "$dir/artifact-meta.json")
+          for pkg_dir in ./tmp/pkg-${target_id}-*; do
+            if [[ -d "$pkg_dir" ]]; then
+              platform=$(basename "$pkg_dir" | sed "s/pkg-${target_id}-//")
+              for f in "$pkg_dir"/*; do
+                [ -f "$f" ] || continue
+                name=$(basename "$f")
                 if [[ "$platform" == *"windows"* ]]; then
-                  package_windows "$dir" "$platform" || true
+                  cp "$f" "release_files/windows/$name"
+                  WINDOWS_FILES["$platform"]="$name"
                 elif [[ "$platform" == *"darwin"* ]]; then
-                  package_darwin "$dir" "$platform" || true
+                  cp "$f" "release_files/darwin/$name"
+                  DARWIN_FILES["$platform"]="$name"
                 else
-                  package_linux "$dir" "$platform" || true
+                  cp "$f" "release_files/linux/$name"
+                  LINUX_FILES["$platform"]="$name"
                 fi
+              done
+            fi
+          done
+
+          for bin_dir in ./tmp/bin-${target_id}-*; do
+            if [[ -d "$bin_dir" ]]; then
+              platform=$(basename "$bin_dir" | sed "s/bin-${target_id}-//")
+              for f in "$bin_dir"/*; do
+                [ -f "$f" ] || continue
+                name=$(basename "$f")
+                if [[ "$platform" == *"windows"* ]]; then
+                  cp "$f" "release_files/windows/$name"
+                elif [[ "$platform" == *"darwin"* ]]; then
+                  cp "$f" "release_files/darwin/$name"
+                else
+                  cp "$f" "release_files/linux/$name"
+                fi
+              done
+            fi
+          done
+
+          for meta_dir in ./tmp/meta-${target_id}-*; do
+            if [[ -d "$meta_dir" ]]; then
+              platform=$(basename "$meta_dir" | sed "s/meta-${target_id}-//")
+              if [ -f "$meta_dir/artifact-meta.json" ]; then
+                tags=$(jq -r '.tags // ""' "$meta_dir/artifact-meta.json")
+                BUILDTAGS_MAP["$platform"]="$tags"
               fi
             fi
           done
@@ -885,7 +960,7 @@ jobs:
               [ -f "$apk" ] || continue
               APK_NAME="SFA-${target_id}-${ver}.apk"
               cp "$apk" "release_files/android/${APK_NAME}"
-              echo "ANDROID_FILES[\"apk\"]=\"${APK_NAME}\"" >> /tmp/platform_files.env
+              ANDROID_FILES["apk"]="$APK_NAME"
             done
             cp "$apk_dir"/*-metadata.json release_files/android/ 2>/dev/null || true
           fi
@@ -896,9 +971,6 @@ jobs:
             built_at: $built_at
           }' > release_files/build-info.json
 
-          declare -A LINUX_FILES WINDOWS_FILES DARWIN_FILES ANDROID_FILES
-          [ -f /tmp/platform_files.env ] && source /tmp/platform_files.env
-
           cat > release_body.txt <<EOF
           # 🚀 ${release_title}
 
@@ -908,6 +980,15 @@ jobs:
           \`\`\`text
           ${commit_msg}
           \`\`\`
+
+          ## 🔧 構建標簽
+          EOF
+
+          for p in "${!BUILDTAGS_MAP[@]}"; do
+            echo "- **${p}**: \`${BUILDTAGS_MAP[$p]}\`" >> release_body.txt
+          done
+
+          cat >> release_body.txt <<EOF
 
           ## 📦 Assets (產物下載)
           EOF
@@ -921,14 +1002,16 @@ jobs:
           | 架構 | 文件名 | 說明 |
           |------|--------|------|
           EOF
-            for key in "${!LINUX_FILES[@]}"; do
-              IFS='|' read -r plat extra <<< "$key"
-              file_info="${LINUX_FILES[$key]}"
-              file_name="${file_info%% (*}"
-              file_desc="${file_info#*\(}"
-              file_desc="${file_desc%)}"
+            for plat in "${!LINUX_FILES[@]}"; do
+              file_name="${LINUX_FILES[$plat]}"
               plat_display="${plat#linux-}"
-              echo "| ${plat_display} | \`${file_name}\` | ${file_desc} |" >> release_body.txt
+              if [[ "$file_name" == *.upx ]]; then
+                echo "| ${plat_display} | \`${file_name}\` | 獨立二進制 (UPX) |" >> release_body.txt
+              elif [[ "$file_name" == *.tar.gz ]]; then
+                echo "| ${plat_display} | \`${file_name}\` | 打包壓縮檔 |" >> release_body.txt
+              else
+                echo "| ${plat_display} | \`${file_name}\` | 獨立二進制 |" >> release_body.txt
+              fi
             done
             echo "</details>" >> release_body.txt
           fi
@@ -942,14 +1025,16 @@ jobs:
           | 架構 | 文件名 | 說明 |
           |------|--------|------|
           EOF
-            for key in "${!WINDOWS_FILES[@]}"; do
-              IFS='|' read -r plat extra <<< "$key"
-              file_info="${WINDOWS_FILES[$key]}"
-              file_name="${file_info%% (*}"
-              file_desc="${file_info#*\(}"
-              file_desc="${file_desc%)}"
+            for plat in "${!WINDOWS_FILES[@]}"; do
+              file_name="${WINDOWS_FILES[$plat]}"
               plat_display="${plat#windows-}"
-              echo "| ${plat_display} | \`${file_name}\` | ${file_desc} |" >> release_body.txt
+              if [[ "$file_name" == *.upx ]]; then
+                echo "| ${plat_display} | \`${file_name}\` | 獨立二進制 (UPX) |" >> release_body.txt
+              elif [[ "$file_name" == *.zip ]]; then
+                echo "| ${plat_display} | \`${file_name}\` | 打包壓縮檔 |" >> release_body.txt
+              else
+                echo "| ${plat_display} | \`${file_name}\` | 獨立二進制 |" >> release_body.txt
+              fi
             done
             echo "</details>" >> release_body.txt
           fi
@@ -963,14 +1048,10 @@ jobs:
           | 架構 | 文件名 | 說明 |
           |------|--------|------|
           EOF
-            for key in "${!DARWIN_FILES[@]}"; do
-              IFS='|' read -r plat extra <<< "$key"
-              file_info="${DARWIN_FILES[$key]}"
-              file_name="${file_info%% (*}"
-              file_desc="${file_info#*\(}"
-              file_desc="${file_desc%)}"
+            for plat in "${!DARWIN_FILES[@]}"; do
+              file_name="${DARWIN_FILES[$plat]}"
               plat_display="${plat#darwin-}"
-              echo "| ${plat_display} | \`${file_name}\` | ${file_desc} |" >> release_body.txt
+              echo "| ${plat_display} | \`${file_name}\` | 打包壓縮檔 |" >> release_body.txt
             done
             echo "</details>" >> release_body.txt
           fi
@@ -1004,7 +1085,6 @@ jobs:
           echo "TAG_NAME=${tag_name}" >> $GITHUB_ENV
           echo "PRERELEASE=${prerelease}" >> $GITHUB_ENV
           echo "MAKE_LATEST=${make_latest}" >> $GITHUB_ENV
-          echo "TAG_LABEL=${tag_label}" >> $GITHUB_ENV
 
       - name: Generate install script (${{ matrix.target.id }})
         run: |
@@ -1030,7 +1110,7 @@ jobs:
           esac
           echo "Fetching latest release for $FILE_ARCH (tag: $TAG)..."
 
-          ASSET_PATH=$(curl -sSL "https://github.com/$REPO/releases/expanded_assets/$TAG" | grep -oE 'href="[^"]+"' | grep "linux" | grep "$FILE_ARCH" | grep "\.tar\.gz" | grep -v "original" | head -n 1 | cut -d '"' -f 2)
+          ASSET_PATH=$(curl -sSL "https://github.com/$REPO/releases/expanded_assets/$TAG" | grep -oE 'href="[^"]+"' | grep "linux" | grep "$FILE_ARCH" | grep "\.tar\.gz" | head -n 1 | cut -d '"' -f 2)
 
           [ -z "$ASSET_PATH" ] && { echo "❌ No release found for $FILE_ARCH"; exit 1; }
           ASSET_URL="https://github.com${ASSET_PATH}"
@@ -1046,10 +1126,10 @@ jobs:
           sed -i 's/^[ \t]*//' release_files/linux/install-linux.sh
           chmod +x release_files/linux/install-linux.sh
 
-      - name: Verify post-UPX integrity and Generate SHA256
+      - name: Generate SHA256
         run: |
           cd release_files
-          find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" \) -exec sha256sum {} \; > SHA256SUMS.txt
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" -o -name "*.upx" \) -exec sha256sum {} \; > SHA256SUMS.txt
           awk '{printf "| `%s` | `%s` |\n", $2, $1}' SHA256SUMS.txt > SHA256SUMS_TABLE.md
 
           cat >> ../release_body.txt <<EOF
@@ -1100,10 +1180,7 @@ jobs:
           prerelease: ${{ env.PRERELEASE }}
           body_path: release_body.txt
           files: |
-            release_files/**/*.tar.gz
-            release_files/**/*.zip
-            release_files/**/*.apk
-            release_files/**/install-linux.sh
+            release_files/**/*
           fail_on_unmatched_files: true
 
       - name: Generate Build Provenance
@@ -1130,6 +1207,7 @@ jobs:
             release_files/**/*.tar.gz
             release_files/**/*.zip
             release_files/**/*.apk
+            release_files/**/*.upx
           retention-days: 1
           compression-level: 0
 
@@ -1281,8 +1359,8 @@ jobs:
 
           ## 📦 文件命名規則
 
-          - **默認版本** (\`xxx.tar.gz\` / \`xxx.zip\`): UPX壓縮版（體積小）
-          - **原始版本** (\`xxx-original.tar.gz\` / \`xxx-original.zip\`): 未壓縮版（兼容性好）
+          - **打包版本** (\`xxx.tar.gz\` / \`xxx.zip\`): 包含 LICENSE 的標準發行版
+          - **獨立二進制** (\`xxx.upx\` / \`xxx\`): 可直接替換執行檔，方便軟路由使用
 
           ## 🛠️ 支持的版本與特性
 
@@ -1434,7 +1512,7 @@ jobs:
       - name: Prepare Android CLI TG Files
         if: ${{ steps.status.outputs.status == 'success' }}
         run: |
-          files=$(find dist -type f -name "sing-box-*-android-*.tar.gz" ! -name "*-original*" 2>/dev/null | head -10)
+          files=$(find dist -type f -name "sing-box-*-android-*.tar.gz" 2>/dev/null | head -10)
           if [ -n "$files" ]; then
             [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
             EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
@@ -1463,7 +1541,7 @@ jobs:
       - name: Prepare Linux TG Files
         if: ${{ steps.status.outputs.status == 'success' }}
         run: |
-          files=$(find dist -type f -name "sing-box-*-linux-*.tar.gz" ! -name "*-original*" 2>/dev/null | head -10)
+          files=$(find dist -type f -name "sing-box-*-linux-*.tar.gz" 2>/dev/null | head -10)
           if [ -n "$files" ]; then
             [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
             EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
@@ -1492,7 +1570,7 @@ jobs:
       - name: Prepare Windows TG Files
         if: ${{ steps.status.outputs.status == 'success' }}
         run: |
-          files=$(find dist -type f -name "sing-box-*-windows-*.zip" ! -name "*-original*" 2>/dev/null | head -10)
+          files=$(find dist -type f -name "sing-box-*-windows-*.zip" 2>/dev/null | head -10)
           if [ -n "$files" ]; then
             [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
             EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
@@ -1521,7 +1599,7 @@ jobs:
       - name: Prepare Darwin TG Files
         if: ${{ steps.status.outputs.status == 'success' }}
         run: |
-          files=$(find dist -type f -name "sing-box-*-darwin-*.tar.gz" ! -name "*-original*" 2>/dev/null | head -10)
+          files=$(find dist -type f -name "sing-box-*-darwin-*.tar.gz" 2>/dev/null | head -10)
           if [ -n "$files" ]; then
             [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
             EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
