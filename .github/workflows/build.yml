@@ -43,7 +43,7 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 0 * * *"
   push:
     branches:
       - main
@@ -338,24 +338,23 @@ jobs:
         if: steps.check_naive.outputs.skip != 'true'
         id: env
         run: |
-          FINAL_TAGS="${{ env.TAGS_COMMON }}"
-
+          TAGS="${{ env.TAGS_COMMON }}"
           CGO_VAL="${{ matrix.platform.cgo || '0' }}"
           ARCHIVE_SUFFIX=""
           ENABLE_NAIVE="${{ github.event.inputs.enable_naive || 'false' }}"
 
           if [ "$ENABLE_NAIVE" = "true" ]; then
-            FINAL_TAGS="${FINAL_TAGS},with_naive_outbound"
+            TAGS="${TAGS},with_naive_outbound"
             if [ "${{ matrix.platform.goos }}" = "windows" ]; then
-              FINAL_TAGS="${FINAL_TAGS},with_purego"
+              TAGS="${TAGS},with_purego"
             elif [ "${{ matrix.platform.goos }}" = "linux" ]; then
               ARCHIVE_SUFFIX="-glibc"
               CGO_VAL="1"
             fi
           fi
 
-          FINAL_TAGS=$(echo "${FINAL_TAGS}" | tr ',' '\n' | sort -u | paste -sd,)
-          echo "tags=${FINAL_TAGS}" >> $GITHUB_OUTPUT
+          TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^$' | sort -u | paste -sd,)
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
           echo "suffix=${ARCHIVE_SUFFIX}" >> $GITHUB_OUTPUT
           echo "cgo_val=${CGO_VAL}" >> $GITHUB_OUTPUT
 
@@ -552,7 +551,7 @@ jobs:
           echo "::notice::Skipping Android build for ${{ matrix.target.id }} (no client configured)"
           exit 0
 
-      - name: Checkout Core (Ensure sync with Tag)
+      - name: Checkout Core
         if: matrix.target.sfa_repo != 'none'
         uses: actions/checkout@v4
         with:
@@ -620,8 +619,8 @@ jobs:
           make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
 
-          TAGS_COMBINED="${{ env.TAGS_COMMON }},${{ env.TAGS_ANDROID_EXTRA }}"
-          TAGS_COMBINED=$(echo "${TAGS_COMBINED}" | tr ',' '\n' | sort -u | paste -sd,)
+          TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_ANDROID_EXTRA }}"
+          TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^$' | sort -u | paste -sd,)
 
           gomobile bind -v \
             -o libbox.aar \
@@ -631,7 +630,7 @@ jobs:
             -libname=box \
             -trimpath \
             -buildvcs=false \
-            -tags="${TAGS_COMBINED}" \
+            -tags="${TAGS}" \
             -ldflags="-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid=" \
             ./experimental/libbox/
         env:
@@ -913,7 +912,6 @@ jobs:
           ## 📦 Assets (產物下載)
           EOF
 
-          # Linux
           if [ ${#LINUX_FILES[@]} -gt 0 ]; then
             cat >> release_body.txt <<EOF
 
@@ -935,7 +933,6 @@ jobs:
             echo "</details>" >> release_body.txt
           fi
 
-          # Windows
           if [ ${#WINDOWS_FILES[@]} -gt 0 ]; then
             cat >> release_body.txt <<EOF
 
@@ -957,7 +954,6 @@ jobs:
             echo "</details>" >> release_body.txt
           fi
 
-          # Darwin
           if [ ${#DARWIN_FILES[@]} -gt 0 ]; then
             cat >> release_body.txt <<EOF
 
@@ -979,7 +975,6 @@ jobs:
             echo "</details>" >> release_body.txt
           fi
 
-          # Android
           if [ ${#ANDROID_FILES[@]} -gt 0 ]; then
             cat >> release_body.txt <<EOF
 
