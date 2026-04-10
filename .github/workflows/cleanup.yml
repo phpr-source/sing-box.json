@@ -2,7 +2,7 @@ name: Advanced Cleanup
 
 on:
   schedule:
-    - cron: '0 2 * * 0' # 每週日執行
+    - cron: '0 3 * * 0'
   workflow_dispatch:
 
 permissions:
@@ -20,26 +20,65 @@ jobs:
           repository: ${{ github.repository }}
           retain_days: 7
           keep_minimum_runs: 3
-          delete_workflow_pattern: "Build sing-box reFind"
+          delete_workflow_pattern: "Build sing-box"
+          delete_run_by_conclusion_pattern: "failure"
+          delete_only_older_than_days: 0
+
+  cleanup-caches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune Old Actions Caches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Fetching caches older than 7 days..."
+          CUTOFF_DATE=$(date -u -d "7 days ago" +%Y-%m-%dT%H:%M:%SZ)
+          PAGE=1
+          while true; do
+            CACHES=$(gh api "repos/${{ github.repository }}/actions/caches?per_page=100&page=$PAGE" --jq '.actions_caches')
+            if [ "$(echo "$CACHES" | jq 'length')" -eq 0 ]; then
+              break
+            fi
+            echo "$CACHES" | jq -r --arg cutoff "$CUTOFF_DATE" '.[] | select(.created_at < $cutoff) | .id' | while read -r cache_id; do
+              if [ -n "$cache_id" ]; then
+                echo "Deleting cache ID: $cache_id"
+                gh api -X DELETE "repos/${{ github.repository }}/actions/caches/$cache_id" || true
+                sleep 1
+              fi
+            done
+            PAGE=$((PAGE + 1))
+          done
 
   cleanup-releases:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
-      - name: Delete Prereleases older than 30 days (Uncapped)
+
+      - name: Safe Cleanup Releases & Tags
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          while true; do
-            OLD_RELEASES=$(gh release list --limit 100 --exclude-drafts --repo ${{ github.repository }} --json tagName,publishedAt,isPrerelease --jq '.[] | select(.isPrerelease == true and (.publishedAt | fromdateiso8601) < (now - 2592000)) | .tagName')
-            if [ -z "$OLD_RELEASES" ]; then
-              echo "No more old prereleases found."
-              break
-            fi
-            for TAG in $OLD_RELEASES; do
-              echo "Deleting release $TAG..."
-              gh release delete "$TAG" --cleanup-tag -y
+          echo "Cleaning up Stable releases..."
+          gh release list --repo "${{ github.repository }}" --limit 100 --json tagName,isPrerelease \
+            --jq '.[] | select(.isPrerelease == false) | .tagName' | \
+            tail -n +4 | while IFS= read -r TAG; do
+              echo "Deleting stable release $TAG..."
+              gh release delete "$TAG" --yes --cleanup-tag || true
+              sleep 0.5
             done
-          done
+
+          echo "Cleaning up Prerelease releases older than 30 days..."
+          OLD_RELEASES=$(gh release list --limit 100 --exclude-drafts --repo "${{ github.repository }}" \
+            --json tagName,publishedAt,isPrerelease \
+            --jq '[.[] | select(.isPrerelease == true)] | .[3:] | .[]? | select((.publishedAt | fromdateiso8601) < (now - 2592000)) | .tagName')
+          
+          if [ -n "$OLD_RELEASES" ]; then
+            for TAG in $OLD_RELEASES; do
+              echo "Deleting prerelease $TAG..."
+              gh release delete "$TAG" --yes --cleanup-tag || true
+              sleep 0.5
+            done
+          else
+            echo "No old prereleases matched deletion criteria."
+          fi
