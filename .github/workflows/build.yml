@@ -399,7 +399,6 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
-          local-cache: true
 
       - name: Setup Zig for CGO cross compilation
         if: steps.check_naive.outputs.skip != 'true' && matrix.platform.goarch != 'amd64' && steps.env.outputs.cgo_val == '1' && matrix.platform.goos != 'android'
@@ -713,7 +712,6 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
-          local-cache: true
 
       - name: Setup Gradle
         if: matrix.target.sfa_repo != 'none'
