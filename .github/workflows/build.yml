@@ -997,7 +997,7 @@ jobs:
           ${commit_msg}
           \`\`\`
 
-          ## 🔧 構建標簽
+          ## 🔧 構建標籤
           EOF
 
           for p in "${!BUILDTAGS_MAP[@]}"; do
