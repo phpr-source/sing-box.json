@@ -372,17 +372,17 @@ jobs:
 
           case "${{ matrix.platform.variant }}" in
             musl)
-              ARCHIVE_SUFFIX="-musl"
+              if [[ "${{ matrix.platform.name }}" != *-musl ]]; then ARCHIVE_SUFFIX="-musl"; fi
               if [ "${{ matrix.platform.goarch }}" = "amd64" ]; then
                 sudo apt-get update && sudo apt-get install -y musl-tools
                 echo "CC=musl-gcc" >> $GITHUB_ENV
               fi
               ;;
             purego)
-              ARCHIVE_SUFFIX="-purego"
+              if [[ "${{ matrix.platform.name }}" != *-purego ]]; then ARCHIVE_SUFFIX="-purego"; fi
               ;;
             glibc)
-              ARCHIVE_SUFFIX="-glibc"
+              if [[ "${{ matrix.platform.name }}" != *-glibc ]]; then ARCHIVE_SUFFIX="-glibc"; fi
               ;;
             *)
               ;;
@@ -524,15 +524,22 @@ jobs:
           fi
 
           TAGS_STR="${{ steps.env.outputs.tags }}"
+          LDFLAGS="-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid="
+
+          if [ "${{ matrix.platform.variant }}" = "musl" ] && [ "$CGO_ENABLED" = "1" ]; then
+            LDFLAGS="$LDFLAGS -extldflags '-static'"
+            TAGS_STR="$TAGS_STR,osusergo,netgo"
+          fi
+
           echo "$TAGS_STR" > dist/build_tags.txt
           echo "${{ matrix.platform.upx }}" > dist/upx_supported.txt
 
           BIN_NAME="sing-box"
           if [ "${{ matrix.platform.goos }}" = "windows" ]; then BIN_NAME="sing-box.exe"; fi
 
-          go build -v -trimpath -ldflags "-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid=" -tags "${{ steps.env.outputs.tags }}" -o "dist/$BIN_NAME" ./cmd/sing-box
+          go build -v -trimpath -ldflags "$LDFLAGS" -tags "$TAGS_STR" -o "dist/$BIN_NAME" ./cmd/sing-box
 
-          echo "{\"target_id\": \"${{ matrix.target.id }}\", \"platform\": \"${{ matrix.platform.name }}\", \"suffix\": \"${{ steps.env.outputs.suffix }}\", \"version_name\": \"${{ matrix.target.ver }}\", \"tags\": \"${{ steps.env.outputs.tags }}\"}" > dist/artifact-meta.json
+          echo "{\"target_id\": \"${{ matrix.target.id }}\", \"platform\": \"${{ matrix.platform.name }}\", \"suffix\": \"${{ steps.env.outputs.suffix }}\", \"version_name\": \"${{ matrix.target.ver }}\", \"tags\": \"$TAGS_STR\"}" > dist/artifact-meta.json
 
       - name: Verify Binary Integrity
         if: steps.check_naive.outputs.skip != 'true'
@@ -572,8 +579,8 @@ jobs:
 
       - name: Compress and Package
         if: steps.check_naive.outputs.skip != 'true'
+        working-directory: sing-box/dist
         run: |
-          cd sing-box/dist
           BIN_NAME="sing-box"
           [ "${{ matrix.platform.goos }}" = "windows" ] && BIN_NAME="sing-box.exe"
           TARGET_ID="${{ matrix.target.id }}"
@@ -587,40 +594,39 @@ jobs:
           STANDALONE_NAME="sing-box-${TARGET_ID}-${PLATFORM}${SUFFIX}-${VER}"
 
           if [ "$UPX_SUPPORTED" = "true" ]; then
-            if [ "${{ matrix.platform.goos }}" = "windows" ]; then
+            if [[ "${PLATFORM}" == *"mips"* ]] || [[ "${PLATFORM}" == *"armv7"* ]]; then
+              file "$BIN_NAME" | grep -qE "ELF.*executable" && upx -9 "$BIN_NAME" 2>/dev/null || true
+            elif [ "${{ matrix.platform.goos }}" = "windows" ]; then
               file "$BIN_NAME" | grep -qiE "^PE32.*executable" && upx --best --lzma "$BIN_NAME" 2>/dev/null || true
             else
               file "$BIN_NAME" | grep -qE "ELF.*executable" && upx --best --lzma "$BIN_NAME" 2>/dev/null || true
             fi
-            cp "$BIN_NAME" "../${STANDALONE_NAME}.upx"
+            cp "$BIN_NAME" "${STANDALONE_NAME}.upx"
             echo "standalone_bin=${STANDALONE_NAME}.upx" >> $GITHUB_ENV
           else
             if [ "${{ matrix.platform.goos }}" = "windows" ]; then
-              cp "$BIN_NAME" "../${STANDALONE_NAME}.exe"
+              cp "$BIN_NAME" "${STANDALONE_NAME}.exe"
               echo "standalone_bin=${STANDALONE_NAME}.exe" >> $GITHUB_ENV
             else
-              cp "$BIN_NAME" "../${STANDALONE_NAME}"
+              cp "$BIN_NAME" "${STANDALONE_NAME}"
               echo "standalone_bin=${STANDALONE_NAME}" >> $GITHUB_ENV
             fi
           fi
 
-          cd ..
           if [ "${{ matrix.platform.goos }}" = "windows" ]; then
             ZIP_NAME="${STANDALONE_NAME}.zip"
-            if [ -f "dist/libcronet.dll" ]; then
-              cp "dist/libcronet.dll" .
-              zip -q9 "release_files/${ZIP_NAME}" "${BIN_NAME}" "libcronet.dll" LICENSE 2>/dev/null || zip -q9 "release_files/${ZIP_NAME}" "${BIN_NAME}" "libcronet.dll"
+            if [ -f "libcronet.dll" ]; then
+              zip -q9 "release_files/${ZIP_NAME}" "$BIN_NAME" "libcronet.dll" LICENSE 2>/dev/null || zip -q9 "release_files/${ZIP_NAME}" "$BIN_NAME" "libcronet.dll"
             else
-              zip -q9 "release_files/${ZIP_NAME}" "${BIN_NAME}" LICENSE 2>/dev/null || zip -q9 "release_files/${ZIP_NAME}" "${BIN_NAME}"
+              zip -q9 "release_files/${ZIP_NAME}" "$BIN_NAME" LICENSE 2>/dev/null || zip -q9 "release_files/${ZIP_NAME}" "$BIN_NAME"
             fi
             echo "package_file=${ZIP_NAME}" >> $GITHUB_ENV
           else
             TAR_NAME="${STANDALONE_NAME}.tar.gz"
-            if [ -f "dist/libcronet.so" ]; then
-              cp "dist/libcronet.so" .
-              tar --no-same-owner -czf "release_files/${TAR_NAME}" "${BIN_NAME}" "libcronet.so" LICENSE 2>/dev/null || tar --no-same-owner -czf "release_files/${TAR_NAME}" "${BIN_NAME}" "libcronet.so"
+            if [ -f "libcronet.so" ]; then
+              tar --no-same-owner -czf "release_files/${TAR_NAME}" "$BIN_NAME" "libcronet.so" LICENSE 2>/dev/null || tar --no-same-owner -czf "release_files/${TAR_NAME}" "$BIN_NAME" "libcronet.so"
             else
-              tar --no-same-owner -czf "release_files/${TAR_NAME}" "${BIN_NAME}" LICENSE 2>/dev/null || tar --no-same-owner -czf "release_files/${TAR_NAME}" "${BIN_NAME}"
+              tar --no-same-owner -czf "release_files/${TAR_NAME}" "$BIN_NAME" LICENSE 2>/dev/null || tar --no-same-owner -czf "release_files/${TAR_NAME}" "$BIN_NAME"
             fi
             echo "package_file=${TAR_NAME}" >> $GITHUB_ENV
           fi
@@ -631,7 +637,7 @@ jobs:
         with:
           name: pkg-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
           path: |
-            sing-box/release_files/*
+            sing-box/dist/release_files/*
           retention-days: 1
           compression-level: 0
 
@@ -640,7 +646,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
-          path: sing-box/${{ env.standalone_bin }}
+          path: sing-box/dist/${{ env.standalone_bin }}
           retention-days: 1
           compression-level: 0
 
@@ -805,10 +811,25 @@ jobs:
           mkdir -p apks
           REL_DIR="app/build/outputs/apk/other/release"
           [ -d "$REL_DIR" ] || REL_DIR="app/build/outputs/apk/release"
+          VER="${{ matrix.target.ver }}"
 
           for apk in "$REL_DIR"/*.apk; do
             [ -f "$apk" ] || continue
-            new_name="SFA-${{ matrix.target.id }}-$(basename "$apk")"
+            
+            ABI=""
+            if [[ "$apk" == *"arm64-v8a"* ]]; then
+              ABI="-arm64-v8a"
+            elif [[ "$apk" == *"armeabi-v7a"* ]]; then
+              ABI="-armeabi-v7a"
+            elif [[ "$apk" == *"x86_64"* ]]; then
+              ABI="-x86_64"
+            elif [[ "$apk" == *"x86"* ]]; then
+              ABI="-x86"
+            elif [[ "$apk" == *"universal"* ]]; then
+              ABI="-universal"
+            fi
+            
+            new_name="SFA-${{ matrix.target.id }}${ABI}-${VER}.apk"
             mv -f "$apk" "apks/$new_name"
           done
 
@@ -887,20 +908,17 @@ jobs:
               make_latest="true"
             fi
             release_title="${target_id} v${ver}"
-            tag_label="#versioned"
           else
             if [[ "$target_id" == *"Testing"* ]]; then
               tag_name="sing-box-testing"
               prerelease="true"
               make_latest="false"
               release_title="sing-box Testing Build"
-              tag_label="#testing"
             else
               tag_name="sing-box-stable"
               prerelease="false"
               make_latest="true"
               release_title="sing-box Stable Build"
-              tag_label="#stable"
             fi
           fi
 
@@ -958,7 +976,7 @@ jobs:
           if [[ -d "$apk_dir" ]]; then
             for apk in "$apk_dir"/*.apk; do
               [ -f "$apk" ] || continue
-              APK_NAME="SFA-${target_id}-${ver}.apk"
+              APK_NAME=$(basename "$apk")
               cp "$apk" "release_files/android/${APK_NAME}"
               ANDROID_FILES["apk"]="$APK_NAME"
             done
@@ -1279,38 +1297,6 @@ jobs:
             git branch -M build-artifacts
             git push origin build-artifacts --force 2>/dev/null || true
           fi
-
-      - name: Clean old releases
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release list --repo "${{ github.repository }}" --limit 50 --json tagName,isPrerelease --jq '.[] | select(.isPrerelease == false) | .tagName' | \
-            tail -n +4 | xargs -r -I {} gh release delete {} --yes --cleanup-tag 2>/dev/null || true
-
-          gh release list --repo "${{ github.repository }}" --limit 50 --json tagName,isPrerelease --jq '.[] | select(.isPrerelease == true) | .tagName' | \
-            tail -n +6 | xargs -r -I {} gh release delete {} --yes --cleanup-tag 2>/dev/null || true
-
-      - name: Delete old workflow runs
-        if: always()
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          DELETE_BEFORE=$(date -u -d "7 days ago" +%Y-%m-%d)
-          gh api "repos/${{ github.repository }}/actions/runs?status=completed&created=<${DELETE_BEFORE}" \
-            --paginate --jq '.workflow_runs[].id' 2>/dev/null | while read run_id; do
-            gh api "repos/${{ github.repository }}/actions/runs/$run_id" -X DELETE >/dev/null 2>&1 || true
-          done
-
-      - name: Prune Old Caches
-        if: always()
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "🧹 Clearing caches older than 7 days to prevent 10GB limit exhaustion..."
-          CUTOFF_DATE=$(date -u -d "7 days ago" +%Y-%m-%dT%H:%M:%SZ)
-          gh api "repos/${{ github.repository }}/actions/caches" --paginate -q ".actions_caches[] | select(.created_at < \"$CUTOFF_DATE\") | .id" | xargs -I {} gh api -X DELETE "repos/${{ github.repository }}/actions/caches/{}" || true
 
       - name: Log Build Summary
         if: always()
