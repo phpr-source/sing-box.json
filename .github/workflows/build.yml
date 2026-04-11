@@ -74,7 +74,7 @@ env:
   TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard,with_tailscale"
   TAGS_CLI_EXTRA: "with_dhcp,with_acme,with_ccm,with_ocm"
   TAGS_SFA_EXTRA: "ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird"
-  TAGS_ANDROID_EXTRA: "with_conntrack,with_naive_outbound"
+  TAGS_ANDROID_EXTRA: "with_conntrack"
   CURL_TIMEOUT_API: 60
   CURL_TIMEOUT_FILE: 120
 
@@ -201,7 +201,8 @@ jobs:
               if [ -n "$ver" ] && [ "$ver" != "null" ]; then
                 local commit_info=$(api_call_with_retry "https://api.github.com/repos/$repo/commits/$branch")
                 local commit_date=$(echo "$commit_info" | jq -r '.commit.committer.date // empty' 2>/dev/null || echo "")
-                commit_msg=$(echo "$commit_info" | jq -r '.commit.message // empty' 2>/dev/null | head -n 5 | sed 's/\r//g' || echo "無更新說明")
+                commit_msg=$(echo "$commit_info" | jq -r '.commit.message // empty' 2>/dev/null | head -n 5 | sed 's/\r//g')
+                [ -z "$commit_msg" ] && commit_msg="無更新說明"
                 
                 if [ -n "$commit_date" ] && [ "$commit_date" != "null" ]; then
                   time=$(TZ=Asia/Shanghai date -d "$commit_date" '+%Y-%m-%d' 2>/dev/null || TZ=Asia/Shanghai date '+%Y-%m-%d')
@@ -285,7 +286,7 @@ jobs:
         target: ${{ fromJson(needs.check.outputs.matrix) }}
         platform:
           - { name: linux-amd64-v3-glibc, goos: linux, goarch: amd64, goamd64: v3, variant: glibc, cgo: 1, upx: true }
-          - { name: linux-amd64-v3-musl,  goos: linux, goarch: amd64, goamd64: v3, variant: musl,  cgo: 1, upx: true, cc: musl-gcc }
+          - { name: linux-amd64-v3-musl,  goos: linux, goarch: amd64, goamd64: v3, variant: musl,  cgo: 1, upx: true }
           - { name: linux-amd64-v3-purego,goos: linux, goarch: amd64, goamd64: v3, variant: purego,cgo: 0, upx: true, tags_extra: with_purego }
           - { name: linux-arm64-glibc,   goos: linux, goarch: arm64, variant: glibc, cgo: 1, upx: true }
           - { name: linux-arm64-musl,    goos: linux, goarch: arm64, variant: musl,  cgo: 1, upx: true }
@@ -294,14 +295,11 @@ jobs:
           - { name: windows-arm64, goos: windows, goarch: arm64, upx: false }
           - { name: darwin-amd64-v3, goos: darwin, goarch: amd64, goamd64: v3, upx: false, cgo: "1" }
           - { name: darwin-arm64, goos: darwin, goarch: arm64, upx: false, cgo: "1" }
-          - { name: android-arm64, goos: android, goarch: arm64, upx: false, cgo: "1", cc_triple: "aarch64-linux-android23" }
     runs-on: ${{ matrix.platform.goos == 'darwin' && 'macos-latest' || 'ubuntu-latest' }}
     env:
       GOOS: ${{ matrix.platform.goos }}
       GOARCH: ${{ matrix.platform.goarch }}
       GOAMD64: ${{ matrix.platform.goamd64 }}
-      GOARM: ${{ matrix.platform.goarm }}
-      GOMIPS: ${{ matrix.platform.gomips }}
     steps:
       - name: Check Naive Compatibility
         id: check_naive
@@ -393,21 +391,24 @@ jobs:
           echo "suffix=${ARCHIVE_SUFFIX}" >> $GITHUB_OUTPUT
           echo "cgo_val=${CGO_VAL}" >> $GITHUB_OUTPUT
 
-      - name: Setup Android NDK
-        if: matrix.platform.goos == 'android'
-        id: setup-ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r28
-
       - name: Setup Zig for CGO cross compilation
-        if: steps.check_naive.outputs.skip != 'true' && matrix.platform.goarch != 'amd64' && steps.env.outputs.cgo_val == '1' && matrix.platform.goos == 'linux'
+        if: >-
+          steps.check_naive.outputs.skip != 'true' &&
+          matrix.platform.goarch != 'amd64' &&
+          steps.env.outputs.cgo_val == '1' &&
+          matrix.platform.goos == 'linux' &&
+          github.event.inputs.enable_naive != 'true'
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.11.0
 
       - name: Export Zig CC
-        if: steps.check_naive.outputs.skip != 'true' && matrix.platform.goarch == 'arm64' && steps.env.outputs.cgo_val == '1' && matrix.platform.goos == 'linux'
+        if: >-
+          steps.check_naive.outputs.skip != 'true' &&
+          matrix.platform.goarch == 'arm64' &&
+          steps.env.outputs.cgo_val == '1' &&
+          matrix.platform.goos == 'linux' &&
+          github.event.inputs.enable_naive != 'true'
         run: |
           if [ "${{ matrix.platform.variant }}" = "musl" ]; then
             echo "CC=zig cc -target aarch64-linux-musl" >> "$GITHUB_ENV"
@@ -444,8 +445,10 @@ jobs:
       - name: Export ccache compilers
         if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
         run: |
-          echo "CC=ccache gcc" >> "$GITHUB_ENV"
-          echo "CXX=ccache g++" >> "$GITHUB_ENV"
+          if [[ -z "${CC:-}" ]]; then
+            echo "CC=ccache gcc" >> "$GITHUB_ENV"
+            echo "CXX=ccache g++" >> "$GITHUB_ENV"
+          fi
 
       - name: Setup cronet-go
         if: steps.check_naive.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && (matrix.platform.goos == 'linux' || matrix.platform.goos == 'windows')
@@ -480,7 +483,7 @@ jobs:
               if [ "$i" -eq 3 ]; then exit 1; fi
             done
 
-            go run ./cmd/build-naive --target="$TARGET" env 2>/dev/null | grep -E '^[A-Za-z0-9_]+=' >> "$GITHUB_ENV" || exit 1
+            go run ./cmd/build-naive --target="$TARGET" env 2>/dev/null | grep -E '^[A-Za-z0-9_]+=' | grep -vE '^(CC|CXX)=' >> "$GITHUB_ENV" || exit 1
 
           elif [ "${{ matrix.platform.goos }}" = "windows" ]; then
             mkdir -p "$GITHUB_WORKSPACE/sing-box/dist"
@@ -499,7 +502,6 @@ jobs:
           echo "Platform:      ${{ matrix.platform.name }}"
           echo "GOOS/GOARCH:   ${{ matrix.platform.goos }}/${{ matrix.platform.goarch }}"
           echo "GOAMD64:       ${{ matrix.platform.goamd64 }}"
-          echo "GOARM:         ${{ matrix.platform.goarm }}"
           echo "CGO_ENABLED:   ${{ steps.env.outputs.cgo_val }}"
           echo "Tags:          ${{ steps.env.outputs.tags }}"
           echo "UPX Supported: ${{ matrix.platform.upx }}"
@@ -517,10 +519,6 @@ jobs:
           cd sing-box
           mkdir -p dist
           cp LICENSE dist/ 2>/dev/null || true
-
-          if [[ -n "${{ matrix.platform.cc_triple }}" ]]; then
-            export CC="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.platform.cc_triple }}-clang"
-          fi
 
           TAGS_STR="${{ steps.env.outputs.tags }}"
           LDFLAGS="-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid="
@@ -589,19 +587,24 @@ jobs:
           SUFFIX="${{ steps.env.outputs.suffix }}"
 
           mkdir -p release_files
-          
           STANDALONE_NAME="sing-box-${TARGET_ID}-${PLATFORM}${SUFFIX}-${VER}"
 
           if [ "$UPX_SUPPORTED" = "true" ]; then
-            if [[ "${PLATFORM}" == *"mips"* ]] || [[ "${PLATFORM}" == *"armv7"* ]]; then
-              file "$BIN_NAME" | grep -qE "ELF.*executable" && upx -9 "$BIN_NAME" 2>/dev/null || true
-            elif [ "${{ matrix.platform.goos }}" = "windows" ]; then
-              file "$BIN_NAME" | grep -qiE "^PE32.*executable" && upx --best --lzma "$BIN_NAME" 2>/dev/null || true
-            else
-              file "$BIN_NAME" | grep -qE "ELF.*executable" && upx --best --lzma "$BIN_NAME" 2>/dev/null || true
+            cp "$BIN_NAME" "${STANDALONE_NAME}.upx.tmp"
+            UPX_OK=false
+            if file "$BIN_NAME" | grep -qE "ELF.*executable"; then
+              if upx --best --lzma "${STANDALONE_NAME}.upx.tmp" 2>/dev/null; then
+                UPX_OK=true
+              fi
             fi
-            cp "$BIN_NAME" "${STANDALONE_NAME}.upx"
-            echo "standalone_bin=${STANDALONE_NAME}.upx" >> $GITHUB_ENV
+            if [ "$UPX_OK" = "true" ]; then
+              mv "${STANDALONE_NAME}.upx.tmp" "${STANDALONE_NAME}.upx"
+              echo "standalone_bin=${STANDALONE_NAME}.upx" >> $GITHUB_ENV
+            else
+              rm -f "${STANDALONE_NAME}.upx.tmp"
+              cp "$BIN_NAME" "${STANDALONE_NAME}"
+              echo "standalone_bin=${STANDALONE_NAME}" >> $GITHUB_ENV
+            fi
           else
             if [ "${{ matrix.platform.goos }}" = "windows" ]; then
               cp "$BIN_NAME" "${STANDALONE_NAME}.exe"
@@ -851,9 +854,8 @@ jobs:
     needs: [init, check, build_core, build_android]
     if: >-
       always() &&
-      (needs.init.result == 'success' || needs.init.result == 'skipped') &&
-      (needs.check.result == 'success' || needs.check.result == 'skipped') &&
-      needs.check.outputs.has_update == 'true'
+      needs.check.outputs.has_update == 'true' &&
+      !cancelled()
     strategy:
       fail-fast: false
       matrix:
@@ -886,11 +888,12 @@ jobs:
           PUBLISH_TYPE="${{ github.event.inputs.publish_type || 'rolling' }}"
 
           if [ "$PUBLISH_TYPE" = "versioned" ]; then
-            tag_name="v${ver}"
-            if [[ "$ver" =~ (alpha|beta|rc) ]]; then
+            if [[ "$target_id" == *"Testing"* ]]; then
+              tag_name="v${ver}-testing"
               prerelease="true"
               make_latest="false"
             else
+              tag_name="v${ver}"
               prerelease="false"
               make_latest="true"
             fi
@@ -983,7 +986,12 @@ jobs:
 
           ## 📝 Changelog (更新日誌)
           \`\`\`text
-          ${commit_msg}
+          EOF
+
+          commit_msg_safe=$(printf '%s' "$commit_msg" | tr '`' "'")
+          printf '%s\n' "$commit_msg_safe" >> release_body.txt
+
+          cat >> release_body.txt <<EOF
           \`\`\`
 
           ## 🔧 構建標籤
@@ -1134,7 +1142,7 @@ jobs:
       - name: Generate SHA256
         run: |
           cd release_files
-          find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" -o -name "*.upx" \) -exec sha256sum {} \; > SHA256SUMS.txt
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" -o -name "*.upx" \) -exec sha256sum {} \; | sed 's/ \.\// /' > SHA256SUMS.txt
           awk '{printf "| `%s` | `%s` |\n", $2, $1}' SHA256SUMS.txt > SHA256SUMS_TABLE.md
 
           cat >> ../release_body.txt <<EOF
@@ -1149,11 +1157,11 @@ jobs:
       - name: Check if release files exist
         id: check_files
         run: |
-          if find ./release_files -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" \) | grep -q .; then
+          if find ./release_files -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" -o -name "*.upx" \) | grep -q .; then
             echo "files_exist=true" >> $GITHUB_OUTPUT
           else
             echo "files_exist=false" >> $GITHUB_OUTPUT
-            exit 1
+            exit 0
           fi
 
       - name: Delete existing tag and release if exists
@@ -1185,14 +1193,21 @@ jobs:
           prerelease: ${{ env.PRERELEASE }}
           body_path: release_body.txt
           files: |
-            release_files/**/*
-          fail_on_unmatched_files: true
+            release_files/**/*.tar.gz
+            release_files/**/*.zip
+            release_files/**/*.apk
+            release_files/**/*.upx
+          fail_on_unmatched_files: false
 
       - name: Generate Build Provenance
         if: steps.check_files.outputs.files_exist == 'true'
         uses: actions/attest-build-provenance@v1
         with:
-          subject-path: './release_files/**/*'
+          subject-path: |
+            release_files/**/*.tar.gz
+            release_files/**/*.zip
+            release_files/**/*.apk
+            release_files/**/*.upx
 
       - name: Upload Build Info Artifact
         if: always()
@@ -1219,7 +1234,7 @@ jobs:
   finalize:
     needs: [check, build_core, build_android, publish]
     runs-on: ubuntu-latest
-    if: always() && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    if: always() && !cancelled()
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1405,6 +1420,21 @@ jobs:
             esac
           done
 
+          ALL_SKIPPED=true
+          for job in build_core build_android publish; do
+            RESULT=""
+            if [ "$job" = "build_core" ]; then RESULT="${{ needs.build_core.result }}"
+            elif [ "$job" = "build_android" ]; then RESULT="${{ needs.build_android.result }}"
+            elif [ "$job" = "publish" ]; then RESULT="${{ needs.publish.result }}"
+            fi
+            if [ "$RESULT" != "skipped" ]; then ALL_SKIPPED=false; break; fi
+          done
+
+          if [ "$ALL_SKIPPED" = "true" ]; then
+            echo "status=skipped" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           TG_DETAILS=$(IFS=$'\n'; echo "${STATUS_LINES[*]}")
 
           escape_tg_markdown() {
@@ -1412,7 +1442,8 @@ jobs:
                             -e 's/_/\\_/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' \
                             -e 's/~/\\~/g' -e 's/`/\\`/g' -e 's/>/\\>/g' -e 's/#/\\#/g' \
                             -e 's/+/\\+/g' -e 's/-/\\-/g' -e 's/=/\\=/g' -e 's/|/\\|/g' \
-                            -e 's/{/\\{/g' -e 's/}/\\}/g' -e 's/!/\\!/g'
+                            -e 's/{/\\{/g' -e 's/}/\\}/g' -e 's/!/\\!/g' \
+                            -e 's/\./\\./g' -e 's/(/\\(/g' -e 's/)/\\)/g'
           }
 
           TG_DETAILS_SAFE=$(escape_tg_markdown "$TG_DETAILS")
@@ -1438,15 +1469,27 @@ jobs:
           📥 [點擊前往 GitHub下載](https://github\.com/${REPO_SAFE}/releases)"
           fi
 
-          EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1 2>/dev/null || echo "EOM")
-          printf '%s\n' "TG_MESSAGE<<$EOF_MARKER" >> "$GITHUB_ENV"
-          printf '%s\n' "$MSG" >> "$GITHUB_ENV"
-          printf '%s\n' "$EOF_MARKER" >> "$GITHUB_ENV"
+          PAYLOAD=$(jq -n \
+            --arg chat_id "${{ secrets.CHAT_ID }}" \
+            --arg text "$MSG" \
+            --arg parse_mode "MarkdownV2" \
+            '{chat_id: $chat_id, text: $text, parse_mode: $parse_mode}')
 
-          echo "status=$TG_STATUS" >> $GITHUB_OUTPUT
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD") || HTTP_CODE="000"
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "::notice::Telegram notification sent (HTTP $HTTP_CODE)"
+          else
+            echo "::warning::Telegram notification failed (HTTP $HTTP_CODE)"
+          fi
+
+          echo "status=${TG_STATUS}" >> $GITHUB_OUTPUT
 
       - name: Download release packages for TG
-        if: ${{ steps.status.outputs.status == 'success' }}
+        if: steps.status.outputs.status == 'success'
         uses: actions/download-artifact@v4
         with:
           pattern: release-files-*
@@ -1454,7 +1497,7 @@ jobs:
           merge-multiple: true
 
       - name: Prepare SFA TG Files
-        if: ${{ steps.status.outputs.status == 'success' }}
+        if: steps.status.outputs.status == 'success'
         run: |
           files=$(find dist -type f -name "SFA-*.apk" 2>/dev/null | head -10)
           if [ -n "$files" ]; then
@@ -1483,7 +1526,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
       - name: Prepare Android CLI TG Files
-        if: ${{ steps.status.outputs.status == 'success' }}
+        if: steps.status.outputs.status == 'success'
         run: |
           files=$(find dist -type f -name "sing-box-*-android-*.tar.gz" 2>/dev/null | head -10)
           if [ -n "$files" ]; then
@@ -1512,7 +1555,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
       - name: Prepare Linux TG Files
-        if: ${{ steps.status.outputs.status == 'success' }}
+        if: steps.status.outputs.status == 'success'
         run: |
           files=$(find dist -type f -name "sing-box-*-linux-*.tar.gz" 2>/dev/null | head -10)
           if [ -n "$files" ]; then
@@ -1541,7 +1584,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
       - name: Prepare Windows TG Files
-        if: ${{ steps.status.outputs.status == 'success' }}
+        if: steps.status.outputs.status == 'success'
         run: |
           files=$(find dist -type f -name "sing-box-*-windows-*.zip" 2>/dev/null | head -10)
           if [ -n "$files" ]; then
@@ -1570,7 +1613,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
       - name: Prepare Darwin TG Files
-        if: ${{ steps.status.outputs.status == 'success' }}
+        if: steps.status.outputs.status == 'success'
         run: |
           files=$(find dist -type f -name "sing-box-*-darwin-*.tar.gz" 2>/dev/null | head -10)
           if [ -n "$files" ]; then
