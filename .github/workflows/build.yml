@@ -160,7 +160,7 @@ jobs:
             local url="$1"
             local res
             if ! res=$(curl -sfL -m ${CURL_TIMEOUT_API} --retry 3 --retry-delay 5 --retry-connrefused -H "Authorization: token $GH_TOKEN" "$url"); then
-              echo "::warning::API call failed for $url"
+              echo "::warning::API call failed for $url" >&2
               echo "[]"
             else
               echo "$res"
@@ -220,10 +220,10 @@ jobs:
 
               if [ -n "$ver" ] && [ "$ver" != "null" ]; then
                 local release_info=$(api_call_with_retry "https://api.github.com/repos/$repo/releases/tags/v$ver")
-                upstream_body=$(echo "$release_info" | jq -r '.body // empty' 2>/dev/null)
+                upstream_body=$(echo "$release_info" | jq -r '.body // empty' 2>/dev/null || echo "")
                 local commit_info=$(api_call_with_retry "https://api.github.com/repos/$repo/commits/$branch")
                 local commit_date=$(echo "$commit_info" | jq -r '.commit.committer.date // empty' 2>/dev/null || echo "")
-                commit_msg=$(echo "$commit_info" | jq -r '.commit.message // empty' 2>/dev/null | head -n 5 | sed 's/\r//g')
+                commit_msg=$(echo "$commit_info" | jq -r '.commit.message // empty' 2>/dev/null | head -n 5 | sed 's/\r//g' || true)
                 [ -z "$commit_msg" ] && commit_msg="無更新說明"
                 
                 if [ -n "$commit_date" ] && [ "$commit_date" != "null" ]; then
@@ -251,7 +251,7 @@ jobs:
             local marker="[${id} v${ver}]"
             local branch_url="https://github.com/$repo/tree/$branch"
 
-            LAST_VER=$(echo "$LAST_BUILD_INFO" | jq -r --arg id "$id" '.targets[]? | select(.target_id == $id) | .version_name // empty' 2>/dev/null | head -n 1)
+            LAST_VER=$(echo "$LAST_BUILD_INFO" | jq -r --arg id "$id" '.targets[]? | select(.target_id == $id) | .version_name // empty' 2>/dev/null | head -n 1 || true)
 
             if [ "$FORCE_BUILD" = "true" ] || [ -n "$OVERRIDE_VERSION" ] || [ -n "$TARGET_FILTER" ] || [ "$SKIP_CHECK" = "true" ]; then
               echo "true" > /tmp/has_update_flag
@@ -622,10 +622,9 @@ jobs:
           LDFLAGS="-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid="
 
           if [ "${{ matrix.platform.goos }}" = "linux" ] && [ "$CGO_ENABLED" = "1" ]; then
-            TAGS_STR="$TAGS_STR,netgo"
             if [ "${{ matrix.platform.variant }}" = "musl" ]; then
               LDFLAGS="$LDFLAGS -extldflags '-static'"
-              TAGS_STR="$TAGS_STR,osusergo"
+              TAGS_STR="$TAGS_STR,osusergo,netgo"
             fi
           fi
 
@@ -1028,11 +1027,83 @@ jobs:
           rm -rf ./release_files
           mkdir -p ./release_files
 
-          echo "$MATRIX" | jq -c '.[]' | while read -r target; do
+          cat > /tmp/install-linux.sh << 'EOF'
+          #!/bin/bash
+          set -euo pipefail
+
+          REPO="${{ github.repository }}"
+          TAG="${1:-stable}"
+          [ "$TAG" = "testing" ] && TAG="sing-box-testing" || TAG="sing-box-stable"
+
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64|amd64)  FILE_ARCH="amd64-v3" ;;
+            aarch64|arm64) FILE_ARCH="arm64" ;;
+            armv7l)        FILE_ARCH="armv7" ;;
+            armv6l)        FILE_ARCH="armv6" ;;
+            mips64)        FILE_ARCH="mips64" ;;
+            mips64el)      FILE_ARCH="mips64le" ;;
+            mips)          FILE_ARCH="mips" ;;
+            mipsel)        FILE_ARCH="mipsle" ;;
+            riscv64)       FILE_ARCH="riscv64" ;;
+            *) echo "❌ Unsupported arch: $ARCH"; exit 1 ;;
+          esac
+
+          if pgrep -x "sing-box" > /dev/null 2>&1; then
+            echo "❌ sing-box is currently running. Stop it before updating."
+            exit 1
+          fi
+
+          SUDO_CMD=""
+          [ "$(id -u)" -ne 0 ] && SUDO_CMD="sudo"
+
+          WORK_DIR=$(mktemp -d)
+          trap 'rm -rf "$WORK_DIR"' EXIT
+
+          echo "🔍 Fetching latest release for $FILE_ARCH (tag: $TAG)..."
+          ASSET_URL=$(curl -sSL -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
+            | grep -oE '"browser_download_url":\s*"[^"]+"' \
+            | cut -d '"' -f 4 \
+            | grep "linux" | grep -E "${FILE_ARCH}[-.]" | grep "\.tar\.gz" | head -n 1)
+
+          [ -z "$ASSET_URL" ] && { echo "❌ No release found for $FILE_ARCH"; exit 1; }
+
+          echo "⬇️  Downloading $(basename "$ASSET_URL")..."
+          curl -fSL -o "$WORK_DIR/archive.tar.gz" "$ASSET_URL"
+
+          echo "📦 Extracting..."
+          tar -xzf "$WORK_DIR/archive.tar.gz" -C "$WORK_DIR"
+
+          chmod +x "$WORK_DIR/sing-box"
+
+          INSTALLED_VER=$("$WORK_DIR/sing-box" version 2>/dev/null | head -n1 || echo "unknown")
+          echo "📋 Binary reports: $INSTALLED_VER"
+
+          $SUDO_CMD mv "$WORK_DIR/sing-box" /usr/local/bin/sing-box
+          echo "✅ Installation complete. $(sing-box version 2>/dev/null | head -n1 || true)"
+          EOF
+          chmod +x /tmp/install-linux.sh
+
+          if ! MATRIX_LINES=$(echo "$MATRIX" | jq -c '.[]'); then
+            echo "::error::Failed to parse matrix JSON"
+            exit 1
+          fi
+
+          if [ -z "$MATRIX_LINES" ]; then
+            echo "::warning::No targets in matrix, skipping publish"
+            echo "release_version=none" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          while read -r target; do
             target_id=$(echo "$target" | jq -r '.id')
             ver=$(echo "$target" | jq -r '.ver')
             upstream_body=$(echo "$target" | jq -r '.body // ""')
             commit_msg=$(echo "$target" | jq -r '.msg // ""')
+
+            unset BUILDTAGS_MAP LINUX_FILES WINDOWS_FILES DARWIN_FILES ANDROID_FILES 2>/dev/null || true
+            declare -A BUILDTAGS_MAP=() LINUX_FILES=() WINDOWS_FILES=() DARWIN_FILES=() ANDROID_FILES=()
 
             mkdir -p ./release_files/${target_id}/{linux,windows,darwin,android}
 
@@ -1060,8 +1131,6 @@ jobs:
                 release_title="sing-box Stable Build"
               fi
             fi
-
-            declare -A BUILDTAGS_MAP LINUX_FILES WINDOWS_FILES DARWIN_FILES ANDROID_FILES
 
             for pkg_dir in ./tmp/pkg-${target_id}-*; do
               if [[ -d "$pkg_dir" ]]; then
@@ -1116,17 +1185,19 @@ jobs:
                 [ -f "$apk" ] || continue
                 APK_NAME=$(basename "$apk")
                 cp "$apk" "release_files/${target_id}/android/${APK_NAME}"
-                ANDROID_FILES["apk"]="$APK_NAME"
+                ANDROID_FILES["$APK_NAME"]="$APK_NAME"
               done
               cp "$apk_dir"/*-metadata.json "release_files/${target_id}/android/" 2>/dev/null || true
             fi
 
-            cat > release_body.txt <<EOF
-            # 🚀 ${release_title}
+            cp /tmp/install-linux.sh release_files/${target_id}/linux/install-linux.sh
 
-            > 🔒 此 Release 已通過 [GitHub Artifact Attestations](https://github.com/advanced-security/artifact-attestations) 驗證，防範供應鏈攻擊。
-
-            EOF
+            {
+              echo "# 🚀 ${release_title}"
+              echo ""
+              echo "> 🔒 此 Release 已通過 [GitHub Artifact Attestations](https://github.com/advanced-security/artifact-attestations) 驗證，防範供應鏈攻擊。"
+              echo ""
+            } > release_body.txt
 
             if [ -n "$upstream_body" ] && [ "$upstream_body" != "null" ]; then
               printf '%s\n' "$upstream_body" >> release_body.txt
@@ -1138,29 +1209,26 @@ jobs:
               echo '```' >> release_body.txt
             fi
 
-            cat >> release_body.txt <<EOF
+            echo "" >> release_body.txt
+            echo "## 🔧 構建標籤" >> release_body.txt
+            if [ ${#BUILDTAGS_MAP[@]} -gt 0 ]; then
+              for p in "${!BUILDTAGS_MAP[@]}"; do
+                echo "- **${p}**: \`${BUILDTAGS_MAP[$p]}\`" >> release_body.txt
+              done
+            else
+              echo "- 無構建標籤資訊" >> release_body.txt
+            fi
 
-            ## 🔧 構建標籤
-            EOF
-
-            for p in "${!BUILDTAGS_MAP[@]}"; do
-              echo "- **${p}**: \`${BUILDTAGS_MAP[$p]}\`" >> release_body.txt
-            done
-
-            cat >> release_body.txt <<EOF
-
-            ## 📦 Assets (產物下載)
-            EOF
+            echo "" >> release_body.txt
+            echo "## 📦 Assets (產物下載)" >> release_body.txt
 
             if [ ${#LINUX_FILES[@]} -gt 0 ]; then
-              cat >> release_body.txt <<EOF
-
-            <details>
-            <summary><b>🐧 Linux 產物</b></summary>
-
-            | 架構 | 文件名 | 說明 |
-            |------|--------|------|
-            EOF
+              echo "" >> release_body.txt
+              echo "<details>" >> release_body.txt
+              echo "<summary><b>🐧 Linux 產物</b></summary>" >> release_body.txt
+              echo "" >> release_body.txt
+              echo "| 架構 | 文件名 | 說明 |" >> release_body.txt
+              echo "|------|--------|------|" >> release_body.txt
               for plat in "${!LINUX_FILES[@]}"; do
                 file_name="${LINUX_FILES[$plat]}"
                 plat_display="${plat#linux-}"
@@ -1176,14 +1244,12 @@ jobs:
             fi
 
             if [ ${#WINDOWS_FILES[@]} -gt 0 ]; then
-              cat >> release_body.txt <<EOF
-
-            <details>
-            <summary><b>🪟 Windows 產物</b></summary>
-
-            | 架構 | 文件名 | 說明 |
-            |------|--------|------|
-            EOF
+              echo "" >> release_body.txt
+              echo "<details>" >> release_body.txt
+              echo "<summary><b>🪟 Windows 產物</b></summary>" >> release_body.txt
+              echo "" >> release_body.txt
+              echo "| 架構 | 文件名 | 說明 |" >> release_body.txt
+              echo "|------|--------|------|" >> release_body.txt
               for plat in "${!WINDOWS_FILES[@]}"; do
                 file_name="${WINDOWS_FILES[$plat]}"
                 plat_display="${plat#windows-}"
@@ -1199,14 +1265,12 @@ jobs:
             fi
 
             if [ ${#DARWIN_FILES[@]} -gt 0 ]; then
-              cat >> release_body.txt <<EOF
-
-            <details>
-            <summary><b>🍎 Darwin 產物</b></summary>
-
-            | 架構 | 文件名 | 說明 |
-            |------|--------|------|
-            EOF
+              echo "" >> release_body.txt
+              echo "<details>" >> release_body.txt
+              echo "<summary><b>🍎 Darwin 產物</b></summary>" >> release_body.txt
+              echo "" >> release_body.txt
+              echo "| 架構 | 文件名 | 說明 |" >> release_body.txt
+              echo "|------|--------|------|" >> release_body.txt
               for plat in "${!DARWIN_FILES[@]}"; do
                 file_name="${DARWIN_FILES[$plat]}"
                 plat_display="${plat#darwin-}"
@@ -1216,14 +1280,12 @@ jobs:
             fi
 
             if [ ${#ANDROID_FILES[@]} -gt 0 ]; then
-              cat >> release_body.txt <<EOF
-
-            <details>
-            <summary><b>🤖 Android 產物</b></summary>
-
-            | 類型 | 文件名 |
-            |------|--------|
-            EOF
+              echo "" >> release_body.txt
+              echo "<details>" >> release_body.txt
+              echo "<summary><b>🤖 Android 產物</b></summary>" >> release_body.txt
+              echo "" >> release_body.txt
+              echo "| 類型 | 文件名 |" >> release_body.txt
+              echo "|------|--------|" >> release_body.txt
               for key in "${!ANDROID_FILES[@]}"; do
                 file_name="${ANDROID_FILES[$key]}"
                 echo "| SFA APK | \`${file_name}\` |" >> release_body.txt
@@ -1231,80 +1293,22 @@ jobs:
               echo "</details>" >> release_body.txt
             fi
 
-            cat >> release_body.txt <<EOF
-
-            ---
-            ### 📜 History (歷史更新)
-            EOF
-
+            echo "" >> release_body.txt
+            echo "---" >> release_body.txt
+            echo "### 📜 History (歷史更新)" >> release_body.txt
             gh release list --repo "${{ github.repository }}" --limit 3 --json tagName,name,publishedAt --jq '.[] | "- \(.publishedAt[0:10]) \(.tagName): \(.name)"' >> release_body.txt || echo "- 暫無歷史記錄" >> release_body.txt
 
-            sed -i 's/[ \t]*$//' release_body.txt
-
-            cat > release_files/${target_id}/linux/install-linux.sh << 'EOF'
-            #!/bin/bash
-            set -euo pipefail
-
-            REPO="${{ github.repository }}"
-            TAG="${1:-stable}"
-            [ "$TAG" = "testing" ] && TAG="sing-box-testing" || TAG="sing-box-stable"
-
-            ARCH=$(uname -m)
-            case "$ARCH" in
-              x86_64|amd64)  FILE_ARCH="amd64-v3" ;;
-              aarch64|arm64) FILE_ARCH="arm64" ;;
-              armv7l)        FILE_ARCH="armv7" ;;
-              armv6l)        FILE_ARCH="armv6" ;;
-              mips64)        FILE_ARCH="mips64" ;;
-              mips64el)      FILE_ARCH="mips64le" ;;
-              mips)          FILE_ARCH="mips" ;;
-              mipsel)        FILE_ARCH="mipsle" ;;
-              riscv64)       FILE_ARCH="riscv64" ;;
-              *) echo "❌ Unsupported arch: $ARCH"; exit 1 ;;
-            esac
-
-            if pgrep -x "sing-box" > /dev/null 2>&1; then
-              echo "❌ sing-box is currently running. Stop it before updating."
-              exit 1
-            fi
-
-            SUDO_CMD=""
-            [ "$(id -u)" -ne 0 ] && SUDO_CMD="sudo"
-
-            WORK_DIR=$(mktemp -d)
-            trap 'rm -rf "$WORK_DIR"' EXIT
-
-            echo "🔍 Fetching latest release for $FILE_ARCH (tag: $TAG)..."
-            ASSET_URL=$(curl -sSL -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
-              | grep -oE '"browser_download_url":\s*"[^"]+"' \
-              | cut -d '"' -f 4 \
-              | grep "linux" | grep -E "${FILE_ARCH}[-.]" | grep "\.tar\.gz" | head -n 1)
-
-            [ -z "$ASSET_URL" ] && { echo "❌ No release found for $FILE_ARCH"; exit 1; }
-
-            echo "⬇️  Downloading $(basename "$ASSET_URL")..."
-            curl -fSL -o "$WORK_DIR/archive.tar.gz" "$ASSET_URL"
-
-            echo "📦 Extracting..."
-            tar -xzf "$WORK_DIR/archive.tar.gz" -C "$WORK_DIR"
-
-            chmod +x "$WORK_DIR/sing-box"
-
-            INSTALLED_VER=$("$WORK_DIR/sing-box" version 2>/dev/null | head -n1 || echo "unknown")
-            echo "📋 Binary reports: $INSTALLED_VER"
-
-            $SUDO_CMD mv "$WORK_DIR/sing-box" /usr/local/bin/sing-box
-            echo "✅ Installation complete. $(sing-box version 2>/dev/null | head -n1 || true)"
-            EOF
-            chmod +x release_files/${target_id}/linux/install-linux.sh
+            sed -i 's/[[:space:]]*$//' release_body.txt
 
             (
               cd "release_files/${target_id}"
               find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" -o -name "*.upx" \) -exec sha256sum {} \; | sed 's/ \.\// /' > SHA256SUMS.txt
             )
-            echo -e "\n## 🔐 SHA256 Checksums\n| 文件名稱 | SHA-256 |\n|----------|---------|" >> release_body.txt
-            awk '{printf "| `%s` | `%s` |\n", $2, $1}' "release_files/${target_id}/SHA256SUMS.txt" >> release_body.txt
+            echo "" >> release_body.txt
+            echo "## 🔐 SHA256 Checksums" >> release_body.txt
+            echo "| 文件名稱 | SHA-256 |" >> release_body.txt
+            echo "|----------|---------|" >> release_body.txt
+            awk -F'  ' '{printf "| `%s` | `%s` |\n", $2, $1}' "release_files/${target_id}/SHA256SUMS.txt" >> release_body.txt
 
             echo "Checking if release/tag $tag_name exists..."
             if gh release view "$tag_name" --json id -q '.id' 2>/dev/null; then
@@ -1316,18 +1320,31 @@ jobs:
               git push origin ":refs/tags/$tag_name"
             fi
 
-            echo "Publishing $tag_name..."
-            gh release create "$tag_name" \
-              --title "$release_title" \
-              --notes-file release_body.txt \
-              --prerelease="$prerelease" \
-              --latest="$make_latest" \
-              release_files/${target_id}/**/*.tar.gz release_files/${target_id}/**/*.zip release_files/${target_id}/**/*.apk release_files/${target_id}/**/*.upx release_files/${target_id}/linux/install-linux.sh
+            shopt -s nullglob globstar
+            FILES=(
+              release_files/${target_id}/**/*.tar.gz
+              release_files/${target_id}/**/*.zip
+              release_files/${target_id}/**/*.apk
+              release_files/${target_id}/**/*.upx
+            )
+            shopt -u nullglob globstar
+            [ -f "release_files/${target_id}/linux/install-linux.sh" ] && FILES+=("release_files/${target_id}/linux/install-linux.sh")
 
-            tar -czf /tmp/tg-payload-${target_id}.tar.gz -C release_files/${target_id} .
+            if [ ${#FILES[@]} -gt 0 ]; then
+              echo "Publishing $tag_name..."
+              gh release create "$tag_name" \
+                --title "$release_title" \
+                --notes-file release_body.txt \
+                --prerelease="$prerelease" \
+                --latest="$make_latest" \
+                "${FILES[@]}"
+            else
+              echo "::error::No artifacts found for $tag_name"
+              exit 1
+            fi
 
-            echo "TAG_NAME=${tag_name}" >> $GITHUB_ENV
-          done
+            tar -czf /tmp/tg-payload-${target_id}.tar.gz -C "release_files/${target_id}" .
+          done <<< "$MATRIX_LINES"
 
           echo "$MATRIX" | jq '[.[] | {target_id: .id, version_name: .ver}]' > release_files/build-info.json
           echo "release_version=${FIRST_VER}" >> $GITHUB_OUTPUT
@@ -1400,6 +1417,18 @@ jobs:
             const { owner, repo } = context.repo;
             const path = 'build-info.json';
             const branch = 'release-info';
+
+            let branchExists = true;
+            try {
+              await github.rest.repos.getBranch({ owner, repo, branch });
+            } catch (e) {
+              branchExists = false;
+            }
+
+            if (!branchExists) {
+              const { data: ref } = await github.rest.repos.getBranch({ owner, repo, branch: context.repo.defaultBranch });
+              await github.rest.git.createRef({ owner, repo, ref: `refs/heads/${branch}`, sha: ref.commit.sha });
+            }
 
             let sha;
             try {
