@@ -326,7 +326,7 @@ jobs:
           - { name: windows-arm64, goos: windows, goarch: arm64, upx: false }
           - { name: darwin-amd64, goos: darwin, goarch: amd64, goamd64: v1, upx: false, cgo: "1" }
           - { name: darwin-arm64, goos: darwin, goarch: arm64, upx: false, cgo: "1" }
-    runs-on: ${{ matrix.platform.goos == 'darwin' && (matrix.platform.goarch == 'amd64' && 'macos-13' || 'macos-latest') || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.platform.goos == 'darwin' && 'macos-latest' || 'ubuntu-latest' }}
     env:
       GOOS: ${{ matrix.platform.goos }}
       GOARCH: ${{ matrix.platform.goarch }}
@@ -874,10 +874,13 @@ jobs:
             | grep -oE '[0-9a-f]{12,}' \
             | tail -1 || true)
 
+          LIBNAME_FLAG=""
+
           if [ -n "$MOBILE_COMMIT" ]; then
             echo "::notice::Installing gomobile from sagernet/mobile fork @ ${MOBILE_COMMIT}"
             go install "github.com/sagernet/mobile/cmd/gomobile@${MOBILE_COMMIT}" \
               && go install "github.com/sagernet/mobile/cmd/gobind@${MOBILE_COMMIT}"
+            LIBNAME_FLAG="-libname=box"
           else
             echo "::notice::No sagernet/mobile fork detected, using @latest"
             go install golang.org/x/mobile/cmd/gomobile@latest
@@ -895,7 +898,7 @@ jobs:
             -target android \
             -androidapi 23 \
             -javapkg=io.nekohasekai \
-            -libname=box \
+            $LIBNAME_FLAG \
             -trimpath \
             -buildvcs=false \
             -tags="${TAGS}" \
