@@ -169,7 +169,7 @@ jobs:
 
           api_call_optional() {
             local url="$1"
-            curl -sL -m ${CURL_TIMEOUT_API} --retry 2 --retry-delay 3 \
+            curl -sL -m ${CURL_TIMEOUT_API} --retry 2 --retry-delay 3 --retry-connrefused \
               -H "Authorization: token $GH_TOKEN" "$url" 2>/dev/null || echo "{}"
           }
 
@@ -473,7 +473,7 @@ jobs:
           matrix.platform.goarch != 'amd64'
         uses: goto-bus-stop/setup-zig@v2
         with:
-          version: 0.11.0
+          version: 0.13.0
 
       - name: Export Zig CC (musl only)
         if: >-
@@ -492,8 +492,8 @@ jobs:
                 echo "CC=zig cc -target arm-linux-musleabihf -mcpu=arm1176jzf_s" >> "$GITHUB_ENV"
                 echo "CXX=zig c++ -target arm-linux-musleabihf -mcpu=arm1176jzf_s" >> "$GITHUB_ENV"
               else
-                echo "CC=zig cc -target arm-linux-musleabihf" >> "$GITHUB_ENV"
-                echo "CXX=zig c++ -target arm-linux-musleabihf" >> "$GITHUB_ENV"
+                echo "CC=zig cc -target arm-linux-musleabihf -mcpu=cortex_a7" >> "$GITHUB_ENV"
+                echo "CXX=zig c++ -target arm-linux-musleabihf -mcpu=cortex_a7" >> "$GITHUB_ENV"
               fi
               ;;
           esac
@@ -914,17 +914,32 @@ jobs:
             -Pandroid.injected.signing.key.password="${{ secrets.ALIAS_PASS }}"
           )
           
-          echo "::group::Building ABI-split APKs"
+          echo "::group::Building APKs (assembleOtherRelease)"
           ./gradlew :app:assembleOtherRelease "${SIGNING_ARGS[@]}"
           echo "::endgroup::"
           
-          echo "::group::Building Universal APK"
-          if ./gradlew :app:assembleUniversalRelease "${SIGNING_ARGS[@]}"; then
-            echo "::notice::Universal APK built successfully."
-          else
-            echo "::notice::Universal APK task unavailable or failed. Skipping."
+          REL_DIR="app/build/outputs/apk/other/release"
+          UNIVERSAL_APK_FOUND=false
+          if [ -d "$REL_DIR" ]; then
+            for apk in "$REL_DIR"/*.apk; do
+              if [[ "$apk" == *"universal"* ]]; then
+                UNIVERSAL_APK_FOUND=true
+                break
+              fi
+            done
           fi
-          echo "::endgroup::"
+          
+          if [ "$UNIVERSAL_APK_FOUND" = "true" ]; then
+            echo "::notice::Universal APK already produced by assembleOtherRelease."
+          else
+            echo "::group::Attempting separate Universal APK build"
+            if ./gradlew :app:assembleUniversalRelease "${SIGNING_ARGS[@]}" 2>/dev/null; then
+              echo "::notice::Universal APK built via assembleUniversalRelease."
+            else
+              echo "::notice::assembleUniversalRelease task not available. Only ABI-split APKs will be included."
+            fi
+            echo "::endgroup::"
+          fi
 
       - name: Collect APK and Metadata
         if: matrix.target.sfa_repo != 'none'
