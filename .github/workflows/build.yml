@@ -868,8 +868,22 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           cd sing-box
-          go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20240404142737-6b59f0b2b6c3
-          go install golang.org/x/mobile/cmd/gobind@v0.0.0-20240404142737-6b59f0b2b6c3
+
+          MOBILE_COMMIT=$(grep -A1 'golang.org/x/mobile.*=>' go.mod 2>/dev/null \
+            | grep 'sagernet/mobile' \
+            | grep -oE '[0-9a-f]{12,}' \
+            | tail -1 || true)
+
+          if [ -n "$MOBILE_COMMIT" ]; then
+            echo "::notice::Installing gomobile from sagernet/mobile fork @ ${MOBILE_COMMIT}"
+            go install "github.com/sagernet/mobile/cmd/gomobile@${MOBILE_COMMIT}" \
+              && go install "github.com/sagernet/mobile/cmd/gobind@${MOBILE_COMMIT}"
+          else
+            echo "::notice::No sagernet/mobile fork detected, using @latest"
+            go install golang.org/x/mobile/cmd/gomobile@latest
+            go install golang.org/x/mobile/cmd/gobind@latest
+          fi
+
           export PATH="$PATH:$(go env GOPATH)/bin"
           gomobile init
 
