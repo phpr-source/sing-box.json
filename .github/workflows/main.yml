@@ -99,18 +99,37 @@ jobs:
           echo "SB_VERSION=${SB_VER:-unknown}" >> "$GITHUB_ENV"
           echo "Core version: ${SB_VER:-unknown}"
 
+          echo "Detecting rule-set format version..."
+          printf '{"version":5,"rules":[{"domain":"detect.example"}]}' > /tmp/test.json
+
           FMT_VER=""
-          for v in 5 4 3 2 1; do
-            echo "{\"version\": $v, \"rules\": []}" > /tmp/test_fmt.json
-            if ./sing-box rule-set compile /tmp/test_fmt.json -o /tmp/test_fmt.srs 2>/dev/null; then
-              FMT_VER="$v"
-              rm -f /tmp/test_fmt.json /tmp/test_fmt.srs
-              break
+          if ./sing-box rule-set compile /tmp/test.json -o /tmp/test.srs 2>/dev/null; then
+            if ./sing-box rule-set decompile /tmp/test.srs -o /tmp/decompiled.json 2>/dev/null; then
+              FMT_VER=$(jq -r '.version' /tmp/decompiled.json)
+              echo "  [decompile] binary outputs format version: $FMT_VER"
+              rm -f /tmp/decompiled.json
+            else
+              echo "  [compile] version 5 accepted (decompile unavailable)"
+              FMT_VER=5
             fi
-            rm -f /tmp/test_fmt.json /tmp/test_fmt.srs
-          done
-          echo "FORMAT_VERSION=${FMT_VER:-1}" >> "$GITHUB_ENV"
-          echo "Format version: ${FMT_VER:-1}"
+          else
+            for v in 4 3 2 1; do
+              printf '{"version":%d,"rules":[{"domain":"detect.example"}]}' "$v" > /tmp/test.json
+              if ./sing-box rule-set compile /tmp/test.json -o /tmp/test.srs 2>/dev/null; then
+                FMT_VER="$v"
+                echo "  [fallback] binary accepts format version: $FMT_VER"
+                break
+              fi
+            done
+          fi
+          rm -f /tmp/test.json /tmp/test.srs
+
+          if [ -z "$FMT_VER" ]; then
+            echo "::error::Cannot determine rule-set format version"
+            exit 1
+          fi
+          echo "FORMAT_VERSION=${FMT_VER}" >> "$GITHUB_ENV"
+          echo "Format version: $FMT_VER"
 
       - name: Run Factory
         run: |
@@ -125,6 +144,7 @@ jobs:
           curl -sL --fail --retry 3 "$URL_ADBLOCK" -o raw_adblock.json
           jq --argjson v "$FORMAT_VERSION" '.version=$v' raw_adblock.json > rules/Adblock.json
           ./sing-box rule-set compile rules/Adblock.json -o rules/Adblock.srs
+          test -f rules/Adblock.srs || { echo "::error::Adblock SRS not generated"; exit 1; }
           rm -f raw_adblock.json
 
       - name: Task B - FakeIP
@@ -136,6 +156,7 @@ jobs:
           jq --argjson v "$FORMAT_VERSION" '.version=$v' rules/fakeip-filter.json > rules/fakeip-filter.tmp.json
           mv rules/fakeip-filter.tmp.json rules/fakeip-filter.json
           ./sing-box rule-set compile rules/fakeip-filter.json -o rules/fakeip-filter.srs
+          test -f rules/fakeip-filter.srs || { echo "::error::FakeIP SRS not generated"; exit 1; }
 
       - name: Task C - Remote DNS
         run: |
@@ -143,19 +164,26 @@ jobs:
           if [ -f "$SRC" ]; then
             jq --argjson v "$FORMAT_VERSION" '.version=$v' "$SRC" > rules/fakeip-filter-Remote-DNS.json
             ./sing-box rule-set compile rules/fakeip-filter-Remote-DNS.json -o rules/fakeip-filter-Remote-DNS.srs
+            test -f rules/fakeip-filter-Remote-DNS.srs || { echo "::error::Remote DNS SRS not generated"; exit 1; }
           fi
 
       - name: Task D - WebRTC
         run: |
           curl -sL --fail --retry 3 "$URL_WEBRTC" -o raw.json
-          jq --argjson v "$FORMAT_VERSION" '{version: $v, rules: (.rules // [])}' raw.json > rules/webRTC.json
+          if jq -e '.rules' raw.json >/dev/null 2>&1; then
+            jq --argjson v "$FORMAT_VERSION" '{version: $v, rules: .rules}' raw.json > rules/webRTC.json
+          else
+            echo "::warning::WebRTC source has no .rules key, wrapping entire content as rules"
+            jq --argjson v "$FORMAT_VERSION" '{version: $v, rules: [.]}' raw.json > rules/webRTC.json
+          fi
           ./sing-box rule-set compile rules/webRTC.json -o rules/webRTC.srs
+          test -f rules/webRTC.srs || { echo "::error::WebRTC SRS not generated"; exit 1; }
           rm -f raw.json
 
       - name: Finalize
         run: |
           python3 scripts/build_factory.py --gen-readme
-          rm -f sing-box /tmp/test_fmt.json /tmp/test_fmt.srs
+          rm -f sing-box /tmp/test.json /tmp/test.srs /tmp/decompiled.json
           rm -f ./*.srs
           find . -maxdepth 1 -type f -name "*.json" ! -name "rule-providers.json" -delete
 
