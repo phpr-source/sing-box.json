@@ -218,8 +218,14 @@ jobs:
 
               if [ -z "$ver" ] || [ "$ver" = "null" ]; then
                 local commit_data=$(api_call_with_retry "https://api.github.com/repos/$repo/commits?sha=$branch&per_page=1")
-                ver=$(echo "$commit_data" | jq -r '.[0].sha // empty' 2>/dev/null | cut -c1-8 || true)
-                core_ref="$ver"
+                local full_sha=$(echo "$commit_data" | jq -r '.[0].sha // empty' 2>/dev/null || true)
+                if [ -n "$full_sha" ]; then
+                  ver=$(echo "$full_sha" | cut -c1-8)
+                  core_ref="$full_sha"
+                else
+                  echo "::warning::[$id] Cannot read commit SHA. Skipping."
+                  return 0
+                fi
               else
                 core_ref="v$ver"
               fi
@@ -372,7 +378,13 @@ jobs:
         run: |
           COMMIT="${{ github.event.inputs.build_commit || '' }}"
           COMMIT="$(echo "$COMMIT" | xargs)"
-          [ -z "$COMMIT" ] && COMMIT="${{ matrix.target.core_ref }}"
+          if [ -z "$COMMIT" ]; then
+            COMMIT="${{ matrix.target.core_ref }}"
+          fi
+          if [ -z "$COMMIT" ] || [ "$COMMIT" = "null" ]; then
+            echo "::error::Resolved commit ref is empty or null!"
+            exit 1
+          fi
           echo "ref=$COMMIT" >> $GITHUB_OUTPUT
 
       - name: Checkout Core
@@ -791,6 +803,7 @@ jobs:
           ref: ${{ matrix.target.core_ref }}
           path: sing-box
           fetch-depth: 0
+          filter: blob:none
 
       - name: Checkout Android Client
         if: matrix.target.sfa_repo != 'none'
