@@ -58,31 +58,31 @@ jobs:
           find rules/ -maxdepth 1 -type f -delete
 
       - name: Install Core
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RELEASE_TAG="sing-box-stable"
+          echo "Fetching release: $RELEASE_TAG"
 
-          # 使用 gh CLI（自動認證）查找並下載 Linux amd64 二進制
-          # 優先順序: glibc → purego → 任意 Linux
-          ASSET_NAME=""
-          for pattern in "linux-amd64-v3-glibc.*\\.tar\\.gz" "linux-amd64.*\\.tar\\.gz" "linux.*\\.tar\\.gz"; do
-            CANDIDATE=$(gh release view "$RELEASE_TAG" --json assets \
-              -q ".assets[] | select(.name | test(\"$pattern\")) | .name" 2>/dev/null || true)
-            if [ -n "$CANDIDATE" ]; then
-              ASSET_NAME=$(echo "$CANDIDATE" | head -n 1)
-              echo "Selected: $ASSET_NAME"
-              break
-            fi
-          done
+          ASSET_URL=$(curl -sL -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
+            | jq -r '.assets[] | select(.name | test("linux-amd64.*\\.tar\\.gz$")) | .browser_download_url' \
+            | head -n 1)
 
-          if [ -z "$ASSET_NAME" ]; then
-            echo "::error::No Linux binary found in release $RELEASE_TAG"
+          if [ -z "$ASSET_URL" ]; then
+            echo "::error::No Linux amd64 asset found in release $RELEASE_TAG"
             echo "::group::Available assets"
-            gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' 2>/dev/null || echo "Release not found"
+            curl -sL -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
+              | jq -r '.assets[].name'
             echo "::endgroup::"
             exit 1
           fi
 
-          gh release download "$RELEASE_TAG" -p "$ASSET_NAME" -o sing-box.tar.gz
+          echo "Downloading: $(basename "$ASSET_URL")"
+          curl -L --fail --retry 3 -o sing-box.tar.gz "$ASSET_URL"
           tar -xzf sing-box.tar.gz
           rm -f sing-box.tar.gz
 
