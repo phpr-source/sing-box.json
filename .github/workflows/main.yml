@@ -26,8 +26,8 @@ env:
   URL_FAKEIP_S1: "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json"
   URL_FAKEIP_S2_SRS: "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs"
   URL_FAKEIP_S3_LIST: "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list"
-  URL_WEBRTC: "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json"
-  TARGET_FORMAT_VERSION: 4
+  URL_WEBRTC: "https://github.com/syccccc2333-oss/singbox_config/raw/refs/heads/main/webRTC.json"
+  TARGET_FORMAT_VERSION: 5
 
 jobs:
   build:
