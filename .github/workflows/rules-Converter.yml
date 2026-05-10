@@ -5,29 +5,86 @@ on:
     - cron: '0 20 * * *'
   workflow_dispatch:
 
-env:
-  FORMAT_VER: 4
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve Format Version
+        run: |
+          FMT_VER=$(curl -sL --retry 3 \
+            "https://raw.githubusercontent.com/reF1nd/sing-box/refs/heads/reF1nd-testing/constant/rule.go" \
+            2>/dev/null | grep -oP 'RuleSetVersionCurrent\s*=\s*RuleSetVersion\K\d+' || true)
+          if [ -z "$FMT_VER" ]; then
+            echo "::warning::Failed to read RuleSetVersionCurrent, falling back to 5"
+            FMT_VER="5"
+          fi
+          echo "FORMAT_VER=$FMT_VER" >> "$GITHUB_ENV"
+          echo "Resolved format version: $FMT_VER"
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+          cache: true
 
       - name: Install Tools
         run: |
           go install github.com/runetfreedom/geodat2srs@latest
-          cp $(go env GOPATH)/bin/geodat2srs .
-          wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
-          chmod +x geodat2srs sb-core
+          cp "$(go env GOPATH)/bin/geodat2srs" .
+
+      - name: Install Core
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_TAG="sing-box-testing"
+          ASSET_URL=$(curl -sL -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
+            | jq -r '.assets[] | select(.name | test("linux-amd64.*\\.tar\\.gz$")) | .browser_download_url' \
+            | head -n 1)
+
+          if [ -z "$ASSET_URL" ]; then
+            echo "::warning::No testing release found, falling back to stable"
+            RELEASE_TAG="sing-box-stable"
+            ASSET_URL=$(curl -sL -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
+              | jq -r '.assets[] | select(.name | test("linux-amd64.*\\.tar\\.gz$")) | .browser_download_url' \
+              | head -n 1)
+          fi
+
+          if [ -z "$ASSET_URL" ]; then
+            echo "::error::No Linux amd64 asset found in any release"
+            exit 1
+          fi
+
+          curl -L --fail --retry 3 -o sb-core.tar.gz "$ASSET_URL"
+          tar -xzf sb-core.tar.gz
+          rm -f sb-core.tar.gz
+
+          if [ ! -f "sing-box" ]; then
+            FOUND=$(find . -maxdepth 2 -name "sing-box" -type f 2>/dev/null | head -n 1)
+            if [ -n "$FOUND" ]; then
+              mv "$FOUND" ./sing-box
+            fi
+          fi
+
+          if [ ! -f "sing-box" ]; then
+            echo "::error::Binary not found after extraction"
+            exit 1
+          fi
+          chmod +x sing-box
+          mv sing-box sb-core
 
       - name: Download & Process
         run: |
@@ -35,8 +92,8 @@ jobs:
           rm -f rules/geosite-srs/* rules/geosite-json/*
           rm -f rules/geoip-srs/* rules/geoip-json/*
 
-          wget -q -O temp/geosite.dat https://github.com/elysias123/geosite/releases/latest/download/geosite.dat
-          wget -q -O temp/geoip.dat https://github.com/elysias123/geosite/releases/latest/download/geoip.dat
+          wget -q --timeout=30 -O temp/geosite.dat https://github.com/elysias123/geosite/releases/latest/download/geosite.dat
+          wget -q --timeout=30 -O temp/geoip.dat https://github.com/elysias123/geosite/releases/latest/download/geoip.dat
 
           WANTED_IP="cn cloudflare cloudfront facebook fastly google netflix telegram twitter"
 
@@ -44,7 +101,7 @@ jobs:
           for f in temp_site/*.srs; do
             rule=$(basename "$f" .srs)
             ./sb-core rule-set decompile --output temp.json "$f"
-            jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geosite-json/$rule.json"
+            jq --argjson v "$FORMAT_VER" '.version=$v' temp.json > "rules/geosite-json/$rule.json"
             ./sb-core rule-set compile --output "rules/geosite-srs/$rule.srs" "rules/geosite-json/$rule.json"
           done
 
@@ -52,7 +109,7 @@ jobs:
           for rule in $WANTED_IP; do
             if [ -f "temp_ip/$rule.srs" ]; then
               ./sb-core rule-set decompile --output temp.json "temp_ip/$rule.srs"
-              jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geoip-json/$rule.json"
+              jq --argjson v "$FORMAT_VER" '.version=$v' temp.json > "rules/geoip-json/$rule.json"
               ./sb-core rule-set compile --output "rules/geoip-srs/$rule.srs" "rules/geoip-json/$rule.json"
             fi
           done
@@ -67,7 +124,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "Auto-update: Base Rules (Format V4) $(date +'%Y-%m-%d')"
+            git commit -m "Auto-update: Base Rules (V${FORMAT_VER}) $(date +'%Y-%m-%d')"
             git pull --rebase origin main
             git push origin main
           fi
