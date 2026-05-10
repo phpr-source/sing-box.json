@@ -1,8 +1,9 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
+        "12365auto.com",
         "1hai.cn",
         "autohome.com",
         "autohome.com.cn",

@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -14,6 +14,7 @@
         "adguard.io",
         "adguard.org",
         "adguardaccount.com",
+        "adguardcdn.com",
         "adguardvpn.com",
         "adtidy.net",
         "adtidy.org",

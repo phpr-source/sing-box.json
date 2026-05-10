@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": [
@@ -8,6 +8,8 @@
         "ads5-normal-hl.zijieapi.com",
         "ads5-normal.zijieapi.com",
         "apilog-web.acfun.cn",
+        "end-api.shallow.ink",
+        "end.shallow.ink",
         "log-sdk.gifshow.com",
         "log3-applog-hl.fqnovel.com",
         "log3-applog.fqnovel.com",
@@ -129,6 +131,7 @@
         "battlecare.net",
         "bbtv.cn",
         "bcfmglobal.com",
+        "bemanicn.com",
         "benghuai.com",
         "bestv.com.cn",
         "bestvcdn.cn",
@@ -151,6 +154,7 @@
         "bsbsb.top",
         "buke999.com",
         "bx1k.com",
+        "cdkeynogap.com",
         "cdncl.net",
         "cgames.com",
         "changdunovel.com",
@@ -211,6 +215,7 @@
         "fanqiesdkstatic.com",
         "fanqiesdkvod.com",
         "fanxingliveshow.com",
+        "feihuo.com",
         "ffbuddy.com",
         "forevernine.com",
         "fqnovel-op.com",
@@ -598,6 +603,7 @@
         "v6-adashx.ut.youku.com",
         "vgtime.com",
         "videoxiaoyouxi.com",
+        "viviv.com",
         "vrzwk.cn",
         "vrzwk.com",
         "vrzwk.net",
@@ -649,6 +655,7 @@
         "youxituoluo.com",
         "yuanshen.com",
         "yxdmgame.com",
+        "yxdown.com",
         "yxhapi.com",
         "yxhhdl.com",
         "yxhimg.com",

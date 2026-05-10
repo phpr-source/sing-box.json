@@ -1,10 +1,11 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
         "1ppt.com",
         "360doc.com",
+        "51wendang.com",
         "52ppt.com",
         "badou.com",
         "book118.com",

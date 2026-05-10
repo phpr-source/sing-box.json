@@ -1,22 +1,26 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": [
+        "izattime.qcomgeo2.com",
         "ntp-b.nist.gov",
         "ntp-c.colorado.edu",
         "ntp-d.nist.gov",
         "ntp-wwv.nist.gov",
         "ntp.aliyun.com",
         "ntp.tencent.com",
+        "ntp.time.nl",
         "ntp.ubuntu.com",
         "ntp0.ntp-servers.net",
         "ntp1.aliyun.com",
         "ntp1.ntp-servers.net",
         "ntp1.tencent.com",
+        "ntp1.time.nl",
         "ntp2.aliyun.com",
         "ntp2.ntp-servers.net",
         "ntp2.tencent.com",
+        "ntp2.time.nl",
         "ntp3.aliyun.com",
         "ntp3.ntp-servers.net",
         "ntp3.tencent.com",
@@ -30,6 +34,8 @@
         "ntp6.ntp-servers.net",
         "ntp7.aliyun.com",
         "ntp7.ntp-servers.net",
+        "ntppool1.time.nl",
+        "ntppool2.time.nl",
         "time-a-b.nist.gov",
         "time-a-g.nist.gov",
         "time-a-wwv.nist.gov",
@@ -70,7 +76,8 @@
         "ut1-wwv.nist.gov",
         "utcnist.colorado.edu",
         "utcnist2.colorado.edu",
-        "utcnist3.colorado.edu"
+        "utcnist3.colorado.edu",
+        "xtratime.qcomgeo2.com"
       ],
       "domain_suffix": [
         "ats1.e-timing.ne.jp",

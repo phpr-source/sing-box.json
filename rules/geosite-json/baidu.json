@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -130,6 +130,7 @@
         "wangmeng.baidu.com",
         "wkctj.baidu.com",
         "wm.baidu.com",
+        "xdrtc.com",
         "xianfae.com",
         "xiaodutv.com",
         "yoojia.com",

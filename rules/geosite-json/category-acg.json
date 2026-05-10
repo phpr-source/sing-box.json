@@ -1,8 +1,9 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
+        "bestdori.com",
         "bowlroll.net",
         "colorfulstage.com",
         "crypton.co.jp",

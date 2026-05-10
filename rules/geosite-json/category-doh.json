@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": [
@@ -7,14 +7,12 @@
         "adblock.dns.mullvad.net",
         "all.dns.mullvad.net",
         "antivirus.bebasid.com",
-        "anycast.dns.nextdns.io",
         "au-syd.doh.sb",
         "base.dns.mullvad.net",
         "basic.rethinkdns.com",
         "ca-yyz.doh.sb",
         "child-noads.joindns4.eu",
         "child.joindns4.eu",
-        "cloudflare-dns.com",
         "common.dot.dns.yandex.net",
         "dandelionsprout.asuscomm.com",
         "de-ber.doh.sb",
@@ -38,7 +36,6 @@
         "dns.jupitrdns.com",
         "dns.marbledfennec.net",
         "dns.mullvad.net",
-        "dns.nextdns.io",
         "dns.oszx.co",
         "dns.pub",
         "dns.pumplex.com",
@@ -61,16 +58,13 @@
         "doh.cleanbrowsing.org",
         "doh.dns.apple.com",
         "doh.dns.sb",
-        "doh.familyshield.opendns.com",
         "doh.ffmuc.net",
         "doh.la.ahadns.net",
         "doh.libredns.gr",
         "doh.nl.ahadns.net",
         "doh.onedns.net",
-        "doh.opendns.com",
         "doh.pub",
         "doh.qis.io",
-        "doh.sandbox.opendns.com",
         "doh.sb",
         "doh.tiar.app",
         "doh.tiarap.org",
@@ -78,7 +72,6 @@
         "extended.dns.mullvad.net",
         "family.adguard-dns.com",
         "family.canadianshield.cira.ca",
-        "family.cloudflare-dns.com",
         "family.dns.mullvad.net",
         "family.dot.dns.yandex.net",
         "family.rabbitdns.org",
@@ -114,7 +107,6 @@
         "rx.techomespace.com",
         "safe.dot.dns.yandex.net",
         "secondary.dns.seia.io",
-        "security.cloudflare-dns.com",
         "security.rabbitdns.org",
         "sg-sin.doh.sb",
         "sm2.doh.pub",
@@ -127,6 +119,11 @@
         "v.recipes",
         "wikimedia-dns.org",
         "zero.dns0.eu"
+      ],
+      "domain_suffix": [
+        "cloudflare-dns.com",
+        "nextdns.io",
+        "opendns.com"
       ]
     }
   ]

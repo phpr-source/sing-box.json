@@ -1,8 +1,9 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
+        "ahc.ovh",
         "cdn-service.space",
         "cdn2cdn.com",
         "cdn2site.com",

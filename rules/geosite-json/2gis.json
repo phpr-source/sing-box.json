@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -14,8 +14,8 @@
         "2gis.kg",
         "2gis.kz",
         "2gis.ru",
+        "2gis.tech",
         "2gis.tj",
-        "2gis.ua",
         "2gis.uz"
       ]
     }

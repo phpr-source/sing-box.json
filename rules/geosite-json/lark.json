@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -82,7 +82,6 @@
         "larksuiteimg.com",
         "larkvc.com",
         "meegobeta.com",
-        "oceancloudapi.com",
         "okr.cn",
         "okr.com",
         "okr.com.cn",

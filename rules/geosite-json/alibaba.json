@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -42,6 +42,8 @@
         "adslot.uc.cn",
         "adtrack.quark.cn",
         "ae-rus.net",
+        "aedns.ru",
+        "aeplatform.ru",
         "aestatic.net",
         "ali-health.com",
         "aliapp.org",
@@ -90,6 +92,7 @@
         "alimmdn.com",
         "alios.cn",
         "alipan.com",
+        "alipay-eco.com",
         "alipay.cn",
         "alipay.com",
         "alipay.com.cn",
@@ -378,6 +381,7 @@
         "v6-adashx.ut.youku.com",
         "w.cnzz.com",
         "wandoujia.com",
+        "wdjimg.com",
         "whalecloud.com",
         "xiami.com",
         "xiami.fm",

@@ -1,11 +1,8 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
-      "domain": [
-        "manga.bilibili.com",
-        "upos-hz-mirrorakam.akamaized.net"
-      ],
+      "domain": "upos-hz-mirrorakam.akamaized.net",
       "domain_suffix": [
         "acg.tv",
         "acgvideo.com",
@@ -51,6 +48,7 @@
         "dreamcast.hk",
         "hdslb.com",
         "hdslb.org",
+        "huasheng.cn",
         "im9.com",
         "maoercdn.com",
         "mincdn.com",

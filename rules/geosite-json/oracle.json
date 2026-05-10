@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -12,6 +12,7 @@
         "bronto.com",
         "covid19-rx.org",
         "covid19rx.org",
+        "custhelp.com",
         "java.com",
         "java.net",
         "oracle.com",

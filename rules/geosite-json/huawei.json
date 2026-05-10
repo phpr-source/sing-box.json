@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -165,9 +165,11 @@
         "dbankcdn.com",
         "dbankcloud.cn",
         "dbankcloud.com",
+        "dbankcloud.ru",
         "dbankedge.cn",
         "dbankedge.net",
         "devui.design",
+        "dt.dbankcloud.ru",
         "eduapaashwc.com",
         "eu-central-201.myhuaweicloud.com",
         "eu-central-202.myhuaweicloud.com",

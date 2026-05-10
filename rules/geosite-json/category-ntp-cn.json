@@ -1,8 +1,9 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": [
+        "izattime.qcomgeo2.com",
         "ntp.aliyun.com",
         "ntp.tencent.com",
         "ntp1.aliyun.com",
@@ -19,7 +20,8 @@
         "ntp7.aliyun.com",
         "time.amazonaws.cn",
         "time.izatcloud.net",
-        "time.xtracloud.net"
+        "time.xtracloud.net",
+        "xtratime.qcomgeo2.com"
       ],
       "domain_suffix": [
         "cn.pool.ntp.org",

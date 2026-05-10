@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -12,6 +12,7 @@
         "duba.net",
         "iciba.com",
         "ijinshan.com",
+        "kcdnvip.com",
         "kdocs.cn",
         "kimg.cn",
         "kingsoft-office-service.com",

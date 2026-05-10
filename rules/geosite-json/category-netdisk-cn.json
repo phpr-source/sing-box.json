@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -42,6 +42,7 @@
         "ctfile.com",
         "feimaoyun.com",
         "filez.com",
+        "guangyapan.com",
         "ilanzou.com",
         "jianguoyun.com",
         "lanosso.com",

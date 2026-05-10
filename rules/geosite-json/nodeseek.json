@@ -1,10 +1,11 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
         "22112211.xyz",
         "deepflood.com",
+        "nodeget.com",
         "nodeimage.com",
         "nodequality.com",
         "nodeseek.com"

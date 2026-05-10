@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -347,22 +347,6 @@
         "yufuid.com.cn",
         "yufuid.net",
         "yunjitele.com"
-      ],
-      "domain_regex": [
-        "\\.(.+-)?ap-beijing(-.+)?\\.myqcloud\\.com$",
-        "\\.(.+-)?ap-nanjing(-.+)?\\.myqcloud\\.com$",
-        "\\.(.+-)?ap-shanghai(-.+)?\\.myqcloud\\.com$",
-        "\\.(.+-)?ap-guangzhou(-.+)?\\.myqcloud\\.com$",
-        "\\.(.+-)?ap-chengdu(-.+)?\\.myqcloud\\.com$",
-        "\\.(.+-)?ap-chongqing(-.+)?\\.myqcloud\\.com$",
-        "\\.(.+-)?ap-shenzhen(-.+)?\\.myqcloud\\.com$",
-        "\\.(.+-)?ap-beijing(-.+)?\\.tencentcos\\.(cn|com(\\.cn)?)$",
-        "\\.(.+-)?ap-nanjing(-.+)?\\.tencentcos\\.(cn|com(\\.cn)?)$",
-        "\\.(.+-)?ap-shanghai(-.+)?\\.tencentcos\\.(cn|com(\\.cn)?)$",
-        "\\.(.+-)?ap-guangzhou(-.+)?\\.tencentcos\\.(cn|com(\\.cn)?)$",
-        "\\.(.+-)?ap-chengdu(-.+)?\\.tencentcos\\.(cn|com(\\.cn)?)$",
-        "\\.(.+-)?ap-chongqing(-.+)?\\.tencentcos\\.(cn|com(\\.cn)?)$",
-        "\\.(.+-)?ap-shenzhen(-.+)?\\.tencentcos\\.(cn|com(\\.cn)?)$"
       ]
     }
   ]

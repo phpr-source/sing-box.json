@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -12,10 +12,8 @@
         "eda.cn",
         "elecfans.com",
         "esp8266.cn",
-        "esp8266.com",
         "esp8266.com.cn",
         "espressif.cn",
-        "espressif.com",
         "espressif.com.cn",
         "fa-part.com",
         "forface3d.com",

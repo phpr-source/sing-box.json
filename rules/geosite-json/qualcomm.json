@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": "qualcomm.sc.omtrdc.net",
@@ -20,9 +20,11 @@
         "patenttruth.org",
         "pixtronix.com",
         "qceventscenter.com.cn",
+        "qcomgeo2.com",
         "qctconnect.com",
         "qprize.com",
         "qualcomm-email.com",
+        "qualcomm-inc.com",
         "qualcomm.cn",
         "qualcomm.cn.cdn.cloudflare.net",
         "qualcomm.co.id",

@@ -1,8 +1,9 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": [
+        "izattime.qcomgeo2.com",
         "ntp.aliyun.com",
         "ntp.tencent.com",
         "ntp1.aliyun.com",
@@ -19,9 +20,11 @@
         "ntp7.aliyun.com",
         "time.amazonaws.cn",
         "time.izatcloud.net",
-        "time.xtracloud.net"
+        "time.xtracloud.net",
+        "xtratime.qcomgeo2.com"
       ],
       "domain_suffix": [
+        "4008-517-517.cn",
         "a2z.org.cn",
         "amazonaws.cn",
         "amazonaws.com.cn",
@@ -61,6 +64,9 @@
         "cloudfront-test.cn",
         "cloudfront.cn",
         "cn.pool.ntp.org",
+        "mcd.cn",
+        "mcdchina.net",
+        "mcdonalds.com.cn",
         "ntp.neu.edu.cn",
         "ntp.ntsc.ac.cn",
         "ntp.org.cn",
@@ -72,9 +78,9 @@
         "sagemaker.com.cn"
       ],
       "domain_regex": [
+        "^.+-mihayo\\.akamaized\\.net$",
         ".+\\.awsdns-cn-[0-9][0-9]\\.(biz|com|net|top)$",
-        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$",
-        "^.+-mihayo\\.akamaized\\.net$"
+        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$"
       ]
     }
   ]

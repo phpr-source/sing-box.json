@@ -1,10 +1,11 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": [
         "asusrouter.com",
         "instant.arubanetworks.com",
+        "local.adguard.org",
         "miwifi.com",
         "oasisauth.h3c.com",
         "router.asus.com",
@@ -121,6 +122,7 @@
         "d.f.ip6.arpa",
         "hiwifi.com",
         "home.arpa",
+        "kis.v2.scr.kaspersky-labs.com",
         "leike.cc",
         "localhost.ptlogin2.qq.com",
         "localhost.sec.qq.com",
@@ -130,7 +132,6 @@
         "plex.direct",
         "router.ctc",
         "tendawifi.com",
-        "test.steampowered.com",
         "tplinkwifi.net",
         "ts.net",
         "zte.home"

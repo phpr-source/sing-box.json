@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": "ebay-25-assets.s3-us-west-1.amazonaws.com",

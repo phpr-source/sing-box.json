@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -12,6 +12,7 @@
         "mcd-holdings.co.jp",
         "mcd.cn",
         "mcd.com",
+        "mcdchina.net",
         "mcdelivery.co.id",
         "mcdelivery.co.in",
         "mcdelivery.co.kr",

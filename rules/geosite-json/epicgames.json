@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -16,6 +16,7 @@
         "epicgames.dev",
         "epicgamescdn.com",
         "fab.com",
+        "fortnite-vod.akamaized.net",
         "fortnite.com",
         "hyprsense.com",
         "paragon.com",

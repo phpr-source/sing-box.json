@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -14,6 +14,7 @@
         "fhyx.com",
         "fnjiasu.com",
         "funjsq.com",
+        "gangwan.com",
         "ggkuai.com",
         "gijsq.com",
         "golink.com",
@@ -26,9 +27,13 @@
         "kk1.vip",
         "leigod.cn",
         "leigod.com",
+        "leigodjsq.com",
         "liuxing.com",
         "lorhf.com",
+        "ls66.cn",
         "lxjiasu.com",
+        "nn.com",
+        "nnbooster.com",
         "oojsq.com",
         "qiyou.cn",
         "rmbgame.net",
@@ -36,8 +41,10 @@
         "steampp.net",
         "tmjiasuqi.com",
         "uu.163.com",
+        "waifushangcheng.com",
         "xunyou.com",
         "xunyou.mobi",
+        "xxghh.biz",
         "yebaojiasu.com",
         "yuelun.com"
       ]

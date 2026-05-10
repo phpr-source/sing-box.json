@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
@@ -10,7 +10,8 @@
         "vodafone.com.au",
         "vodafone.com.tr",
         "vodafone.de",
-        "vodafone.it"
+        "vodafone.it",
+        "vodafone.nl"
       ]
     }
   ]

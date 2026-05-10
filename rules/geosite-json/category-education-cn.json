@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": [
@@ -18,6 +18,8 @@
         "baicizhan.com",
         "baicizhan.org",
         "banmaaike.com",
+        "banxiaoer.com",
+        "banxiaoer.net",
         "baydn.com",
         "bczcdn.com",
         "bczeducation.cn",
@@ -75,6 +77,9 @@
         "iyunxiao.com",
         "j-test.com",
         "jinrongren.net",
+        "jyeoo.com",
+        "jyeoo.net",
+        "jzagile.com",
         "keboyunxiao.com",
         "ketangpai.com",
         "koocdn.com",
@@ -86,6 +91,9 @@
         "llscdn.com",
         "llsserver.com",
         "magedu.com",
+        "maimemo.com",
+        "maimemostatus.com",
+        "markji.com",
         "modex.com.cn",
         "mojidict.com",
         "mooc.cn",
@@ -112,12 +120,15 @@
         "speiyou.com",
         "sydw8.com",
         "tongxuepie.com",
+        "unipus.cn",
         "weilaiyunxiao.com",
         "winyoungreading.com",
+        "wjwai.com",
         "x-cloud.cc",
         "xesimg.com",
         "xiaoyuankousuan.com",
         "xir.cn",
+        "xiyouyingyu.com",
         "xkw.com",
         "xueersi.com",
         "xuetangx.com",
@@ -135,11 +146,13 @@
         "zbbm.gov.cn",
         "zbbm.net",
         "zggqzp.com",
+        "zgjsks.com",
         "zgsydw.com",
         "zhan.com",
         "zhihuishu.com",
         "zjzs.net",
-        "zxxk.com"
+        "zxxk.com",
+        "zysn.net"
       ]
     }
   ]

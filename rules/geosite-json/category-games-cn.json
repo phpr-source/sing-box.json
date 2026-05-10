@@ -1,7 +1,11 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
+      "domain": [
+        "end-api.shallow.ink",
+        "end.shallow.ink"
+      ],
       "domain_suffix": [
         "17roco.com",
         "3304399.com",
@@ -68,6 +72,7 @@
         "cowlevel.net",
         "dobest.com",
         "edu4399.com",
+        "feihuo.com",
         "ffbuddy.com",
         "forevernine.com",
         "funnycore.com",

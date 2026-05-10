@@ -1,9 +1,11 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": [
         "browser-intake-datadoghq.com",
+        "copilot-telemetry-service.githubusercontent.com",
+        "copilot-telemetry.githubusercontent.com",
         "o33249.ingest.sentry.io"
       ]
     }

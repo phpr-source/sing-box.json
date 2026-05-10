@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": [
@@ -17,6 +17,7 @@
       ],
       "domain_suffix": [
         "ai.studio",
+        "aicode.googleapis.com",
         "aida.googleapis.com",
         "aisandbox-pa.googleapis.com",
         "aistudio.google.com",
@@ -40,7 +41,8 @@
         "opal.google",
         "opal.google.com",
         "proactivebackend-pa.googleapis.com",
-        "robinfrontend-pa.googleapis.com"
+        "robinfrontend-pa.googleapis.com",
+        "stitch.withgoogle.com"
       ]
     }
   ]

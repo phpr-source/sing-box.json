@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": [
@@ -12,11 +12,13 @@
         "transport.mos.ru"
       ],
       "domain_suffix": [
+        "2gis.ru",
         "aviasales.com",
         "aviasales.ru",
         "avs.io",
         "avtovokzaly.ru",
         "blablacar.ru",
+        "fasten.ru",
         "gorodpay.ru",
         "mosmetro.ru",
         "mosmetro.tech",
@@ -25,7 +27,7 @@
         "rrtp.ru",
         "rzd-bonus.ru",
         "rzd.ru",
-        "sbertroika.ru",
+        "sber.ru",
         "tutu.ru"
       ]
     }

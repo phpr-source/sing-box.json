@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": "misa-prod.s3.ap-northeast-1.amazonaws.com",

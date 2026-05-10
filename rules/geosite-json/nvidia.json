@@ -1,9 +1,10 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": [
         "cn.download.nvidia.com",
+        "nvidia.custhelp.com",
         "nvidia.tt.omtrdc.net"
       ],
       "domain_suffix": [

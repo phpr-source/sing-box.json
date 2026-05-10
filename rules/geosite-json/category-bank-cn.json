@@ -1,11 +1,12 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
         "95516.com",
         "95516.net",
         "abchina.com",
+        "bankcomm.cn",
         "bankcomm.com",
         "bankofbeijing.com.cn",
         "bosc.cn",

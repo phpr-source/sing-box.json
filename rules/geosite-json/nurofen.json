@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": "nurofensk-prod-env.eu-west-1.elasticbeanstalk.com",

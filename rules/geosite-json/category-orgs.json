@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain": [
@@ -54,6 +54,7 @@
         "grapheneos.social",
         "grss-ieee.org",
         "iana.org",
+        "iccf.com",
         "ieee-aess.org",
         "ieee-cas.org",
         "ieee-ccnc.org",

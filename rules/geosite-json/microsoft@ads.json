@@ -1,14 +1,17 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
+      "domain": [
+        "copilot-telemetry-service.githubusercontent.com",
+        "copilot-telemetry.githubusercontent.com"
+      ],
       "domain_suffix": [
         "bingads.com",
         "browser.events.data.msn.cn",
         "browser.events.data.msn.com",
         "clarity.ms",
         "collector.github.com",
-        "copilot-telemetry.githubusercontent.com",
         "microsoftads.com",
         "msads.net",
         "nelreports.net"

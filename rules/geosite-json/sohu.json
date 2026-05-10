@@ -1,9 +1,11 @@
 {
-  "version": 4,
+  "version": 5,
   "rules": [
     {
       "domain_suffix": [
         ".sohu",
+        "56.com",
+        "56img.com",
         "adnet.sohu.com",
         "ads.sohu.com",
         "adv-sv-show.focus.cn",
