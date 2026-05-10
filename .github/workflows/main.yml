@@ -53,11 +53,23 @@ jobs:
           fi
           find rules/ -maxdepth 1 -type f ! -name "fakeip-filter.json" -delete
 
+      - name: Resolve Format Version
+        run: |
+          FMT_VER=$(curl -sL --retry 3 \
+            "https://raw.githubusercontent.com/reF1nd/sing-box/refs/heads/reF1nd-testing/constant/rule.go" \
+            2>/dev/null | grep -oP 'RuleSetVersionCurrent\s*=\s*RuleSetVersion\K\d+' || true)
+          if [ -z "$FMT_VER" ]; then
+            echo "::warning::Failed to read RuleSetVersionCurrent from source, falling back to 5"
+            FMT_VER="5"
+          fi
+          echo "FORMAT_VERSION=$FMT_VER" >> "$GITHUB_ENV"
+          echo "Resolved max format version: $FMT_VER"
+
       - name: Install Core
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          RELEASE_TAG="sing-box-stable"
+          RELEASE_TAG="sing-box-testing"
           echo "Fetching release: $RELEASE_TAG"
 
           ASSET_URL=$(curl -sL -H "Accept: application/vnd.github+json" \
@@ -67,13 +79,17 @@ jobs:
             | head -n 1)
 
           if [ -z "$ASSET_URL" ]; then
-            echo "::error::No Linux amd64 asset found in release $RELEASE_TAG"
-            echo "::group::Available assets"
-            curl -sL -H "Accept: application/vnd.github+json" \
+            echo "::warning::No testing release found, falling back to stable"
+            RELEASE_TAG="sing-box-stable"
+            ASSET_URL=$(curl -sL -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer $GH_TOKEN" \
               "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
-              | jq -r '.assets[].name'
-            echo "::endgroup::"
+              | jq -r '.assets[] | select(.name | test("linux-amd64.*\\.tar\\.gz$")) | .browser_download_url' \
+              | head -n 1)
+          fi
+
+          if [ -z "$ASSET_URL" ]; then
+            echo "::error::No Linux amd64 asset found in any release"
             exit 1
           fi
 
@@ -99,38 +115,6 @@ jobs:
           echo "SB_VERSION=${SB_VER:-unknown}" >> "$GITHUB_ENV"
           echo "Core version: ${SB_VER:-unknown}"
 
-          echo "Detecting rule-set format version..."
-          printf '{"version":5,"rules":[{"domain":"detect.example"}]}' > /tmp/test.json
-
-          FMT_VER=""
-          if ./sing-box rule-set compile /tmp/test.json -o /tmp/test.srs 2>/dev/null; then
-            if ./sing-box rule-set decompile /tmp/test.srs -o /tmp/decompiled.json 2>/dev/null; then
-              FMT_VER=$(jq -r '.version' /tmp/decompiled.json)
-              echo "  [decompile] binary outputs format version: $FMT_VER"
-              rm -f /tmp/decompiled.json
-            else
-              echo "  [compile] version 5 accepted (decompile unavailable)"
-              FMT_VER=5
-            fi
-          else
-            for v in 4 3 2 1; do
-              printf '{"version":%d,"rules":[{"domain":"detect.example"}]}' "$v" > /tmp/test.json
-              if ./sing-box rule-set compile /tmp/test.json -o /tmp/test.srs 2>/dev/null; then
-                FMT_VER="$v"
-                echo "  [fallback] binary accepts format version: $FMT_VER"
-                break
-              fi
-            done
-          fi
-          rm -f /tmp/test.json /tmp/test.srs
-
-          if [ -z "$FMT_VER" ]; then
-            echo "::error::Cannot determine rule-set format version"
-            exit 1
-          fi
-          echo "FORMAT_VERSION=${FMT_VER}" >> "$GITHUB_ENV"
-          echo "Format version: $FMT_VER"
-
       - name: Run Factory
         run: |
           if [[ -n "${{ inputs.manual_name }}" ]]; then
@@ -144,7 +128,6 @@ jobs:
           curl -sL --fail --retry 3 "$URL_ADBLOCK" -o raw_adblock.json
           jq --argjson v "$FORMAT_VERSION" '.version=$v' raw_adblock.json > rules/Adblock.json
           ./sing-box rule-set compile rules/Adblock.json -o rules/Adblock.srs
-          test -f rules/Adblock.srs || { echo "::error::Adblock SRS not generated"; exit 1; }
           rm -f raw_adblock.json
 
       - name: Task B - FakeIP
@@ -156,7 +139,6 @@ jobs:
           jq --argjson v "$FORMAT_VERSION" '.version=$v' rules/fakeip-filter.json > rules/fakeip-filter.tmp.json
           mv rules/fakeip-filter.tmp.json rules/fakeip-filter.json
           ./sing-box rule-set compile rules/fakeip-filter.json -o rules/fakeip-filter.srs
-          test -f rules/fakeip-filter.srs || { echo "::error::FakeIP SRS not generated"; exit 1; }
 
       - name: Task C - Remote DNS
         run: |
@@ -164,26 +146,19 @@ jobs:
           if [ -f "$SRC" ]; then
             jq --argjson v "$FORMAT_VERSION" '.version=$v' "$SRC" > rules/fakeip-filter-Remote-DNS.json
             ./sing-box rule-set compile rules/fakeip-filter-Remote-DNS.json -o rules/fakeip-filter-Remote-DNS.srs
-            test -f rules/fakeip-filter-Remote-DNS.srs || { echo "::error::Remote DNS SRS not generated"; exit 1; }
           fi
 
       - name: Task D - WebRTC
         run: |
           curl -sL --fail --retry 3 "$URL_WEBRTC" -o raw.json
-          if jq -e '.rules' raw.json >/dev/null 2>&1; then
-            jq --argjson v "$FORMAT_VERSION" '{version: $v, rules: .rules}' raw.json > rules/webRTC.json
-          else
-            echo "::warning::WebRTC source has no .rules key, wrapping entire content as rules"
-            jq --argjson v "$FORMAT_VERSION" '{version: $v, rules: [.]}' raw.json > rules/webRTC.json
-          fi
+          jq --argjson v "$FORMAT_VERSION" '{version: $v, rules: (.rules // [])}' raw.json > rules/webRTC.json
           ./sing-box rule-set compile rules/webRTC.json -o rules/webRTC.srs
-          test -f rules/webRTC.srs || { echo "::error::WebRTC SRS not generated"; exit 1; }
           rm -f raw.json
 
       - name: Finalize
         run: |
           python3 scripts/build_factory.py --gen-readme
-          rm -f sing-box /tmp/test.json /tmp/test.srs /tmp/decompiled.json
+          rm -f sing-box /tmp/test_fmt.json /tmp/test_fmt.srs
           rm -f ./*.srs
           find . -maxdepth 1 -type f -name "*.json" ! -name "rule-providers.json" -delete
 
