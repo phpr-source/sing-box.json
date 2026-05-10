@@ -168,3 +168,4 @@ jobs:
             git commit -m "🚀 Sync Comprehensive Rules (V${FORMAT_VERSION}) | Core: ${SB_VERSION} | $(date +'%Y-%m-%d')"
             git pull --rebase origin main
             git push origin main
+          fi
