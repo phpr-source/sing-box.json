@@ -1,4 +1,4 @@
-name: Update Comprehensive SRS
+name: Build Rule Sets
 
 on:
   workflow_run:
@@ -21,10 +21,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  URL_ADBLOCK: "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json"
-  URL_WEBRTC: "https://github.com/syccccc2333-oss/singbox_config/raw/refs/heads/main/webRTC.json"
-
 jobs:
   build:
     if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') || github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
@@ -42,36 +38,23 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Fix Environment
-        run: |
-          mkdir -p rules src
-          if [ -f "fakeip-filter-Remote-DNS.json" ]; then
-            mv fakeip-filter-Remote-DNS.json src/
-          fi
-          if [ ! -f "rule-providers.json" ]; then
-            echo '{"reject-list": "https://raw.githubusercontent.com/77160860/rule/main/reject.json"}' > rule-providers.json
-          fi
-          find rules/ -maxdepth 1 -type f ! -name "fakeip-filter.json" -delete
-
       - name: Resolve Format Version
         run: |
           FMT_VER=$(curl -sL --retry 3 \
             "https://raw.githubusercontent.com/reF1nd/sing-box/refs/heads/reF1nd-testing/constant/rule.go" \
             2>/dev/null | grep -oP 'RuleSetVersionCurrent\s*=\s*RuleSetVersion\K\d+' || true)
           if [ -z "$FMT_VER" ]; then
-            echo "::warning::Failed to read RuleSetVersionCurrent from source, falling back to 5"
+            echo "::warning::Failed to read RuleSetVersionCurrent from upstream, falling back to 5"
             FMT_VER="5"
           fi
           echo "FORMAT_VERSION=$FMT_VER" >> "$GITHUB_ENV"
-          echo "Resolved max format version: $FMT_VER"
+          echo "Resolved format version: $FMT_VER"
 
       - name: Install Core
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RELEASE_TAG="sing-box-testing"
-          echo "Fetching release: $RELEASE_TAG"
-
           ASSET_URL=$(curl -sL -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
@@ -93,7 +76,6 @@ jobs:
             exit 1
           fi
 
-          echo "Downloading: $(basename "$ASSET_URL")"
           curl -L --fail --retry 3 -o sing-box.tar.gz "$ASSET_URL"
           tar -xzf sing-box.tar.gz
           rm -f sing-box.tar.gz
@@ -111,9 +93,13 @@ jobs:
           fi
           chmod +x sing-box
 
-          SB_VER=$(./sing-box version 2>/dev/null | head -n 1 | awk '{print $3}')
-          echo "SB_VERSION=${SB_VER:-unknown}" >> "$GITHUB_ENV"
-          echo "Core version: ${SB_VER:-unknown}"
+      - name: Fix Environment
+        run: |
+          mkdir -p rules src
+          if [ -f "fakeip-filter-Remote-DNS.json" ]; then
+            mv fakeip-filter-Remote-DNS.json src/
+          fi
+          find rules/ -maxdepth 1 -type f ! -name "fakeip-filter.json" -delete
 
       - name: Run Factory
         run: |
@@ -123,14 +109,7 @@ jobs:
             python3 scripts/build_factory.py
           fi
 
-      - name: Task A - Adblock
-        run: |
-          curl -sL --fail --retry 3 "$URL_ADBLOCK" -o raw_adblock.json
-          jq --argjson v "$FORMAT_VERSION" '.version=$v' raw_adblock.json > rules/Adblock.json
-          ./sing-box rule-set compile rules/Adblock.json -o rules/Adblock.srs
-          rm -f raw_adblock.json
-
-      - name: Task B - FakeIP
+      - name: Task - FakeIP (Local)
         run: |
           if [ ! -f "rules/fakeip-filter.json" ]; then
             echo "::error::rules/fakeip-filter.json not found"
@@ -140,7 +119,7 @@ jobs:
           mv rules/fakeip-filter.tmp.json rules/fakeip-filter.json
           ./sing-box rule-set compile rules/fakeip-filter.json -o rules/fakeip-filter.srs
 
-      - name: Task C - Remote DNS
+      - name: Task - Remote DNS (Local)
         run: |
           SRC="src/fakeip-filter-Remote-DNS.json"
           if [ -f "$SRC" ]; then
@@ -148,17 +127,13 @@ jobs:
             ./sing-box rule-set compile rules/fakeip-filter-Remote-DNS.json -o rules/fakeip-filter-Remote-DNS.srs
           fi
 
-      - name: Task D - WebRTC
-        run: |
-          curl -sL --fail --retry 3 "$URL_WEBRTC" -o raw.json
-          jq --argjson v "$FORMAT_VERSION" '{version: $v, rules: (.rules // [])}' raw.json > rules/webRTC.json
-          ./sing-box rule-set compile rules/webRTC.json -o rules/webRTC.srs
-          rm -f raw.json
-
       - name: Finalize
         run: |
+          SB_VER=$(./sing-box version 2>/dev/null | head -n 1 | awk '{print $3}')
+          echo "SB_VERSION=${SB_VER:-unknown}" >> "$GITHUB_ENV"
+
           python3 scripts/build_factory.py --gen-readme
-          rm -f sing-box /tmp/test_fmt.json /tmp/test_fmt.srs
+          rm -f sing-box
           rm -f ./*.srs
           find . -maxdepth 1 -type f -name "*.json" ! -name "rule-providers.json" -delete
 
@@ -168,7 +143,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync Comprehensive Rules (V${FORMAT_VERSION}) | Core: ${SB_VERSION} | $(date +'%Y-%m-%d')"
+            git commit -m "🚀 Sync Rules (V${FORMAT_VERSION}) | Core: ${SB_VER:-unknown} | $(date +'%Y-%m-%d')"
             git pull --rebase origin main
             git push origin main
           fi
