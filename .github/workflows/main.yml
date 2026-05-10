@@ -15,7 +15,7 @@ on:
     paths:
       - 'rule-providers.json'
       - 'scripts/build_factory.py'
-      - '.github/workflows/update-comprehensive.yml'
+      - '.github/workflows/main.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,11 +23,7 @@ concurrency:
 
 env:
   URL_ADBLOCK: "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json"
-  URL_FAKEIP_S1: "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json"
-  URL_FAKEIP_S2_SRS: "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs"
-  URL_FAKEIP_S3_LIST: "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list"
   URL_WEBRTC: "https://github.com/syccccc2333-oss/singbox_config/raw/refs/heads/main/webRTC.json"
-  TARGET_FORMAT_VERSION: 5
 
 jobs:
   build:
@@ -55,7 +51,7 @@ jobs:
           if [ ! -f "rule-providers.json" ]; then
             echo '{"reject-list": "https://raw.githubusercontent.com/77160860/rule/main/reject.json"}' > rule-providers.json
           fi
-          find rules/ -maxdepth 1 -type f -delete
+          find rules/ -maxdepth 1 -type f ! -name "fakeip-filter.json" -delete
 
       - name: Install Core
         env:
@@ -87,14 +83,34 @@ jobs:
           rm -f sing-box.tar.gz
 
           if [ ! -f "sing-box" ]; then
+            FOUND=$(find . -maxdepth 2 -name "sing-box" -type f 2>/dev/null | head -n 1)
+            if [ -n "$FOUND" ]; then
+              mv "$FOUND" ./sing-box
+            fi
+          fi
+
+          if [ ! -f "sing-box" ]; then
             echo "::error::Binary not found after extraction"
             exit 1
           fi
           chmod +x sing-box
 
           SB_VER=$(./sing-box version 2>/dev/null | head -n 1 | awk '{print $3}')
-          echo "SB_VERSION=${SB_VER:-unknown}" >> $GITHUB_ENV
-          echo "Core: $(./sing-box version 2>/dev/null | head -n 1 || echo 'unknown')"
+          echo "SB_VERSION=${SB_VER:-unknown}" >> "$GITHUB_ENV"
+          echo "Core version: ${SB_VER:-unknown}"
+
+          FMT_VER=""
+          for v in 5 4 3 2 1; do
+            echo "{\"version\": $v, \"rules\": []}" > /tmp/test_fmt.json
+            if ./sing-box rule-set compile /tmp/test_fmt.json -o /tmp/test_fmt.srs 2>/dev/null; then
+              FMT_VER="$v"
+              rm -f /tmp/test_fmt.json /tmp/test_fmt.srs
+              break
+            fi
+            rm -f /tmp/test_fmt.json /tmp/test_fmt.srs
+          done
+          echo "FORMAT_VERSION=${FMT_VER:-1}" >> "$GITHUB_ENV"
+          echo "Format version: ${FMT_VER:-1}"
 
       - name: Run Factory
         run: |
@@ -106,48 +122,41 @@ jobs:
 
       - name: Task A - Adblock
         run: |
-          curl -sL --retry 3 "$URL_ADBLOCK" -o raw_adblock.json
-          jq --argjson v "$TARGET_FORMAT_VERSION" '.version=$v' raw_adblock.json > Adblock.json
-          ./sing-box rule-set compile Adblock.json -o Adblock.srs
-          mv Adblock.srs rules/
-          mv Adblock.json rules/
+          curl -sL --fail --retry 3 "$URL_ADBLOCK" -o raw_adblock.json
+          jq --argjson v "$FORMAT_VERSION" '.version=$v' raw_adblock.json > rules/Adblock.json
+          ./sing-box rule-set compile rules/Adblock.json -o rules/Adblock.srs
+          rm -f raw_adblock.json
 
       - name: Task B - FakeIP
         run: |
-          curl -sL --retry 3 "$URL_FAKEIP_S1" -o s1.json
-          curl -sL --retry 3 "$URL_FAKEIP_S2_SRS" -o s2.srs
-          curl -sL --retry 3 "$URL_FAKEIP_S3_LIST" -o s3.list
-          ./sing-box rule-set decompile s2.srs -o s2.json
-          python3 scripts/merge_fakeip.py
-          jq --argjson v "$TARGET_FORMAT_VERSION" '.version=$v' fakeip-filter.json > temp_fakeip.json && mv temp_fakeip.json fakeip-filter.json
-          ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
-          mv fakeip-filter.srs rules/
-          mv fakeip-filter.json rules/
+          if [ ! -f "rules/fakeip-filter.json" ]; then
+            echo "::error::rules/fakeip-filter.json not found"
+            exit 1
+          fi
+          jq --argjson v "$FORMAT_VERSION" '.version=$v' rules/fakeip-filter.json > rules/fakeip-filter.tmp.json
+          mv rules/fakeip-filter.tmp.json rules/fakeip-filter.json
+          ./sing-box rule-set compile rules/fakeip-filter.json -o rules/fakeip-filter.srs
 
       - name: Task C - Remote DNS
         run: |
           SRC="src/fakeip-filter-Remote-DNS.json"
           if [ -f "$SRC" ]; then
-            jq --argjson v "$TARGET_FORMAT_VERSION" '.version=$v' "$SRC" > temp.json
-            ./sing-box rule-set compile temp.json -o fakeip-filter-Remote-DNS.srs
-            mv fakeip-filter-Remote-DNS.srs rules/
-            cp temp.json rules/fakeip-filter-Remote-DNS.json
-            rm temp.json
+            jq --argjson v "$FORMAT_VERSION" '.version=$v' "$SRC" > rules/fakeip-filter-Remote-DNS.json
+            ./sing-box rule-set compile rules/fakeip-filter-Remote-DNS.json -o rules/fakeip-filter-Remote-DNS.srs
           fi
 
       - name: Task D - WebRTC
         run: |
-          curl -sL --retry 3 "$URL_WEBRTC" -o raw.json
-          jq --argjson v "$TARGET_FORMAT_VERSION" '{version: $v, rules: (.rules // [])}' raw.json > webRTC.json
-          ./sing-box rule-set compile webRTC.json -o webRTC.srs
-          mv webRTC.srs rules/
-          mv webRTC.json rules/
+          curl -sL --fail --retry 3 "$URL_WEBRTC" -o raw.json
+          jq --argjson v "$FORMAT_VERSION" '{version: $v, rules: (.rules // [])}' raw.json > rules/webRTC.json
+          ./sing-box rule-set compile rules/webRTC.json -o rules/webRTC.srs
+          rm -f raw.json
 
       - name: Finalize
         run: |
           python3 scripts/build_factory.py --gen-readme
-          rm -f s1.json s2.json s2.srs s3.list raw.json raw_adblock.json sing-box sing-box.tar.gz temp_*.json
-          rm -f *.srs
+          rm -f sing-box /tmp/test_fmt.json /tmp/test_fmt.srs
+          rm -f ./*.srs
           find . -maxdepth 1 -type f -name "*.json" ! -name "rule-providers.json" -delete
 
           git config --global user.name "github-actions"
@@ -156,6 +165,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync Comprehensive Rules (V4) | Core: ${{ env.SB_VERSION }} | $(date +'%Y-%m-%d')"
+            git commit -m "🚀 Sync Comprehensive Rules (V${FORMAT_VERSION}) | Core: ${SB_VERSION} | $(date +'%Y-%m-%d')"
             git pull --rebase origin main
             git push origin main
