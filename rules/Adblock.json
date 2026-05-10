@@ -1,8 +1,7 @@
 {
-  "version": 5,
+  "version": 4,
   "rules": [
     {
-      "ip_cidr": [],
       "domain": [
         "1500020991.vodplayer.wxamedia.com",
         "1500022744.vodplayer.wxamedia.com",
@@ -919,8 +918,7 @@
         "vlion.cn",
         "yfanads.com",
         "zhangyuyidong.cn"
-      ],
-      "domain_regex": []
+      ]
     }
   ]
 }
