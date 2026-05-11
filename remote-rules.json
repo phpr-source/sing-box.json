@@ -1,5 +1,0 @@
-{
-  "cn-classical": "https://raw.githubusercontent.com/YiXuanZX/sing-box-geosite/main/rule/cn-additional-list-clash-classical.srs",
-  "Adblock": "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json",
-  "webRTC": "https://github.com/syccccc2333-oss/singbox_config/raw/refs/heads/main/webRTC.json"
-}
