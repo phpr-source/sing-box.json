@@ -7,8 +7,9 @@ import re
 import shutil
 from datetime import datetime
 
-CONFIG_FILE = 'rule-providers.json'
+CONFIG_REMOTE = 'remote-rules.json'
 DIR_OUTPUT = 'rules'
+DIR_SRC = 'src'
 MAX_WORKERS = 5
 
 RULE_MAP = {
@@ -27,8 +28,9 @@ class TaskResult:
         self.name, self.status, self.msg, self.size = name, status, msg, size
 
 def setup_directories():
-    if not os.path.exists(DIR_OUTPUT):
-        os.makedirs(DIR_OUTPUT)
+    for d in [DIR_OUTPUT, DIR_SRC]:
+        if not os.path.exists(d):
+            os.makedirs(d)
 
 def get_core_version():
     if not os.path.exists("./sing-box"):
@@ -110,8 +112,21 @@ def convert_clash_to_json(input_file, output_json):
     except Exception as e:
         return False, str(e)
 
-def process_single_task(name, url, format_version):
-    print(f"🔄 [{name}] Processing...")
+def find_local_rules():
+    """自動掃描 src/ 目錄，發現所有本地規則文件。"""
+    local_rules = {}
+    if not os.path.exists(DIR_SRC):
+        return local_rules
+    for f in sorted(os.listdir(DIR_SRC)):
+        if f.endswith('.json'):
+            name = f[:-5]
+            local_rules[name] = os.path.join(DIR_SRC, f)
+    if local_rules:
+        print(f"📁 Discovered local rules from {DIR_SRC}/: {', '.join(local_rules.keys())}")
+    return local_rules
+
+def process_remote_rule(name, url, format_version):
+    print(f"🔄 [{name}] Processing remote...")
     tmp = f"temp_{name}"
     f_json = os.path.join(DIR_OUTPUT, f"{name}.json")
     f_srs = os.path.join(DIR_OUTPUT, f"{name}.srs")
@@ -153,6 +168,46 @@ def process_single_task(name, url, format_version):
             return TaskResult(name, "❌", "Compile Failed")
     return TaskResult(name, "❌", "Logic Error")
 
+def process_local_rule(name, source_path, format_version):
+    print(f"📄 [{name}] Processing local...")
+    f_json = os.path.join(DIR_OUTPUT, f"{name}.json")
+    f_srs = os.path.join(DIR_OUTPUT, f"{name}.srs")
+
+    if not os.path.exists(source_path):
+        return TaskResult(name, "❌", f"Source not found: {source_path}")
+
+    try:
+        with open(source_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        return TaskResult(name, "❌", "Invalid JSON source")
+
+    data['version'] = format_version
+    try:
+        with open(f_json, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        return TaskResult(name, "❌", "Write Failed")
+
+    try:
+        subprocess.run(["./sing-box", "rule-set", "compile", f_json, "-o", f_srs], check=True)
+        return TaskResult(name, "✅", f"Local v{format_version}", get_file_size(f_srs))
+    except Exception:
+        return TaskResult(name, "❌", "Compile Failed")
+
+def cleanup_outputs(remote_tasks, local_tasks):
+    """清理所有已知的產物，只刪除會被重建的文件。"""
+    all_keys = set(remote_tasks.keys()) | set(local_tasks.keys())
+    for key in all_keys:
+        for ext in ['.json', '.srs']:
+            f = os.path.join(DIR_OUTPUT, f"{key}{ext}")
+            if os.path.exists(f):
+                os.remove(f)
+                print(f"🧹 Cleaned: {f}")
+    readme = os.path.join(DIR_OUTPUT, "README.md")
+    if os.path.exists(readme):
+        os.remove(readme)
+
 def generate_full_readme(core_ver, format_version):
     print("📝 Generating README...")
     files = sorted([f for f in os.listdir(DIR_OUTPUT) if f.endswith('.srs')])
@@ -185,11 +240,22 @@ def resolve_format_version():
             return int(m.group(1))
     except Exception:
         pass
-    return 4
+    return 5
+
+def load_config(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+            if content:
+                return json.loads(content)
+    except Exception:
+        pass
+    return {}
 
 def main():
     args = [a for a in sys.argv[1:]]
-
     fmt_ver = resolve_format_version()
     print(f"Target format version: {fmt_ver}")
 
@@ -197,43 +263,43 @@ def main():
     core_ver = get_core_version()
     print(f"Core version: {core_ver}")
 
-    github_step_summary = os.getenv('GITHUB_STEP_SUMMARY')
-
-    tasks = {}
+    remote_tasks = {}
+    local_tasks = {}
 
     if len(args) >= 2:
-        name, url = args[0], args[1]
-        tasks[name] = url
-        print(f"Manual task: {name} → {url}")
-    elif os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, 'r') as f:
-                content = f.read().strip()
-                if content:
-                    tasks = json.loads(content)
-        except Exception as e:
-            print(f"⚠️ Config Error: {e}")
+        remote_tasks[args[0]] = args[1]
+        print(f"Manual task: {args[0]} → {args[1]}")
+    else:
+        remote_tasks = load_config(CONFIG_REMOTE)
+        local_tasks = find_local_rules()
+
+    cleanup_outputs(remote_tasks, local_tasks)
 
     results = []
-    if tasks:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(process_single_task, n, u, fmt_ver): n for n, u in tasks.items()}
-            for future in concurrent.futures.as_completed(futures):
-                results.append(future.result())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {}
+        for name, url in remote_tasks.items():
+            futures[executor.submit(process_remote_rule, name, url, fmt_ver)] = name
+        for name, path in local_tasks.items():
+            futures[executor.submit(process_local_rule, name, path, fmt_ver)] = name
+        for future in concurrent.futures.as_completed(futures):
+            results.append(future.result())
 
     gen_readme = '--gen-readme' in args
     if gen_readme:
         generate_full_readme(core_ver, fmt_ver)
 
+    github_step_summary = os.getenv('GITHUB_STEP_SUMMARY')
     if results and github_step_summary:
         with open(github_step_summary, 'a', encoding='utf-8') as f:
             f.write(f"## 🏭 Report\n- **Core**: `{core_ver}` | **Format**: `{fmt_ver}`\n")
             for r in results:
                 f.write(f"- {r.status} {r.name}: {r.msg}\n")
 
-        if any(r.status == "❌" for r in results):
-            print("❌ Some tasks failed. Exiting with error to prevent partial commit.")
-            sys.exit(1)
+    if any(r.status == "❌" for r in results):
+        print("❌ Some tasks failed. Exiting with error to prevent partial commit.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
