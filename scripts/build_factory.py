@@ -112,18 +112,18 @@ def convert_clash_to_json(input_file, output_json):
     except Exception as e:
         return False, str(e)
 
-def find_local_rules():
+def find_local_sources():
     """自動掃描 src/ 目錄，發現所有本地規則文件。"""
-    local_rules = {}
+    sources = {}
     if not os.path.exists(DIR_SRC):
-        return local_rules
+        return sources
     for f in sorted(os.listdir(DIR_SRC)):
         if f.endswith('.json'):
             name = f[:-5]
-            local_rules[name] = os.path.join(DIR_SRC, f)
-    if local_rules:
-        print(f"📁 Discovered local rules from {DIR_SRC}/: {', '.join(local_rules.keys())}")
-    return local_rules
+            sources[name] = os.path.join(DIR_SRC, f)
+    if sources:
+        print(f"📁 Discovered local sources from {DIR_SRC}/: {', '.join(sources.keys())}")
+    return sources
 
 def process_remote_rule(name, url, format_version):
     print(f"🔄 [{name}] Processing remote...")
@@ -170,8 +170,8 @@ def process_remote_rule(name, url, format_version):
 
 def process_local_rule(name, source_path, format_version):
     print(f"📄 [{name}] Processing local...")
-    f_json = os.path.join(DIR_OUTPUT, f"{name}.json")
     f_srs = os.path.join(DIR_OUTPUT, f"{name}.srs")
+    f_json = os.path.join(DIR_OUTPUT, f"{name}.json")
 
     if not os.path.exists(source_path):
         return TaskResult(name, "❌", f"Source not found: {source_path}")
@@ -196,7 +196,7 @@ def process_local_rule(name, source_path, format_version):
         return TaskResult(name, "❌", "Compile Failed")
 
 def cleanup_outputs(remote_tasks, local_tasks):
-    """清理所有已知的產物，只刪除會被重建的文件。"""
+    """清理 rules/ 中的已知產物，只刪除會被重建的文件。"""
     all_keys = set(remote_tasks.keys()) | set(local_tasks.keys())
     for key in all_keys:
         for ext in ['.json', '.srs']:
@@ -271,7 +271,7 @@ def main():
         print(f"Manual task: {args[0]} → {args[1]}")
     else:
         remote_tasks = load_config(CONFIG_REMOTE)
-        local_tasks = find_local_rules()
+        local_tasks = find_local_sources()
 
     cleanup_outputs(remote_tasks, local_tasks)
 
