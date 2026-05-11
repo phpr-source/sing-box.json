@@ -169,6 +169,7 @@ def process_remote_rule(name, url, format_version):
     return TaskResult(name, "❌", "Logic Error")
 
 def process_local_rule(name, source_path, format_version):
+    """處理本地規則：更新 version 後輸出 JSON + SRS 到 rules/。"""
     print(f"📄 [{name}] Processing local...")
     f_srs = os.path.join(DIR_OUTPUT, f"{name}.srs")
     f_json = os.path.join(DIR_OUTPUT, f"{name}.json")
