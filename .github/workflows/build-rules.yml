@@ -105,6 +105,7 @@ jobs:
       - name: Commit and Push
         run: |
           SB_VER=$(./sing-box version 2>/dev/null | head -n 1 | awk '{print $3}')
+          rm -f sing-box
 
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
