@@ -13,9 +13,10 @@ on:
         required: false
   push:
     paths:
-      - 'rule-providers.json'
+      - 'remote-rules.json'
+      - 'src/**'
       - 'scripts/build_factory.py'
-      - '.github/workflows/main.yml'
+      - '.github/workflows/build-rules.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -93,49 +94,17 @@ jobs:
           fi
           chmod +x sing-box
 
-      - name: Fix Environment
-        run: |
-          mkdir -p rules src
-          if [ -f "fakeip-filter-Remote-DNS.json" ]; then
-            mv fakeip-filter-Remote-DNS.json src/
-          fi
-          find rules/ -maxdepth 1 -type f ! -name "fakeip-filter.json" -delete
-
       - name: Run Factory
         run: |
           if [[ -n "${{ inputs.manual_name }}" ]]; then
-            python3 scripts/build_factory.py "${{ inputs.manual_name }}" "${{ inputs.manual_url }}"
+            python3 scripts/build_factory.py "${{ inputs.manual_name }}" "${{ inputs.manual_url }}" --gen-readme
           else
-            python3 scripts/build_factory.py
+            python3 scripts/build_factory.py --gen-readme
           fi
 
-      - name: Task - FakeIP (Local)
-        run: |
-          if [ ! -f "rules/fakeip-filter.json" ]; then
-            echo "::error::rules/fakeip-filter.json not found"
-            exit 1
-          fi
-          jq --argjson v "$FORMAT_VERSION" '.version=$v' rules/fakeip-filter.json > rules/fakeip-filter.tmp.json
-          mv rules/fakeip-filter.tmp.json rules/fakeip-filter.json
-          ./sing-box rule-set compile rules/fakeip-filter.json -o rules/fakeip-filter.srs
-
-      - name: Task - Remote DNS (Local)
-        run: |
-          SRC="src/fakeip-filter-Remote-DNS.json"
-          if [ -f "$SRC" ]; then
-            jq --argjson v "$FORMAT_VERSION" '.version=$v' "$SRC" > rules/fakeip-filter-Remote-DNS.json
-            ./sing-box rule-set compile rules/fakeip-filter-Remote-DNS.json -o rules/fakeip-filter-Remote-DNS.srs
-          fi
-
-      - name: Finalize
+      - name: Commit and Push
         run: |
           SB_VER=$(./sing-box version 2>/dev/null | head -n 1 | awk '{print $3}')
-          echo "SB_VERSION=${SB_VER:-unknown}" >> "$GITHUB_ENV"
-
-          python3 scripts/build_factory.py --gen-readme
-          rm -f sing-box
-          rm -f ./*.srs
-          find . -maxdepth 1 -type f -name "*.json" ! -name "rule-providers.json" -delete
 
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
