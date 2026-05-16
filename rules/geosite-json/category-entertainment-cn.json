@@ -157,6 +157,7 @@
         "bsbsb.top",
         "buke999.com",
         "bx1k.com",
+        "ccw.site",
         "cdkeynogap.com",
         "cdncl.net",
         "cgames.com",
@@ -574,7 +575,9 @@
         "scescdn.cn",
         "scid.cn",
         "scsentry.cn",
+        "sdo.com",
         "sfacg.com",
+        "shengqugames.com",
         "shoutanjjj.com",
         "shuhai.com",
         "shyxhy.com",
@@ -648,6 +651,7 @@
         "xinwuji.com",
         "xmcdn.com",
         "xn--owtw8cc49ajfl.cn",
+        "xyys.com",
         "xyzcdn.net",
         "xyzfm.link",
         "xyzfm.space",
@@ -683,6 +687,7 @@
         "zhulang.com",
         "zhuoyou.com",
         "zhuoyuegame.com",
+        "zjshulong.com",
         "zongheng.com"
       ],
       "domain_regex": "^.+-mihayo\\.akamaized\\.net$"
