@@ -102,6 +102,7 @@
         "xz.pphimalayanrt.com"
       ],
       "domain_suffix": [
+        ".konami",
         ".playstation",
         ".xbox",
         "100classicbooks.com",
@@ -112,6 +113,7 @@
         "2ksports.com",
         "2kweb.online",
         "3lateral.com",
+        "573.jp",
         "ac-pocketcamp.com",
         "acesofthunder.net",
         "activematter.game",
@@ -332,8 +334,23 @@
         "itch.zone",
         "joinsquad.com",
         "joyjoy.net",
+        "kgisystems.com",
         "kirbysepicyarn.com",
         "kirbysuperstarultra.com",
+        "kiwi.jp",
+        "konami-igaming.online",
+        "konami.co.jp",
+        "konami.com",
+        "konami.net",
+        "konami.org",
+        "konamicrossmedia.com",
+        "konamigaming.com",
+        "konamigaming.net",
+        "konamigaming.online",
+        "konamionline.com",
+        "konamiopen.jp",
+        "konamisportsclub.jp",
+        "konamistyle.jp",
         "kraftonde.com",
         "kyurem.com",
         "lcsmerch.com",
@@ -561,6 +578,8 @@
         "reachthefinals.com",
         "realityscan.com",
         "renovacionxboxlive.com",
+        "resella.jp",
+        "resellablue.com",
         "rgpub.io",
         "riot-games.com",
         "riot.com",
@@ -801,6 +820,7 @@
         "yostar.co.jp",
         "yostar.net",
         "yostarplat.com",
+        "yugioh-card.com",
         "zenlesszonezero.com",
         "zynga.com",
         "zyngaplayersupport.com",
@@ -808,11 +828,11 @@
       ],
       "domain_regex": [
         "^epicgames-download\\d\\.akamaized\\.net$",
-        "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
-        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$",
         "^cdn-akamai-.+\\.gog-services\\.com$",
         "^gog-cdn-.+\\.footprint\\.net$",
-        "^images(-\\d)?\\.gog-statics\\.com$"
+        "^images(-\\d)?\\.gog-statics\\.com$",
+        "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
+        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
       ]
     }
   ]

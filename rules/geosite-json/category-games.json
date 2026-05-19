@@ -104,6 +104,7 @@
         "xz.pphimalayanrt.com"
       ],
       "domain_suffix": [
+        ".konami",
         ".playstation",
         ".xbox",
         "100classicbooks.com",
@@ -148,6 +149,7 @@
         "4399yyy.com",
         "5054399.com",
         "5054399.net",
+        "573.jp",
         "5wyxi.com",
         "71acg.com",
         "71acg.net",
@@ -440,8 +442,23 @@
         "joinsquad.com",
         "joyjoy.net",
         "juequling.com",
+        "kgisystems.com",
         "kirbysepicyarn.com",
         "kirbysuperstarultra.com",
+        "kiwi.jp",
+        "konami-igaming.online",
+        "konami.co.jp",
+        "konami.com",
+        "konami.net",
+        "konami.org",
+        "konamicrossmedia.com",
+        "konamigaming.com",
+        "konamigaming.net",
+        "konamigaming.online",
+        "konamionline.com",
+        "konamiopen.jp",
+        "konamisportsclub.jp",
+        "konamistyle.jp",
         "kraftonde.com",
         "kurogames.com",
         "kyurem.com",
@@ -714,6 +731,8 @@
         "realcybertron.com",
         "realityscan.com",
         "renovacionxboxlive.com",
+        "resella.jp",
+        "resellablue.com",
         "rgpub.io",
         "riot-games.com",
         "riot.com",
@@ -1012,6 +1031,7 @@
         "yostarplat.com",
         "youba.com",
         "yuanshen.com",
+        "yugioh-card.com",
         "yxdmgame.com",
         "yxhapi.com",
         "yxhhdl.com",
@@ -1030,12 +1050,12 @@
       ],
       "domain_regex": [
         "^epicgames-download\\d\\.akamaized\\.net$",
-        "^.+-mihayo\\.akamaized\\.net$",
-        "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
-        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$",
         "^cdn-akamai-.+\\.gog-services\\.com$",
         "^gog-cdn-.+\\.footprint\\.net$",
-        "^images(-\\d)?\\.gog-statics\\.com$"
+        "^images(-\\d)?\\.gog-statics\\.com$",
+        "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
+        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$",
+        "^.+-mihayo\\.akamaized\\.net$"
       ]
     }
   ]
