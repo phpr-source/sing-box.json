@@ -78,6 +78,7 @@
         "espn.hb.omtrdc.net",
         "espndotcom.tt.omtrdc.net",
         "f3b7q2p3.ssl.hwcdn.net",
+        "favoritescc-hamivideo2.cdn.hinet.net",
         "flightsimulator.azureedge.net",
         "gamedownloads-rockstargames-com.akamaized.net",
         "gamer-cds.cdn.hinet.net",
@@ -98,6 +99,7 @@
         "images-na.ssl-images-amazon.com",
         "lastfm.freetls.fastly.net",
         "lazer.ppy.sh",
+        "lgcscc-hamivideo2.cdn.hinet.net",
         "linear-abematv.akamaized.net",
         "lolstatic-a.akamaihd.net",
         "lv.queniujq.cn",
@@ -158,6 +160,8 @@
         "steamusercontent-a.akamaihd.net",
         "steamuserimages-a.akamaihd.net",
         "steamvideo-a.akamaihd.net",
+        "thumbnail-hamivideo.cdn.hinet.net",
+        "tlmr-hamivideo2.cdn.hinet.net",
         "tmdb-image-prod.b-cdn.net",
         "tmdb-web-image-prod.b-cdn.net",
         "tv.applemusic.com",
@@ -195,6 +199,7 @@
         "vod-abematv.akamaized.net",
         "wb-agora-hydra-file-storage-k1.s3.amazonaws.com",
         "weblive-hamivideo.cdn.hinet.net",
+        "webvodad-hamivideo.cdn.hinet.net",
         "ws.audioscrobbler.com",
         "www4-static.gog-statics.com",
         "xz.pphimalayanrt.com",
@@ -1886,19 +1891,19 @@
         "zyngapoker.com"
       ],
       "domain_regex": [
+        "^[0-9]+vod-adaptive\\.akamaized\\.net$",
         "(^|\\.)apiproxy-device-prod-nlb-.+\\.amazonaws\\.com$",
         "(^|\\.)apiproxy-website-nlb-prod-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.apiproxy-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.ichnaea-web-.+\\.amazonaws\\.com$",
-        "^ewcdn[0-9]+\\.nowe\\.com$",
         "^epicgames-download\\d\\.akamaized\\.net$",
         "^hses[1-7]?\\.akamaized\\.net$",
-        "^[0-9]+vod-adaptive\\.akamaized\\.net$",
+        "^ewcdn[0-9]+\\.nowe\\.com$",
+        "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
+        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$",
         "^cdn-akamai-.+\\.gog-services\\.com$",
         "^gog-cdn-.+\\.footprint\\.net$",
-        "^images(-\\d)?\\.gog-statics\\.com$",
-        "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
-        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
+        "^images(-\\d)?\\.gog-statics\\.com$"
       ]
     }
   ]
