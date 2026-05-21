@@ -1892,18 +1892,18 @@
       ],
       "domain_regex": [
         "^[0-9]+vod-adaptive\\.akamaized\\.net$",
+        "^epicgames-download\\d\\.akamaized\\.net$",
+        "^hses[1-7]?\\.akamaized\\.net$",
+        "^ewcdn[0-9]+\\.nowe\\.com$",
         "(^|\\.)apiproxy-device-prod-nlb-.+\\.amazonaws\\.com$",
         "(^|\\.)apiproxy-website-nlb-prod-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.apiproxy-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.ichnaea-web-.+\\.amazonaws\\.com$",
-        "^epicgames-download\\d\\.akamaized\\.net$",
-        "^hses[1-7]?\\.akamaized\\.net$",
-        "^ewcdn[0-9]+\\.nowe\\.com$",
-        "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
-        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$",
         "^cdn-akamai-.+\\.gog-services\\.com$",
         "^gog-cdn-.+\\.footprint\\.net$",
-        "^images(-\\d)?\\.gog-statics\\.com$"
+        "^images(-\\d)?\\.gog-statics\\.com$",
+        "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
+        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
       ]
     }
   ]
