@@ -1891,9 +1891,9 @@
         "zyngapoker.com"
       ],
       "domain_regex": [
-        "^[0-9]+vod-adaptive\\.akamaized\\.net$",
-        "^epicgames-download\\d\\.akamaized\\.net$",
         "^hses[1-7]?\\.akamaized\\.net$",
+        "^epicgames-download\\d\\.akamaized\\.net$",
+        "^[0-9]+vod-adaptive\\.akamaized\\.net$",
         "^ewcdn[0-9]+\\.nowe\\.com$",
         "(^|\\.)apiproxy-device-prod-nlb-.+\\.amazonaws\\.com$",
         "(^|\\.)apiproxy-website-nlb-prod-.+\\.amazonaws\\.com$",
