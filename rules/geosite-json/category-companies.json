@@ -8432,12 +8432,12 @@
         "zukunftswerkstatt.de"
       ],
       "domain_regex": [
-        "^ewcdn[0-9]+\\.nowe\\.com$",
         ".+\\.awsdns-[0-9][0-9]\\.(co\\.uk|com|net|org)$",
-        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.xn--ngstr-lra8j\\.com$",
-        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.googlevideo\\.com$",
+        "^ewcdn[0-9]+\\.nowe\\.com$",
         ".+\\.awsdns-cn-[0-9][0-9]\\.(biz|com|net|top)$",
-        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$"
+        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$",
+        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.xn--ngstr-lra8j\\.com$",
+        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.googlevideo\\.com$"
       ]
     }
   ]
