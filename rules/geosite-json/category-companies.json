@@ -7432,6 +7432,7 @@
         "townwifi.jp",
         "toy-cadcam.com",
         "toycadcam.com",
+        "trace-flow.ru",
         "tracker-api.my.com",
         "tracker.my.com",
         "tracking-location.com",
@@ -8434,10 +8435,10 @@
       "domain_regex": [
         ".+\\.awsdns-[0-9][0-9]\\.(co\\.uk|com|net|org)$",
         "^ewcdn[0-9]+\\.nowe\\.com$",
-        ".+\\.awsdns-cn-[0-9][0-9]\\.(biz|com|net|top)$",
-        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$",
         "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.xn--ngstr-lra8j\\.com$",
-        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.googlevideo\\.com$"
+        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.googlevideo\\.com$",
+        ".+\\.awsdns-cn-[0-9][0-9]\\.(biz|com|net|top)$",
+        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$"
       ]
     }
   ]
