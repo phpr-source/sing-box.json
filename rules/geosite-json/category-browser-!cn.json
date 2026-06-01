@@ -2,6 +2,7 @@
   "version": 5,
   "rules": [
     {
+      "domain": "mozilla-ohttp.fastly-edge.com",
       "domain_suffix": [
         ".chrome",
         "basilisk-browser.org",

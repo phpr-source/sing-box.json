@@ -6004,10 +6004,14 @@
         "xhamster18.com",
         "xhamster18.desi",
         "xhamster19.com",
+        "xhamster2.com",
         "xhamster3.com",
         "xhamsterlive.com",
         "xhcdn.com",
+        "xhnews.live",
         "xhot.pro",
+        "xhpingcdn.com",
+        "xhreal5.com",
         "xhub.tv",
         "xiangrikui-app.com",
         "xianir.xyz",
@@ -6640,9 +6644,9 @@
         "(^|\\.)zy[0-9]{4}\\.top$",
         "(^|\\.)zztt[1-6][0-9]\\.com$",
         "(^|\\.)zzz[1-9][0-9]\\.top$",
-        "javdb\\d+\\.com$",
+        "(^|\\.)cav1(0[2-9]|1[0-9])\\.com$",
         "(^|\\.)bilibili3(0[1-9]|1[0-2])\\.xyz$",
-        "(^|\\.)cav1(0[2-9]|1[0-9])\\.com$"
+        "javdb\\d+\\.com$"
       ]
     }
   ]
