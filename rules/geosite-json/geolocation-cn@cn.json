@@ -76,7 +76,8 @@
         "nwcddns.cn",
         "nwcdinfosec.cn",
         "route53.cn",
-        "sagemaker.com.cn"
+        "sagemaker.com.cn",
+        "starbucks.com.cn"
       ],
       "domain_regex": [
         "^.+-mihayo\\.akamaized\\.net$",
