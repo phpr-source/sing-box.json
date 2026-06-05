@@ -3,9 +3,8 @@
   "rules": [
     {
       "domain_suffix": [
-        "aki-game.com",
-        "kurogames.com",
-        "kurogames.net"
+        "youku.tv",
+        "youkuplay.com"
       ]
     }
   ]
