@@ -2,7 +2,10 @@
   "version": 5,
   "rules": [
     {
-      "domain": "bbs.boingboing.net",
+      "domain": [
+        "bbs.boingboing.net",
+        "www.quora.com.cdn.cloudflare.net"
+      ],
       "domain_suffix": [
         "18p2p.com",
         "22112211.xyz",
