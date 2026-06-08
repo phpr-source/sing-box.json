@@ -1,0 +1,18 @@
+{
+  "version": 5,
+  "rules": [
+    {
+      "domain": [
+        "conn1.oppomobile.com",
+        "conn2.oppomobile.com",
+        "connect.rom.miui.com",
+        "connectivity.samsung.com.cn",
+        "connectivitycheck.platform.hicloud.com",
+        "connectivitycheck.platform.hihonorcloud.com",
+        "wifi.vivo.com.cn",
+        "www.qualcomm.cn"
+      ],
+      "domain_suffix": "captive.apple.com"
+    }
+  ]
+}

@@ -14,10 +14,8 @@
         "crls.pki.goog",
         "i.pki.goog",
         "o.pki.goog",
-        "ocsp-lb.apple.com.akadns.net",
         "ocsp.apple.com",
         "ocsp.pki.goog",
-        "ocsp2-lb.apple.com.akadns.net",
         "ocsp2.apple.com",
         "pki-goog.l.google.com",
         "valid.apple.com",
@@ -38,9 +36,7 @@
         "sectigochina.com",
         "sectigochina.com.cdn.cloudflare.net",
         "sslcom.cn",
-        "trust-provider.cn",
-        "yahoo.cn",
-        "yahoo.com.cn"
+        "trust-provider.cn"
       ]
     }
   ]
