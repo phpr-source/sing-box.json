@@ -5,7 +5,6 @@
       "domain": [
         "1l-hit.mail.ru",
         "1l-hit.vkplay.ru",
-        "265.com",
         "3dns-1.adobe.com",
         "3dns-2.adobe.com",
         "3dns-3.adobe.com",
@@ -933,6 +932,7 @@
         "www.gstatic.com",
         "www.microsoft.com",
         "www.pxcc.com",
+        "www.recaptcha-cn.net",
         "www.recaptcha.net",
         "www.support.apple.com",
         "xp.apple.com",
@@ -1050,6 +1050,7 @@
         "21vbc.com",
         "21vbluecloud.com",
         "21vbluecloud.net",
+        "265.com",
         "2beatsdre.com",
         "2buybeatsbydre.com",
         "2drdrebeats.com",
@@ -3093,6 +3094,7 @@
         "cpedge.com",
         "cqcorea.com",
         "crankplayer.com",
+        "crashlytics.com",
         "createspace.com",
         "createwhatsnext.com",
         "creativecloud.com",
@@ -7632,6 +7634,7 @@
         "uwn.com",
         "uwpcommunitytoolkit.com",
         "v-has.com",
+        "v.ps",
         "v8.dev",
         "v8project.org",
         "vagrantcloud.com",
@@ -7820,6 +7823,7 @@
         "votolia.com",
         "vpro.com",
         "vpro.net",
+        "vps.hosting",
         "vred-essentials.com",
         "vredessentials.com",
         "vredprofessional.com",
@@ -8060,6 +8064,16 @@
         "xplr.co",
         "xrea.com",
         "xscale.com",
+        "xtom.au",
+        "xtom.com",
+        "xtom.de",
+        "xtom.ee",
+        "xtom.hk",
+        "xtom.jp",
+        "xtom.nl",
+        "xtom.sg",
+        "xtom.social",
+        "xtom.us",
         "xtracloud.cn",
         "xtracloud.net",
         "xuite.net",
@@ -8510,12 +8524,12 @@
         "zukunftswerkstatt.de"
       ],
       "domain_regex": [
-        ".+\\.awsdns-[0-9][0-9]\\.(co\\.uk|com|net|org)$",
         "^ewcdn[0-9]+\\.nowe\\.com$",
-        ".+\\.awsdns-cn-[0-9][0-9]\\.(biz|com|net|top)$",
-        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$",
+        ".+\\.awsdns-[0-9][0-9]\\.(co\\.uk|com|net|org)$",
         "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.xn--ngstr-lra8j\\.com$",
-        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.googlevideo\\.com$"
+        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.googlevideo\\.com$",
+        ".+\\.awsdns-cn-[0-9][0-9]\\.(biz|com|net|top)$",
+        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$"
       ]
     }
   ]
