@@ -1,0 +1,13 @@
+{
+  "version": 5,
+  "rules": [
+    {
+      "domain_suffix": [
+        "aki-game.net",
+        "aki-game2.net",
+        "kurogame.net",
+        "kurogames.net"
+      ]
+    }
+  ]
+}

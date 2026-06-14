@@ -68,6 +68,7 @@
         "steampipe-partner.akamaized.net",
         "steampipe.akamaized.net",
         "steamstore-a.akamaihd.net",
+        "steamugcquincy.blob.core.windows.net",
         "steamusercontent-a.akamaihd.net",
         "steamuserimages-a.akamaihd.net",
         "steamvideo-a.akamaihd.net",
@@ -161,7 +162,6 @@
         "ac-pocketcamp.com",
         "acesofthunder.net",
         "activematter.game",
-        "aki-game.com",
         "aligames.com",
         "amiibo.com",
         "anthemgame.com",
@@ -467,8 +467,6 @@
         "konamisportsclub.jp",
         "konamistyle.jp",
         "kraftonde.com",
-        "kurogames.com",
-        "kurogames.net",
         "kyurem.com",
         "labycore.cn",
         "langrenclub.com",
@@ -1063,11 +1061,11 @@
       "domain_regex": [
         "^epicgames-download\\d\\.akamaized\\.net$",
         "^.+-mihayo\\.akamaized\\.net$",
-        "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
-        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$",
         "^cdn-akamai-.+\\.gog-services\\.com$",
         "^gog-cdn-.+\\.footprint\\.net$",
-        "^images(-\\d)?\\.gog-statics\\.com$"
+        "^images(-\\d)?\\.gog-statics\\.com$",
+        "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
+        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
       ]
     }
   ]
