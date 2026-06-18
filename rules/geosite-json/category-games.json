@@ -72,6 +72,8 @@
         "steamusercontent-a.akamaihd.net",
         "steamuserimages-a.akamaihd.net",
         "steamvideo-a.akamaihd.net",
+        "supercell.helpshift.com",
+        "supercell.zendesk.com",
         "ubisoft-orbit-savegames.s3.amazonaws.com",
         "ubisoft-uplay-savegames.s3.amazonaws.com",
         "ubisoft.siteintercept.qualtrics.com",
@@ -888,7 +890,6 @@
         "stellasora.global",
         "stellasora.jp",
         "supercell.com",
-        "supercell.helpshift.com",
         "supercell.net",
         "supercellcommunity.cn",
         "supercellcreators.com",
@@ -1076,12 +1077,12 @@
       ],
       "domain_regex": [
         "^epicgames-download\\d\\.akamaized\\.net$",
-        "^.+-mihayo\\.akamaized\\.net$",
         "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
         "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$",
         "^cdn-akamai-.+\\.gog-services\\.com$",
         "^gog-cdn-.+\\.footprint\\.net$",
-        "^images(-\\d)?\\.gog-statics\\.com$"
+        "^images(-\\d)?\\.gog-statics\\.com$",
+        "^.+-mihayo\\.akamaized\\.net$"
       ]
     }
   ]
