@@ -4,16 +4,9 @@
     {
       "domain": [
         "alibaba.cdn.steampipe.steamcontent.com",
-        "gog-cdn-fastly.gog.com",
-        "gog-cdn.akamaized.net",
         "gog.qtlglb.com",
-        "gogalaxy.gog-statics.com",
         "lv.queniujq.cn",
-        "menu-static.gog-statics.com",
-        "productcard.gog-statics.com",
-        "static-login.gog-statics.com",
         "uplaypc-s-ubisoft.cdn.ubi.com",
-        "www4-static.gog-statics.com",
         "xz.pphimalayanrt.com"
       ],
       "domain_suffix": [
@@ -48,12 +41,9 @@
         "yostar.cn"
       ],
       "domain_regex": [
+        "^.+-mihayo\\.akamaized\\.net$",
         "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
-        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$",
-        "^cdn-akamai-.+\\.gog-services\\.com$",
-        "^gog-cdn-.+\\.footprint\\.net$",
-        "^images(-\\d)?\\.gog-statics\\.com$",
-        "^.+-mihayo\\.akamaized\\.net$"
+        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
       ]
     }
   ]

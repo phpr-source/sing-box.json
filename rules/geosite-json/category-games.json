@@ -31,24 +31,21 @@
         "f3b7q2p3.ssl.hwcdn.net",
         "flightsimulator.azureedge.net",
         "gamedownloads-rockstargames-com.akamaized.net",
-        "gog-cdn-fastly.gog.com",
+        "gog-cdn-lumen.secure2.footprint.net",
         "gog-cdn.akamaized.net",
         "gog.qtlglb.com",
-        "gogalaxy.gog-statics.com",
         "hb.imgix.net",
         "lazer.ppy.sh",
         "lolstatic-a.akamaihd.net",
         "lv.queniujq.cn",
         "m1.ppy.sh",
         "media-rockstargames-com.akamaized.net",
-        "menu-static.gog-statics.com",
         "notify.ppy.sh",
         "opgg-static.akamaized.net",
         "origin-a.akamaihd.net",
         "osu.ppy.sh",
         "prd-priconne-redive.akamaized.net",
         "prodforza.blob.core.windows.net",
-        "productcard.gog-statics.com",
         "pubg1.battleye.com",
         "roblox-load-generator-configuration.s3.us-east-2.amazonaws.com",
         "roblox-poc.global.ssl.fastly.net",
@@ -57,7 +54,6 @@
         "sentry.ppy.sh",
         "spectator.ppy.sh",
         "ssl-lvlt.cdn.ea.com",
-        "static-login.gog-statics.com",
         "steambroadcast.akamaized.net",
         "steamcdn-a.akamaihd.net",
         "steamcloudsweden.blob.core.windows.net",
@@ -104,7 +100,6 @@
         "uplaypc-s-ubisoft.cdn.ubi.com",
         "videos-rockstargames-com.akamaized.net",
         "wb-agora-hydra-file-storage-k1.s3.amazonaws.com",
-        "www4-static.gog-statics.com",
         "xz.pphimalayanrt.com"
       ],
       "domain_suffix": [
@@ -1077,12 +1072,9 @@
       ],
       "domain_regex": [
         "^epicgames-download\\d\\.akamaized\\.net$",
+        "^.+-mihayo\\.akamaized\\.net$",
         "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
-        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$",
-        "^cdn-akamai-.+\\.gog-services\\.com$",
-        "^gog-cdn-.+\\.footprint\\.net$",
-        "^images(-\\d)?\\.gog-statics\\.com$",
-        "^.+-mihayo\\.akamaized\\.net$"
+        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
       ]
     }
   ]
