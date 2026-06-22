@@ -20,8 +20,7 @@
         "pki-goog.l.google.com",
         "valid.apple.com",
         "valid.origin-apple.com.akadns.net",
-        "www.entrust.cn",
-        "www.microsoft.com"
+        "www.entrust.cn"
       ],
       "domain_suffix": [
         "alphassl.com",

@@ -3,6 +3,7 @@
   "rules": [
     {
       "domain_suffix": [
+        "insights-collector.gog.com",
         "log-upload-os.hoyoverse.com",
         "log-upload.mihoyo.com"
       ]

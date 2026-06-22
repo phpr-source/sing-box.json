@@ -3,7 +3,6 @@
   "rules": [
     {
       "domain_suffix": [
-        "browser.events.data.msn.cn",
         "microsoftnews.cn",
         "msn.cn"
       ]
