@@ -1915,12 +1915,12 @@
       "domain_regex": [
         "^[0-9]+vod-adaptive\\.akamaized\\.net$",
         "^ewcdn[0-9]+\\.nowe\\.com$",
-        "^hses[1-7]?\\.akamaized\\.net$",
         "^epicgames-download\\d\\.akamaized\\.net$",
         "(^|\\.)apiproxy-device-prod-nlb-.+\\.amazonaws\\.com$",
         "(^|\\.)apiproxy-website-nlb-prod-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.apiproxy-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.ichnaea-web-.+\\.amazonaws\\.com$",
+        "^hses[1-7]?\\.akamaized\\.net$",
         "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
         "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
       ]
