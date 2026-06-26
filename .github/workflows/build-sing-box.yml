@@ -1078,24 +1078,40 @@ jobs:
           ref: ${{ matrix.target.core_ref }}
           path: sing-box
           fetch-depth: 1
-          # clients/apple submodule comes with core but is stale vs reF1nd libbox API;
-          # the next step replaces it with latest upstream. Shallow full fetch (no
-          # filter:blob:none) so libbox export symbols aren't dropped.
+          # Shallow full fetch (no filter:blob:none) so libbox export symbols aren't
+          # dropped. submodules: recursive pulls clients/apple (pinned by reF1nd to a
+          # SagerNet/sing-box-for-apple commit) plus its nested Frameworks/Runestone
+          # submodule so the SwiftPM Package.swift resolves. For cores on the *new*
+          # libbox API the next step replaces this pinned client with latest upstream.
+          submodules: recursive
 
-      - name: Replace Apple client with latest upstream
+      - name: Sync Apple client to core's libbox API version
         working-directory: sing-box
         run: |
           set -euo pipefail
-          # reF1nd pins clients/apple at a stale SagerNet/sing-box-for-apple commit whose
-          # Swift LibboxPlatformInterfaceProtocol conformance + LibboxSetMemoryLimit /
-          # LibboxRedirectStderr calls lag reF1nd's libbox API → "does not conform to
-          # protocol" + "cannot find ... in scope" at xcodebuild. Replace it with the
-          # latest upstream dev branch, which implements the current protocol and uses
-          # LibboxSetupOptions.oomMemoryLimit. This is the jsda/sing-box-for-ios
-          # update_apple pattern. --recurse-submodules pulls the nested
-          # Frameworks/Runestone submodule so the SwiftPM Package.swift resolves.
-          rm -rf clients/apple
-          git clone --recurse-submodules --depth 1 https://github.com/SagerNet/sing-box-for-apple.git clients/apple
+          # reF1nd pins clients/apple at SagerNet/sing-box-for-apple 794eb1741f, which
+          # matches reF1nd-stable's *old* libbox API (SagerNet stable v1.13.14 ships the
+          # same pin). But reF1nd-testing's libbox evolved: PlatformInterface gained
+          # openShellSession/usePlatformShell/startNeighborMonitor/lookupUser/etc and
+          # CommandClientHandler gained writeOutbounds, and it dropped LibboxSetMemoryLimit/
+          # LibboxRedirectStderr. The pinned 794eb1741f client doesn't implement those →
+          # "does not conform to protocol" + "cannot find ... in scope".
+          #
+          # Conversely, the latest upstream dev client now references symbols the *old*
+          # stable libbox doesn't export (LibboxGoVersion, LibboxPromoteOOMDraft,
+          # LibboxCommandOutbounds, LibboxRemoteConnectionOptions, crashReportSource,
+          # oomKillerEnabled, ...), so blindly replacing breaks stable.
+          #
+          # Resolution: detect the core's libbox API era from its Go source and only
+          # replace the client when the core is on the new API. WriteOutbounds in
+          # command_client.go is the clean signal — it exists only on the new API.
+          if grep -q 'WriteOutbounds' experimental/libbox/command_client.go; then
+            echo "::notice::Core is on the new libbox API (WriteOutbounds present). Replacing pinned Apple client with latest upstream dev branch."
+            rm -rf clients/apple
+            git clone --recurse-submodules --depth 1 https://github.com/SagerNet/sing-box-for-apple.git clients/apple
+          else
+            echo "::notice::Core is on the old libbox API (no WriteOutbounds). Keeping reF1nd-pinned Apple client (matches this libbox era)."
+          fi
 
       - name: Apply Patches
         working-directory: sing-box
