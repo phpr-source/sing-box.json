@@ -1077,8 +1077,12 @@ jobs:
           repository: ${{ matrix.target.repo }}
           ref: ${{ matrix.target.core_ref }}
           path: sing-box
-          fetch-depth: 0
-          filter: blob:none
+          # 用 shallow clone（不用 fetch-depth:0 + filter:blob:none）。
+          # filter:blob:none 的 partial clone 會延遲加載 blob；gomobile build_libbox
+          # 掃描 libbox 導出符號時若某些 Go 源文件 blob 未拉，生成的 Swift bindings 會
+          # 靜默缺符號（LibboxSetMemoryLimit/LibboxRedirectStderr），xcframework 生成
+          # 成功但 xcodebuild 報 "cannot find ... in scope"。jsda 用 --depth 1 完整拉取。
+          fetch-depth: 1
           # reF1nd/sing-box 把 SagerNet/sing-box-for-apple pin 在 clients/apple 子模塊
           # (兼容 commit)。隨 core 拉取子模塊，Apple client Swift API 與 reF1nd libbox
           # 保證同版本匹配——勿單獨 checkout Apple client main 分支（API 已演進不兼容）。
