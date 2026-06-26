@@ -812,6 +812,10 @@ jobs:
           repository: ${{ matrix.target.sfa_repo }}
           ref: ${{ matrix.target.sfa_branch }}
           path: sing-box-for-android
+          # termux-app submodule is required: settings.gradle.kts includes
+          # :terminal-view/:terminal-emulator under third_party/termux-app.
+          # Gradle 9.3.1+ hard-fails configuring a project whose dir is missing.
+          submodules: true
 
       - name: Setup Go
         if: matrix.target.sfa_repo != 'none'
@@ -1845,7 +1849,7 @@ jobs:
       - name: Create Issue with logs
         run: |
           echo "Fetching failed logs..."
-          gh run view ${{ github.run_id }} --repo "${{ github.repository }}" --log-failed --exit-status 0 | tail -n 100 > /tmp/error.log || echo "Failed to fetch logs." > /tmp/error.log
+          gh run view ${{ github.run_id }} --repo "${{ github.repository }}" --log-failed 2>/tmp/gh_err.log | tail -n 100 > /tmp/error.log || echo "Failed to fetch logs: $(cat /tmp/gh_err.log)" > /tmp/error.log
 
           cat > issue_body.md <<EOF
           構建在工作流 \`${{ github.workflow }}\` 中失敗。
