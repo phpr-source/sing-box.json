@@ -1082,7 +1082,10 @@ jobs:
           # reF1nd/sing-box 把 SagerNet/sing-box-for-apple pin 在 clients/apple 子模塊
           # (兼容 commit)。隨 core 拉取子模塊，Apple client Swift API 與 reF1nd libbox
           # 保證同版本匹配——勿單獨 checkout Apple client main 分支（API 已演進不兼容）。
-          submodules: true
+          # recursive: clients/apple 內部還有 Frameworks/Runestone 子模塊（Swift Package
+          # 源碼），單層 true 只拉一層會導致 Runestone/Package.swift 缺失，xcodebuild
+          # 報 "Could not resolve package dependencies"。
+          submodules: recursive
 
       - name: Apply Patches
         working-directory: sing-box
