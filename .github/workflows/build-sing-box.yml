@@ -1137,8 +1137,9 @@ jobs:
             exit 1
           fi
           echo "Found xcframework at: $XCFW"
-          DEST="sing-box-for-apple/Frameworks/Libbox.xcframework"
-          mkdir -p "$DEST"
+          # pbxproj 引用 path=Libbox.xcframework, sourceTree="<group>" → 項目根目錄
+          # (非 Frameworks/ 下；Xcode 在 sing-box-for-apple/Libbox.xcframework 查找)
+          DEST="sing-box-for-apple/Libbox.xcframework"
           rm -rf "$DEST"
           cp -R "$XCFW" "$DEST"
 
