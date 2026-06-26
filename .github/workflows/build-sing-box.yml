@@ -1059,7 +1059,7 @@ jobs:
     runs-on: macos-latest
     needs: [init, check]
     timeout-minutes: 60
-    # 非阻塞：Apple 構建失敗不影響 core/android 發佈（簽名/環境複雜，符合 A2 未簽名取捨）
+    # 非阻塞：Apple 構建失敗不影響 core/android 發佈
     continue-on-error: true
     if: >-
       needs.check.outputs.has_update == 'true' &&
@@ -1071,7 +1071,7 @@ jobs:
       matrix:
         target: ${{ fromJson(needs.check.outputs.matrix) }}
     steps:
-      - name: Checkout Core
+      - name: Checkout Core (with Apple client submodule)
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.target.repo }}
@@ -1079,6 +1079,10 @@ jobs:
           path: sing-box
           fetch-depth: 0
           filter: blob:none
+          # reF1nd/sing-box 把 SagerNet/sing-box-for-apple pin 在 clients/apple 子模塊
+          # (兼容 commit)。隨 core 拉取子模塊，Apple client Swift API 與 reF1nd libbox
+          # 保證同版本匹配——勿單獨 checkout Apple client main 分支（API 已演進不兼容）。
+          submodules: true
 
       - name: Apply Patches
         working-directory: sing-box
@@ -1103,100 +1107,72 @@ jobs:
           cache: true
           cache-dependency-path: 'sing-box/go.sum'
 
-      - name: Build Libbox.xcframework
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Build Libbox.xcframework (iOS)
         working-directory: sing-box
         run: |
           make lib_install
-          make lib_apple
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          # -platform ios 精確產出 iOS xcframework（優於 make lib_apple 的全平台）
+          go run ./cmd/internal/build_libbox -target apple -platform ios
+          mv Libbox.xcframework clients/apple
 
-      - name: Resolve Apple Client Branch
-        id: apple_ref
+      - name: Build SFI (iOS, unsigned + ldid)
+        working-directory: sing-box/clients/apple
         run: |
-          # reF1nd 未 fork Apple client → 用上游 SagerNet/sing-box-for-apple
-          # stable target 映射 stable 分支，testing target 映射 main 分支
-          if [[ "${{ matrix.target.id }}" == *"Stable"* ]]; then
-            echo "ref=stable" >> $GITHUB_OUTPUT
-          else
-            echo "ref=main" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Checkout Apple Client
-        uses: actions/checkout@v4
-        with:
-          repository: SagerNet/sing-box-for-apple
-          ref: ${{ steps.apple_ref.outputs.ref }}
-          path: sing-box-for-apple
-          submodules: true
-
-      - name: Place Libbox.xcframework
-        run: |
-          # make lib_apple 產物路徑自適應定位（可能在 sing-box/ 根或 dist/）
-          XCFW=$(find sing-box -maxdepth 3 -name "Libbox.xcframework" -type d 2>/dev/null | head -1)
-          if [ -z "$XCFW" ]; then
-            echo "::error::Libbox.xcframework not found after make lib_apple"
-            exit 1
-          fi
-          echo "Found xcframework at: $XCFW"
-          # pbxproj 引用 path=Libbox.xcframework, sourceTree="<group>" → 項目根目錄
-          # (非 Frameworks/ 下；Xcode 在 sing-box-for-apple/Libbox.xcframework 查找)
-          DEST="sing-box-for-apple/Libbox.xcframework"
-          rm -rf "$DEST"
-          cp -R "$XCFW" "$DEST"
-
-      - name: Build SFI (iOS, unsigned)
-        working-directory: sing-box-for-apple
-        run: |
-          set -o pipefail
-          # -derivedDataPath 固定輸出路徑，CODE_SIGNING_ALLOWED=NO 走未簽名
-          xcodebuild build \
-            -scheme SFI -configuration Release \
+          set -euo pipefail
+          xcodebuild \
+            -project sing-box.xcodeproj \
+            -scheme SFI \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath build/dd \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            | xcbeautify || true
-          # 用產物存在性校驗（xcbeautify exit code 不可靠）
-          APP=$(find build/dd -name "SFI.app" -type d 2>/dev/null | head -1)
-          [ -n "$APP" ] || { echo "::error::SFI.app not produced"; exit 1; }
-          echo "SFI.app at: $APP"
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath DerivedData \
+            build \
+            STRIP_INSTALLED_PRODUCT=NO \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO
 
-      - name: Build SFM (macOS, unsigned)
-        working-directory: sing-box-for-apple
-        run: |
-          set -o pipefail
-          xcodebuild build \
-            -scheme SFM -configuration Release \
-            -destination 'generic/platform=macOS' \
-            -derivedDataPath build/dd \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            | xcbeautify || true
-          APP=$(find build/dd -name "SFM.app" -type d 2>/dev/null | head -1)
-          [ -n "$APP" ] || { echo "::error::SFM.app not produced"; exit 1; }
-          echo "SFM.app at: $APP"
+          APP_PATH="DerivedData/Build/Products/Release-iphoneos/sing-box.app"
+          [ -d "$APP_PATH" ] || { echo "::error::sing-box.app not produced"; exit 1; }
 
-      - name: Collect .app Artifacts
+          # ldid 簽 entitlements（ad-hoc，TrollStore/越獄安裝用，非 Apple codesign）
+          ldid -SSFI/SFI.entitlements "$APP_PATH/sing-box"
+          ldid -SExtension/Extension.entitlements "$APP_PATH/PlugIns/Extension.appex/Extension" 2>/dev/null || true
+          ldid -SIntentsExtension/IntentsExtension.entitlements "$APP_PATH/Extensions/IntentsExtension.appex/IntentsExtension" 2>/dev/null || true
+
+          # 打包 .tipa（TrollStore 可直接安裝）
+          mkdir -p packages/Payload
+          cp -rp "$APP_PATH" packages/Payload
+          cd packages
+          zip -qr sing-box.tipa Payload
+
+      - name: Collect Apple Artifacts
         run: |
           mkdir -p apple-out
           VER="${{ matrix.target.ver }}"
           TID="${{ matrix.target.id }}"
-          cd sing-box-for-apple
-          for app in $(find build/dd -maxdepth 5 -name "SFI.app" -type d 2>/dev/null); do
-            tar czf "../apple-out/SFI-${TID}-${VER}.app.tar.gz" -C "$(dirname "$app")" SFI.app
-            break
-          done
-          for app in $(find build/dd -maxdepth 5 -name "SFM.app" -type d 2>/dev/null); do
-            tar czf "../apple-out/SFM-${TID}-${VER}.app.tar.gz" -C "$(dirname "$app")" SFM.app
-            break
-          done
-          cd ..
-          echo "=== apple-out ==="
+          TIPA="sing-box/clients/apple/packages/sing-box.tipa"
+          if [ -f "$TIPA" ]; then
+            mv "$TIPA" "apple-out/SFI-${TID}-${VER}.tipa"
+            echo "Produced SFI-${TID}-${VER}.tipa"
+          else
+            echo "::error::SFI .tipa not produced"
+            exit 1
+          fi
           ls -la apple-out/
-          [ -z "$(ls apple-out/*.tar.gz 2>/dev/null)" ] && { echo "::error::No .app.tar.gz produced"; exit 1; }
 
       - name: Upload Apple Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: apple-${{ matrix.target.id }}
-          path: apple-out/*.tar.gz
+          path: apple-out/*.tipa
           retention-days: 1
           compression-level: 0
 
@@ -1405,11 +1381,11 @@ jobs:
             # Apple 產物（build_apple 非阻塞，產物可能缺席）
             apple_dir="./tmp/apple-${target_id}"
             if [[ -d "$apple_dir" ]]; then
-              for app_tgz in "$apple_dir"/*.tar.gz; do
-                [ -f "$app_tgz" ] || continue
-                APP_NAME=$(basename "$app_tgz")
-                cp "$app_tgz" "release_files/${target_id}/apple/${APP_NAME}"
-                APPLE_FILES["$APP_NAME"]="$APP_NAME"
+              for tipa in "$apple_dir"/*.tipa; do
+                [ -f "$tipa" ] || continue
+                TIPA_NAME=$(basename "$tipa")
+                cp "$tipa" "release_files/${target_id}/apple/${TIPA_NAME}"
+                APPLE_FILES["$TIPA_NAME"]="$TIPA_NAME"
               done
             fi
 
@@ -1519,15 +1495,15 @@ jobs:
             if [ ${#APPLE_FILES[@]} -gt 0 ]; then
               echo "" >> release_body.txt
               echo "<details>" >> release_body.txt
-              echo "<summary><b>🍎 Apple 產物（未簽名）</b></summary>" >> release_body.txt
+              echo "<summary><b>🍎 Apple 產物（未簽名 .tipa）</b></summary>" >> release_body.txt
               echo "" >> release_body.txt
-              echo "> ⚠️ 未簽名 .app，需 TrollStore/sideload 工具安裝，不可直接安裝。" >> release_body.txt
+              echo "> ⚠️ ldid ad-hoc 簽名的 .tipa，需 TrollStore/sideload 安裝，不可直接安裝。" >> release_body.txt
               echo "" >> release_body.txt
               echo "| 類型 | 文件名 |" >> release_body.txt
               echo "|------|--------|" >> release_body.txt
               for key in "${!APPLE_FILES[@]}"; do
                 file_name="${APPLE_FILES[$key]}"
-                echo "| Apple .app | \`${file_name}\` |" >> release_body.txt
+                echo "| iOS .tipa | \`${file_name}\` |" >> release_body.txt
               done
               echo "</details>" >> release_body.txt
             fi
@@ -1541,7 +1517,7 @@ jobs:
 
             (
               cd "release_files/${target_id}"
-              find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" -o -name "*.upx" -o -name "*.app.tar.gz" \) -exec sha256sum {} \; | sed 's/ \.\// /' > SHA256SUMS.txt
+              find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" -o -name "*.upx" -o -name "*.tipa" \) -exec sha256sum {} \; | sed 's/ \.\// /' > SHA256SUMS.txt
             )
             echo "" >> release_body.txt
             echo "## 🔐 SHA256 Checksums" >> release_body.txt
@@ -1565,7 +1541,7 @@ jobs:
               release_files/${target_id}/**/*.zip
               release_files/${target_id}/**/*.apk
               release_files/${target_id}/**/*.upx
-              release_files/${target_id}/**/*.app.tar.gz
+              release_files/${target_id}/**/*.tipa
             )
             shopt -u nullglob globstar
             [ -f "release_files/${target_id}/linux/install-linux.sh" ] && FILES+=("release_files/${target_id}/linux/install-linux.sh")
@@ -1597,7 +1573,7 @@ jobs:
             release_files/**/*.zip
             release_files/**/*.apk
             release_files/**/*.upx
-            release_files/**/*.app.tar.gz
+            release_files/**/*.tipa
 
       - name: Upload Build Info Artifact
         if: always()
@@ -1782,6 +1758,9 @@ jobs:
   telegram_notify:
     needs: [build_core, build_android, build_apple, publish, finalize]
     runs-on: ubuntu-latest
+    # xz-dev/TelegramFileUploader 上傳大文件無內部超時，網絡問題時會無限 hang；
+    # 給 job 級超時，避免佔用 runner 到 6h 上限。Telegram 推送正常幾秒完成。
+    timeout-minutes: 15
     if: always() && (github.event.inputs.enable_telegram == 'true' || github.event_name == 'schedule')
     steps:
       - name: Generate Telegram Message
