@@ -1056,7 +1056,7 @@ jobs:
           compression-level: 0
 
   build_apple:
-    runs-on: macos-latest
+    runs-on: macos-26
     needs: [init, check]
     timeout-minutes: 60
     # 非阻塞：Apple 構建失敗不影響 core/android 發佈
@@ -1106,13 +1106,12 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          # Apple 構建鎖 Go 1.25.x（不用 init 的動態最新版，也不用 ^1.25——後者
-          # 在 setup-go 是 >=1.25 <2.0，會裝到 1.26.x）。
-          # Go 1.26 下 gomobile 生成的 Libbox Swift bindings 缺
-          # LibboxSetMemoryLimit/LibboxRedirectStderr 等符號，xcodebuild 報
-          # "cannot find ... in scope"。1.25.x 驗證可行（jsda/sing-box-for-ios）。
-          # reF1nd go.mod 聲明 go 1.24.7，1.25.x 向後兼容。
-          go-version: '1.25.11'
+          # Apple 構建用 init 的動態 Go 版本（jsda 用 1.26.4 成功，Go 版本非因素）。
+          # 真正的約束是 Xcode：Apple client 用了 Swift 6 `isolated deinit` 特性，
+          # 需 Xcode 26.x（macos-26 runner 自帶 Xcode 26.5）。macos-latest 的 Xcode 16.4
+          # 報 'isolated' deinit requires frontend flag + LibboxStringIteratorProtocol
+          # has no member 'value' 等編譯器類型推導問題。
+          go-version: ${{ needs.init.outputs.go_version }}
           cache: false
           cache-dependency-path: 'sing-box/go.sum'
 
