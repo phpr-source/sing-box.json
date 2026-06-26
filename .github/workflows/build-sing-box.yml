@@ -1106,12 +1106,13 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          # Apple 構建鎖 Go 1.25.x（不用 init 的動態最新版）。
-          # Go 1.26 下 gomobile 生成的 Libbox Swift bindings 會缺
+          # Apple 構建鎖 Go 1.25.x（不用 init 的動態最新版，也不用 ^1.25——後者
+          # 在 setup-go 是 >=1.25 <2.0，會裝到 1.26.x）。
+          # Go 1.26 下 gomobile 生成的 Libbox Swift bindings 缺
           # LibboxSetMemoryLimit/LibboxRedirectStderr 等符號，xcodebuild 報
-          # "cannot find ... in scope"。jsda/sing-box-for-ios 用 ^1.25 驗證可行。
+          # "cannot find ... in scope"。1.25.x 驗證可行（jsda/sing-box-for-ios）。
           # reF1nd go.mod 聲明 go 1.24.7，1.25.x 向後兼容。
-          go-version: ^1.25
+          go-version: '1.25.11'
           cache: false
           cache-dependency-path: 'sing-box/go.sum'
 
