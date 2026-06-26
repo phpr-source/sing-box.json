@@ -76,7 +76,7 @@ permissions:
 
 env:
   GO_VERSION_PIN: ""
-  TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard,with_tailscale"
+  TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard,with_tailscale,with_cloudflared,with_usbip"
   TAGS_CLI_EXTRA: "with_acme,with_ccm,with_ocm"
   TAGS_SFA_EXTRA: "ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird"
   TAGS_ANDROID_EXTRA: "with_conntrack"
@@ -395,6 +395,23 @@ jobs:
           ref: ${{ steps.resolve.outputs.ref }}
           path: sing-box
           fetch-depth: 1
+
+      - name: Apply Patches
+        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
+        working-directory: sing-box
+        run: |
+          set -e
+          applied=0
+          for dir in "../patches/common" "../patches/${{ matrix.target.id }}"; do
+            [ -d "$dir" ] || continue
+            for p in "$dir"/*.patch; do
+              [ -f "$p" ] || continue
+              echo "::notice::Applying patch $(basename "$p")"
+              git apply -v "$p"
+              applied=$((applied+1))
+            done
+          done
+          echo "Applied $applied patch(es)."
 
       - name: Clean Workspace
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
@@ -804,6 +821,23 @@ jobs:
           path: sing-box
           fetch-depth: 0
           filter: blob:none
+
+      - name: Apply Patches
+        if: matrix.target.sfa_repo != 'none'
+        working-directory: sing-box
+        run: |
+          set -e
+          applied=0
+          for dir in "../patches/common" "../patches/${{ matrix.target.id }}"; do
+            [ -d "$dir" ] || continue
+            for p in "$dir"/*.patch; do
+              [ -f "$p" ] || continue
+              echo "::notice::Applying patch $(basename "$p")"
+              git apply -v "$p"
+              applied=$((applied+1))
+            done
+          done
+          echo "Applied $applied patch(es)."
 
       - name: Checkout Android Client
         if: matrix.target.sfa_repo != 'none'
