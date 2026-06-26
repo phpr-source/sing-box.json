@@ -2,10 +2,9 @@
 
 > 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的 Stable 和 Testing 分支。
 
-## 📦 最新版本狀態 (2026-06-26 11:03 UTC+8)
+## 📦 最新版本狀態 (2026-06-26 14:12 UTC+8)
 
-- ✨ 更新 **[reF1nd_Stable](https://github.com/reF1nd/sing-box/tree/reF1nd-stable)** 至 `vd7f9dfab`，發佈於 2026-06-25 [reF1nd_Stable vd7f9dfab]
-- ✨ 更新 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** 至 `v1.14.0-alpha.35-reF1nd.1`，發佈於 2026-06-25 [reF1nd_Testing v1.14.0-alpha.35-reF1nd.1]
+- 🔄 強制構建 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** `vunknown` (2026-06-26) [reF1nd_Testing vunknown]
 
 ---
 
@@ -39,4 +38,4 @@ bash <(curl -sSL https://github.com/phpr-source/sing-box.json/releases/download/
 
 [🔗 前往 Releases 下載](https://github.com/phpr-source/sing-box.json/releases)
 
-![Build Status](https://img.shields.io/github/actions/workflow/status/phpr-source/sing-box.json/build-sing-box.yml?branch=main)
+![Build Status](https://img.shields.io/github/actions/workflow/status/phpr-source/sing-box.json/build-sing-box.yml?branch=feat-build-apple)
