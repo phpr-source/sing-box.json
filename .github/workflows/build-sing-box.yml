@@ -1059,8 +1059,6 @@ jobs:
     runs-on: macos-26
     needs: [init, check]
     timeout-minutes: 60
-    # 非阻塞：Apple 構建失敗不影響 core/android 發佈
-    continue-on-error: true
     if: >-
       needs.check.outputs.has_update == 'true' &&
       needs.check.outputs.matrix != '[]' &&
@@ -1144,13 +1142,15 @@ jobs:
       - name: Install ldid
         run: brew install ldid
 
-      - name: Build Libbox.xcframework (iOS)
+      - name: Build Libbox.xcframework (Apple)
         working-directory: sing-box
         run: |
           make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
-          # -platform ios 精確產出 iOS xcframework（優於 make lib_apple 的全平台）
-          go run ./cmd/internal/build_libbox -target apple -platform ios
+          # No -platform flag → builds universal xcframework for
+          # ios,iossimulator,tvos,tvossimulator,macos so both SFI (iOS)
+          # and SFM (macOS) can link against the same framework.
+          go run ./cmd/internal/build_libbox -target apple
           mv Libbox.xcframework clients/apple
 
       - name: Build SFI (iOS, unsigned + ldid)
@@ -1187,18 +1187,54 @@ jobs:
           cd packages
           zip -qr sing-box.tipa Payload
 
+      - name: Build SFM (macOS, unsigned + ldid)
+        working-directory: sing-box/clients/apple
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project sing-box.xcodeproj \
+            -scheme SFM \
+            -destination 'generic/platform=macOS' \
+            -configuration Release \
+            -sdk macosx \
+            -derivedDataPath DerivedData \
+            build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO
+
+          APP_PATH="DerivedData/Build/Products/Release/sing-box.app"
+          [ -d "$APP_PATH" ] || { echo "::error::sing-box.app (macOS) not produced"; exit 1; }
+
+          # ldid sign main binary with macOS entitlements
+          ldid -SSFM/SFM.entitlements "$APP_PATH/Contents/MacOS/sing-box"
+          # Sign any .appex plugins if present (macOS NE via System Extensions)
+          for ex in "$APP_PATH/Contents/Plugins/"*.appex; do
+            [ -f "$ex" ] && ldid -S "$ex" 2>/dev/null || true
+          done
+
+          # Package as .zip (macOS .app bundle, not TrollStore .tipa)
+          mkdir -p packages
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" packages/sing-box.zip
+
       - name: Collect Apple Artifacts
         run: |
           mkdir -p apple-out
           VER="${{ matrix.target.ver }}"
           TID="${{ matrix.target.id }}"
-          TIPA="sing-box/clients/apple/packages/sing-box.tipa"
-          if [ -f "$TIPA" ]; then
-            mv "$TIPA" "apple-out/SFI-${TID}-${VER}.tipa"
+          SFI_TIPA="sing-box/clients/apple/packages/sing-box.tipa"
+          SFM_ZIP="sing-box/clients/apple/packages/sing-box.zip"
+          if [ -f "$SFI_TIPA" ]; then
+            mv "$SFI_TIPA" "apple-out/SFI-${TID}-${VER}.tipa"
             echo "Produced SFI-${TID}-${VER}.tipa"
           else
             echo "::error::SFI .tipa not produced"
             exit 1
+          fi
+          if [ -f "$SFM_ZIP" ]; then
+            mv "$SFM_ZIP" "apple-out/SFM-${TID}-${VER}.zip"
+            echo "Produced SFM-${TID}-${VER}.zip"
           fi
           ls -la apple-out/
 
@@ -1206,7 +1242,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: apple-${{ matrix.target.id }}
-          path: apple-out/*.tipa
+          path: apple-out/*
           retention-days: 1
           compression-level: 0
 
@@ -1412,14 +1448,14 @@ jobs:
               cp "$apk_dir"/*-metadata.json "release_files/${target_id}/android/" 2>/dev/null || true
             fi
 
-            # Apple 產物（build_apple 非阻塞，產物可能缺席）
+            # Apple 產物（.tipa for iOS TrollStore, .zip for macOS .app）
             apple_dir="./tmp/apple-${target_id}"
             if [[ -d "$apple_dir" ]]; then
-              for tipa in "$apple_dir"/*.tipa; do
-                [ -f "$tipa" ] || continue
-                TIPA_NAME=$(basename "$tipa")
-                cp "$tipa" "release_files/${target_id}/apple/${TIPA_NAME}"
-                APPLE_FILES["$TIPA_NAME"]="$TIPA_NAME"
+              for f in "$apple_dir"/SFI-*.tipa "$apple_dir"/SFM-*.zip; do
+                [ -f "$f" ] || continue
+                FNAME=$(basename "$f")
+                cp "$f" "release_files/${target_id}/apple/${FNAME}"
+                APPLE_FILES["$FNAME"]="$FNAME"
               done
             fi
 
@@ -1529,15 +1565,19 @@ jobs:
             if [ ${#APPLE_FILES[@]} -gt 0 ]; then
               echo "" >> release_body.txt
               echo "<details>" >> release_body.txt
-              echo "<summary><b>🍎 Apple 產物（未簽名 .tipa）</b></summary>" >> release_body.txt
+              echo "<summary><b>🍎 Apple 產物（未簽名）</b></summary>" >> release_body.txt
               echo "" >> release_body.txt
-              echo "> ⚠️ ldid ad-hoc 簽名的 .tipa，需 TrollStore/sideload 安裝，不可直接安裝。" >> release_body.txt
+              echo "> ⚠️ ldid ad-hoc 簽名，非 Apple 公證。iOS .tipa 需 TrollStore/sideload。" >> release_body.txt
               echo "" >> release_body.txt
               echo "| 類型 | 文件名 |" >> release_body.txt
               echo "|------|--------|" >> release_body.txt
               for key in "${!APPLE_FILES[@]}"; do
                 file_name="${APPLE_FILES[$key]}"
-                echo "| iOS .tipa | \`${file_name}\` |" >> release_body.txt
+                if [[ "$file_name" == *.tipa ]]; then
+                  echo "| iOS .tipa | \`${file_name}\` |" >> release_body.txt
+                else
+                  echo "| macOS .zip | \`${file_name}\` |" >> release_body.txt
+                fi
               done
               echo "</details>" >> release_body.txt
             fi
