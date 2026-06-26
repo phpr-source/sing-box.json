@@ -1055,14 +1055,159 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  build_apple:
+    runs-on: macos-latest
+    needs: [init, check]
+    timeout-minutes: 60
+    # 非阻塞：Apple 構建失敗不影響 core/android 發佈（簽名/環境複雜，符合 A2 未簽名取捨）
+    continue-on-error: true
+    if: >-
+      needs.check.outputs.has_update == 'true' &&
+      needs.check.outputs.matrix != '[]' &&
+      needs.check.outputs.matrix != '' &&
+      github.event.inputs.enable_naive != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.check.outputs.matrix) }}
+    steps:
+      - name: Checkout Core
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.target.repo }}
+          ref: ${{ matrix.target.core_ref }}
+          path: sing-box
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Apply Patches
+        working-directory: sing-box
+        run: |
+          set -e
+          applied=0
+          for dir in "../patches/common" "../patches/${{ matrix.target.id }}"; do
+            [ -d "$dir" ] || continue
+            for p in "$dir"/*.patch; do
+              [ -f "$p" ] || continue
+              echo "::notice::Applying patch $(basename "$p")"
+              git apply -v "$p"
+              applied=$((applied+1))
+            done
+          done
+          echo "Applied $applied patch(es)."
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ needs.init.outputs.go_version }}
+          cache: true
+          cache-dependency-path: 'sing-box/go.sum'
+
+      - name: Build Libbox.xcframework
+        working-directory: sing-box
+        run: |
+          make lib_install
+          make lib_apple
+
+      - name: Resolve Apple Client Branch
+        id: apple_ref
+        run: |
+          # reF1nd 未 fork Apple client → 用上游 SagerNet/sing-box-for-apple
+          # stable target 映射 stable 分支，testing target 映射 main 分支
+          if [[ "${{ matrix.target.id }}" == *"Stable"* ]]; then
+            echo "ref=stable" >> $GITHUB_OUTPUT
+          else
+            echo "ref=main" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout Apple Client
+        uses: actions/checkout@v4
+        with:
+          repository: SagerNet/sing-box-for-apple
+          ref: ${{ steps.apple_ref.outputs.ref }}
+          path: sing-box-for-apple
+          submodules: true
+
+      - name: Place Libbox.xcframework
+        run: |
+          # make lib_apple 產物路徑自適應定位（可能在 sing-box/ 根或 dist/）
+          XCFW=$(find sing-box -maxdepth 3 -name "Libbox.xcframework" -type d 2>/dev/null | head -1)
+          if [ -z "$XCFW" ]; then
+            echo "::error::Libbox.xcframework not found after make lib_apple"
+            exit 1
+          fi
+          echo "Found xcframework at: $XCFW"
+          DEST="sing-box-for-apple/Frameworks/Libbox.xcframework"
+          mkdir -p "$DEST"
+          rm -rf "$DEST"
+          cp -R "$XCFW" "$DEST"
+
+      - name: Build SFI (iOS, unsigned)
+        working-directory: sing-box-for-apple
+        run: |
+          set -o pipefail
+          # -derivedDataPath 固定輸出路徑，CODE_SIGNING_ALLOWED=NO 走未簽名
+          xcodebuild build \
+            -scheme SFI -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            | xcbeautify || true
+          # 用產物存在性校驗（xcbeautify exit code 不可靠）
+          APP=$(find build/dd -name "SFI.app" -type d 2>/dev/null | head -1)
+          [ -n "$APP" ] || { echo "::error::SFI.app not produced"; exit 1; }
+          echo "SFI.app at: $APP"
+
+      - name: Build SFM (macOS, unsigned)
+        working-directory: sing-box-for-apple
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -scheme SFM -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            | xcbeautify || true
+          APP=$(find build/dd -name "SFM.app" -type d 2>/dev/null | head -1)
+          [ -n "$APP" ] || { echo "::error::SFM.app not produced"; exit 1; }
+          echo "SFM.app at: $APP"
+
+      - name: Collect .app Artifacts
+        run: |
+          mkdir -p apple-out
+          VER="${{ matrix.target.ver }}"
+          TID="${{ matrix.target.id }}"
+          cd sing-box-for-apple
+          for app in $(find build/dd -maxdepth 5 -name "SFI.app" -type d 2>/dev/null); do
+            tar czf "../apple-out/SFI-${TID}-${VER}.app.tar.gz" -C "$(dirname "$app")" SFI.app
+            break
+          done
+          for app in $(find build/dd -maxdepth 5 -name "SFM.app" -type d 2>/dev/null); do
+            tar czf "../apple-out/SFM-${TID}-${VER}.app.tar.gz" -C "$(dirname "$app")" SFM.app
+            break
+          done
+          cd ..
+          echo "=== apple-out ==="
+          ls -la apple-out/
+          [ -z "$(ls apple-out/*.tar.gz 2>/dev/null)" ] && { echo "::error::No .app.tar.gz produced"; exit 1; }
+
+      - name: Upload Apple Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-${{ matrix.target.id }}
+          path: apple-out/*.tar.gz
+          retention-days: 1
+          compression-level: 0
+
   publish:
     runs-on: ubuntu-latest
-    needs: [init, check, build_core, build_android]
+    needs: [init, check, build_core, build_android, build_apple]
     if: >-
       always() &&
       needs.check.outputs.has_update == 'true' &&
       !cancelled() &&
       (needs.build_core.result == 'success' || needs.build_android.result == 'success')
+      # build_apple 有 continue-on-error，其失敗不阻塞 publish；不要求 apple 成功
     outputs:
       release_version: ${{ steps.prepare.outputs.release_version }}
     steps:
@@ -1168,10 +1313,10 @@ jobs:
             upstream_body=$(echo "$target" | jq -r '.body // ""')
             commit_msg=$(echo "$target" | jq -r '.msg // ""')
 
-            unset BUILDTAGS_MAP LINUX_FILES WINDOWS_FILES DARWIN_FILES ANDROID_FILES 2>/dev/null || true
-            declare -A BUILDTAGS_MAP=() LINUX_FILES=() WINDOWS_FILES=() DARWIN_FILES=() ANDROID_FILES=()
+            unset BUILDTAGS_MAP LINUX_FILES WINDOWS_FILES DARWIN_FILES ANDROID_FILES APPLE_FILES 2>/dev/null || true
+            declare -A BUILDTAGS_MAP=() LINUX_FILES=() WINDOWS_FILES=() DARWIN_FILES=() ANDROID_FILES=() APPLE_FILES=()
 
-            mkdir -p ./release_files/${target_id}/{linux,windows,darwin,android}
+            mkdir -p ./release_files/${target_id}/{linux,windows,darwin,android,apple}
 
             if [ "$PUBLISH_TYPE" = "versioned" ]; then
               if [[ "$target_id" == *"Testing"* ]]; then
@@ -1254,6 +1399,17 @@ jobs:
                 ANDROID_FILES["$APK_NAME"]="$APK_NAME"
               done
               cp "$apk_dir"/*-metadata.json "release_files/${target_id}/android/" 2>/dev/null || true
+            fi
+
+            # Apple 產物（build_apple 非阻塞，產物可能缺席）
+            apple_dir="./tmp/apple-${target_id}"
+            if [[ -d "$apple_dir" ]]; then
+              for app_tgz in "$apple_dir"/*.tar.gz; do
+                [ -f "$app_tgz" ] || continue
+                APP_NAME=$(basename "$app_tgz")
+                cp "$app_tgz" "release_files/${target_id}/apple/${APP_NAME}"
+                APPLE_FILES["$APP_NAME"]="$APP_NAME"
+              done
             fi
 
             cp /tmp/install-linux.sh release_files/${target_id}/linux/install-linux.sh
@@ -1359,6 +1515,22 @@ jobs:
               echo "</details>" >> release_body.txt
             fi
 
+            if [ ${#APPLE_FILES[@]} -gt 0 ]; then
+              echo "" >> release_body.txt
+              echo "<details>" >> release_body.txt
+              echo "<summary><b>🍎 Apple 產物（未簽名）</b></summary>" >> release_body.txt
+              echo "" >> release_body.txt
+              echo "> ⚠️ 未簽名 .app，需 TrollStore/sideload 工具安裝，不可直接安裝。" >> release_body.txt
+              echo "" >> release_body.txt
+              echo "| 類型 | 文件名 |" >> release_body.txt
+              echo "|------|--------|" >> release_body.txt
+              for key in "${!APPLE_FILES[@]}"; do
+                file_name="${APPLE_FILES[$key]}"
+                echo "| Apple .app | \`${file_name}\` |" >> release_body.txt
+              done
+              echo "</details>" >> release_body.txt
+            fi
+
             echo "" >> release_body.txt
             echo "---" >> release_body.txt
             echo "### 📜 History (歷史更新)" >> release_body.txt
@@ -1368,7 +1540,7 @@ jobs:
 
             (
               cd "release_files/${target_id}"
-              find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" -o -name "*.upx" \) -exec sha256sum {} \; | sed 's/ \.\// /' > SHA256SUMS.txt
+              find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" -o -name "*.upx" -o -name "*.app.tar.gz" \) -exec sha256sum {} \; | sed 's/ \.\// /' > SHA256SUMS.txt
             )
             echo "" >> release_body.txt
             echo "## 🔐 SHA256 Checksums" >> release_body.txt
@@ -1392,6 +1564,7 @@ jobs:
               release_files/${target_id}/**/*.zip
               release_files/${target_id}/**/*.apk
               release_files/${target_id}/**/*.upx
+              release_files/${target_id}/**/*.app.tar.gz
             )
             shopt -u nullglob globstar
             [ -f "release_files/${target_id}/linux/install-linux.sh" ] && FILES+=("release_files/${target_id}/linux/install-linux.sh")
@@ -1423,6 +1596,7 @@ jobs:
             release_files/**/*.zip
             release_files/**/*.apk
             release_files/**/*.upx
+            release_files/**/*.app.tar.gz
 
       - name: Upload Build Info Artifact
         if: always()
@@ -1442,7 +1616,7 @@ jobs:
           compression-level: 0
 
   finalize:
-    needs: [check, build_core, build_android, publish]
+    needs: [check, build_core, build_android, build_apple, publish]
     runs-on: ubuntu-latest
     if: always() && !cancelled()
     steps:
@@ -1517,7 +1691,8 @@ jobs:
           echo "| 任務 | 執行狀態 |" >> "$GITHUB_STEP_SUMMARY"
           echo "|------|------|" >> "$GITHUB_STEP_SUMMARY"
           echo "| 核心編譯 | ${{ needs.build_core.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| 客戶端編譯 | ${{ needs.build_android.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Android 客戶端 | ${{ needs.build_android.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Apple 客戶端 | ${{ needs.build_apple.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| 發佈打包 | ${{ needs.publish.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
@@ -1604,7 +1779,7 @@ jobs:
             });
 
   telegram_notify:
-    needs: [build_core, build_android, publish, finalize]
+    needs: [build_core, build_android, build_apple, publish, finalize]
     runs-on: ubuntu-latest
     if: always() && (github.event.inputs.enable_telegram == 'true' || github.event_name == 'schedule')
     steps:
@@ -1614,26 +1789,34 @@ jobs:
           TG_STATUS="success"
           declare -a STATUS_LINES
 
-          for job in build_core build_android publish; do
+          for job in build_core build_android build_apple publish; do
             RESULT=""
             if [ "$job" = "build_core" ]; then RESULT="${{ needs.build_core.result }}"
             elif [ "$job" = "build_android" ]; then RESULT="${{ needs.build_android.result }}"
+            elif [ "$job" = "build_apple" ]; then RESULT="${{ needs.build_apple.result }}"
             elif [ "$job" = "publish" ]; then RESULT="${{ needs.publish.result }}"
             fi
 
             case "$RESULT" in
               success) STATUS_LINES+=("✅ ${job}: success") ;;
-              failure) TG_STATUS="failed"; STATUS_LINES+=("❌ ${job}: failure") ;;
+              failure)
+                # build_apple 非阻塞，失敗只標記不影響整體 TG_STATUS
+                if [ "$job" = "build_apple" ]; then
+                  STATUS_LINES+=("⚠️ ${job}: failure (non-blocking)")
+                else
+                  TG_STATUS="failed"; STATUS_LINES+=("❌ ${job}: failure")
+                fi ;;
               skipped) STATUS_LINES+=("⏭️ ${job}: skipped") ;;
               *) STATUS_LINES+=("❓ ${job}: ${RESULT}") ;;
             esac
           done
 
           ALL_SKIPPED=true
-          for job in build_core build_android publish; do
+          for job in build_core build_android build_apple publish; do
             RESULT=""
             if [ "$job" = "build_core" ]; then RESULT="${{ needs.build_core.result }}"
             elif [ "$job" = "build_android" ]; then RESULT="${{ needs.build_android.result }}"
+            elif [ "$job" = "build_apple" ]; then RESULT="${{ needs.build_apple.result }}"
             elif [ "$job" = "publish" ]; then RESULT="${{ needs.publish.result }}"
             fi
             if [ "$RESULT" != "skipped" ]; then ALL_SKIPPED=false; break; fi
@@ -1873,7 +2056,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
   create_issue_on_failure:
-    needs: [build_core, build_android, publish, finalize, telegram_notify]
+    needs: [build_core, build_android, build_apple, publish, finalize, telegram_notify]
     if: failure() && (github.event_name == 'schedule' || github.event_name == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 5
