@@ -1106,8 +1106,13 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ needs.init.outputs.go_version }}
-          cache: true
+          # Apple 構建鎖 Go 1.25.x（不用 init 的動態最新版）。
+          # Go 1.26 下 gomobile 生成的 Libbox Swift bindings 會缺
+          # LibboxSetMemoryLimit/LibboxRedirectStderr 等符號，xcodebuild 報
+          # "cannot find ... in scope"。jsda/sing-box-for-ios 用 ^1.25 驗證可行。
+          # reF1nd go.mod 聲明 go 1.24.7，1.25.x 向後兼容。
+          go-version: ^1.25
+          cache: false
           cache-dependency-path: 'sing-box/go.sum'
 
       - name: Install ldid
