@@ -205,11 +205,11 @@ jobs:
               core_ref="v${OVERRIDE_VERSION}"
               time="$(TZ=Asia/Shanghai date '+%Y-%m-%d')"
             elif [ "$SKIP_CHECK" = "true" ]; then
-              ver="unknown"
+              ver="$(echo "${{ github.sha }}" | cut -c1-8)"
               core_ref="$branch"
               time="$(TZ=Asia/Shanghai date '+%Y-%m-%d')"
             else
-              local tag_data=$(api_call_with_retry "https://api.github.com/repos/$repo/tags")
+              local tag_data=$(api_call_with_retry "https://api.github.com/repos/$repo/tags?per_page=100")
               if [[ "$branch" == *"testing"* ]]; then
                 ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | type == "string" and contains("reF1nd") and test("alpha|beta|rc"))][0].name // empty' 2>/dev/null | sed 's/^v//' || true)
               else
