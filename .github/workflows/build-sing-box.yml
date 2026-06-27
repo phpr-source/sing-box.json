@@ -1341,7 +1341,6 @@ jobs:
           fi
           if [ -z "$MATRIX_LINES" ]; then
             echo "::warning::No targets in matrix, skipping publish"
-            echo "tag_map={}" >> $GITHUB_OUTPUT
             echo "release_version=none" >> $GITHUB_OUTPUT
             exit 0
           fi
