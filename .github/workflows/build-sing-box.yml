@@ -1249,16 +1249,18 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-  publish:
+  publish_core:
     runs-on: ubuntu-latest
-    needs: [init, check, build_core, build_android, build_apple]
-    # Apple build now blocks the workflow; publish runs via always() guards
+    needs: [init, check, build_core]
+    # Runs even if some core matrix entries fail (always()), but skips on cancel or
+    # no update. Core artifacts drive the release body; android/apple jobs
+    # upload their own artifacts to the same release tag independently.
     if: >-
       always() &&
       needs.check.outputs.has_update == 'true' &&
-      !cancelled() &&
-      (needs.build_core.result == 'success' || needs.build_android.result == 'success')
+      !cancelled()
     outputs:
+      tag_map: ${{ steps.prepare.outputs.tag_map }}
       release_version: ${{ steps.prepare.outputs.release_version }}
     steps:
       - name: Checkout Repository
@@ -1288,7 +1290,7 @@ jobs:
           rm -rf ./release_files
           mkdir -p ./release_files
 
-          cat > /tmp/install-linux.sh << 'EOF'
+          cat > /tmp/install-linux.sh << 'INSTALLEOF'
           #!/bin/bash
           set -euo pipefail
 
@@ -1307,55 +1309,39 @@ jobs:
             mips)          FILE_ARCH="mips" ;;
             mipsel)        FILE_ARCH="mipsle" ;;
             riscv64)       FILE_ARCH="riscv64" ;;
-            *) echo "❌ Unsupported arch: $ARCH"; exit 1 ;;
+            *) echo "Unsupported arch: $ARCH"; exit 1 ;;
           esac
 
-          if pgrep -x "sing-box" > /dev/null 2>&1; then
-            echo "❌ sing-box is currently running. Stop it before updating."
-            exit 1
-          fi
-
-          SUDO_CMD=""
-          [ "$(id -u)" -ne 0 ] && SUDO_CMD="sudo"
-
-          WORK_DIR=$(mktemp -d)
-          trap 'rm -rf "$WORK_DIR"' EXIT
-
-          echo "🔍 Fetching latest release for $FILE_ARCH (tag: $TAG)..."
+          if pgrep -x "sing-box" > /dev/null 2>&1; then echo "sing-box is running. Stop it first."; exit 1; fi
+          SUDO_CMD=""; [ "$(id -u)" -ne 0 ] && SUDO_CMD="sudo"
+          WORK_DIR=$(mktemp -d); trap 'rm -rf "$WORK_DIR"' EXIT
+          echo "Fetching latest release for $FILE_ARCH (tag: $TAG)..."
           ASSET_URL=$(curl -sSL -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
-            | grep -oE '"browser_download_url":\s*"[^"]+"' \
-            | cut -d '"' -f 4 \
+            | grep -oE '"browser_download_url":\s*"[^"]+"' | cut -d '"' -f 4 \
             | grep "linux" | grep -E "${FILE_ARCH}[-.]" | grep "\.tar\.gz" | head -n 1)
-
-          [ -z "$ASSET_URL" ] && { echo "❌ No release found for $FILE_ARCH"; exit 1; }
-
-          echo "⬇️  Downloading $(basename "$ASSET_URL")..."
+          [ -z "$ASSET_URL" ] && { echo "No release found for $FILE_ARCH"; exit 1; }
           curl -fSL -o "$WORK_DIR/archive.tar.gz" "$ASSET_URL"
-
-          echo "📦 Extracting..."
           tar -xzf "$WORK_DIR/archive.tar.gz" -C "$WORK_DIR"
-
           chmod +x "$WORK_DIR/sing-box"
-
           INSTALLED_VER=$("$WORK_DIR/sing-box" version 2>/dev/null | head -n1 || echo "unknown")
-          echo "📋 Binary reports: $INSTALLED_VER"
-
+          echo "Binary reports: $INSTALLED_VER"
           $SUDO_CMD mv "$WORK_DIR/sing-box" /usr/local/bin/sing-box
-          echo "✅ Installation complete. $(sing-box version 2>/dev/null | head -n1 || true)"
-          EOF
+          echo "Installation complete."
+          INSTALLEOF
           chmod +x /tmp/install-linux.sh
 
           if ! MATRIX_LINES=$(echo "$MATRIX" | jq -c '.[]'); then
-            echo "::error::Failed to parse matrix JSON"
-            exit 1
+            echo "::error::Failed to parse matrix JSON"; exit 1
           fi
-
           if [ -z "$MATRIX_LINES" ]; then
             echo "::warning::No targets in matrix, skipping publish"
+            echo "tag_map={}" >> $GITHUB_OUTPUT
             echo "release_version=none" >> $GITHUB_OUTPUT
             exit 0
           fi
+
+          tag_map="{}"
 
           while read -r target; do
             target_id=$(echo "$target" | jq -r '.id')
@@ -1363,36 +1349,31 @@ jobs:
             upstream_body=$(echo "$target" | jq -r '.body // ""')
             commit_msg=$(echo "$target" | jq -r '.msg // ""')
 
-            unset BUILDTAGS_MAP LINUX_FILES WINDOWS_FILES DARWIN_FILES ANDROID_FILES APPLE_FILES 2>/dev/null || true
-            declare -A BUILDTAGS_MAP=() LINUX_FILES=() WINDOWS_FILES=() DARWIN_FILES=() ANDROID_FILES=() APPLE_FILES=()
+            unset BUILDTAGS_MAP LINUX_FILES WINDOWS_FILES DARWIN_FILES 2>/dev/null || true
+            declare -A BUILDTAGS_MAP=() LINUX_FILES=() WINDOWS_FILES=() DARWIN_FILES=()
 
-            mkdir -p ./release_files/${target_id}/{linux,windows,darwin,android,apple}
+            mkdir -p ./release_files/${target_id}/{linux,windows,darwin}
 
             if [ "$PUBLISH_TYPE" = "versioned" ]; then
               if [[ "$target_id" == *"Testing"* ]]; then
-                tag_name="v${ver}-testing"
-                prerelease="true"
-                make_latest="false"
+                tag_name="v${ver}-testing"; prerelease="true"; make_latest="false"
               else
-                tag_name="v${ver}"
-                prerelease="false"
-                make_latest="true"
+                tag_name="v${ver}"; prerelease="false"; make_latest="true"
               fi
               release_title="${target_id} v${ver}"
             else
               if [[ "$target_id" == *"Testing"* ]]; then
-                tag_name="sing-box-testing"
-                prerelease="true"
-                make_latest="false"
+                tag_name="sing-box-testing"; prerelease="true"; make_latest="false"
                 release_title="sing-box Testing Build"
               else
-                tag_name="sing-box-stable"
-                prerelease="false"
-                make_latest="true"
+                tag_name="sing-box-stable"; prerelease="false"; make_latest="true"
                 release_title="sing-box Stable Build"
               fi
             fi
 
+            tag_map=$(echo "$tag_map" | jq --arg tid "$target_id" --arg t "$tag_name" '.[$tid]=$t')
+
+            # Collect core (linux/windows/darwin) artifacts
             for pkg_dir in ./tmp/pkg-${target_id}-*; do
               if [[ -d "$pkg_dir" ]]; then
                 platform=$(basename "$pkg_dir" | sed "s/pkg-${target_id}-//")
@@ -1440,30 +1421,9 @@ jobs:
               fi
             done
 
-            apk_dir="./tmp/apk-${target_id}"
-            if [[ -d "$apk_dir" ]]; then
-              for apk in "$apk_dir"/*.apk; do
-                [ -f "$apk" ] || continue
-                APK_NAME=$(basename "$apk")
-                cp "$apk" "release_files/${target_id}/android/${APK_NAME}"
-                ANDROID_FILES["$APK_NAME"]="$APK_NAME"
-              done
-              cp "$apk_dir"/*-metadata.json "release_files/${target_id}/android/" 2>/dev/null || true
-            fi
-
-            # Apple 產物（.tipa for iOS TrollStore, .zip for macOS .app）
-            apple_dir="./tmp/apple-${target_id}"
-            if [[ -d "$apple_dir" ]]; then
-              for f in "$apple_dir"/SFI-*.tipa "$apple_dir"/SFM-*.zip; do
-                [ -f "$f" ] || continue
-                FNAME=$(basename "$f")
-                cp "$f" "release_files/${target_id}/apple/${FNAME}"
-                APPLE_FILES["$FNAME"]="$FNAME"
-              done
-            fi
-
             cp /tmp/install-linux.sh release_files/${target_id}/linux/install-linux.sh
 
+            # Generate release body (core sections only; android/apple upload separately)
             {
               echo "# 🚀 ${release_title}"
               echo ""
@@ -1496,8 +1456,7 @@ jobs:
 
             if [ ${#LINUX_FILES[@]} -gt 0 ]; then
               echo "" >> release_body.txt
-              echo "<details>" >> release_body.txt
-              echo "<summary><b>🐧 Linux 產物</b></summary>" >> release_body.txt
+              echo "<details><summary><b>🐧 Linux 產物</b></summary>" >> release_body.txt
               echo "" >> release_body.txt
               echo "| 架構 | 文件名 | 說明 |" >> release_body.txt
               echo "|------|--------|------|" >> release_body.txt
@@ -1517,8 +1476,7 @@ jobs:
 
             if [ ${#WINDOWS_FILES[@]} -gt 0 ]; then
               echo "" >> release_body.txt
-              echo "<details>" >> release_body.txt
-              echo "<summary><b>🪟 Windows 產物</b></summary>" >> release_body.txt
+              echo "<details><summary><b>🪟 Windows 產物</b></summary>" >> release_body.txt
               echo "" >> release_body.txt
               echo "| 架構 | 文件名 | 說明 |" >> release_body.txt
               echo "|------|--------|------|" >> release_body.txt
@@ -1538,8 +1496,7 @@ jobs:
 
             if [ ${#DARWIN_FILES[@]} -gt 0 ]; then
               echo "" >> release_body.txt
-              echo "<details>" >> release_body.txt
-              echo "<summary><b>🍎 Darwin 產物</b></summary>" >> release_body.txt
+              echo "<details><summary><b>🍎 Darwin 產物</b></summary>" >> release_body.txt
               echo "" >> release_body.txt
               echo "| 架構 | 文件名 | 說明 |" >> release_body.txt
               echo "|------|--------|------|" >> release_body.txt
@@ -1547,40 +1504,6 @@ jobs:
                 file_name="${DARWIN_FILES[$plat]}"
                 plat_display="${plat#darwin-}"
                 echo "| ${plat_display} | \`${file_name}\` | 打包壓縮檔 |" >> release_body.txt
-              done
-              echo "</details>" >> release_body.txt
-            fi
-
-            if [ ${#ANDROID_FILES[@]} -gt 0 ]; then
-              echo "" >> release_body.txt
-              echo "<details>" >> release_body.txt
-              echo "<summary><b>🤖 Android 產物</b></summary>" >> release_body.txt
-              echo "" >> release_body.txt
-              echo "| 類型 | 文件名 |" >> release_body.txt
-              echo "|------|--------|" >> release_body.txt
-              for key in "${!ANDROID_FILES[@]}"; do
-                file_name="${ANDROID_FILES[$key]}"
-                echo "| SFA APK | \`${file_name}\` |" >> release_body.txt
-              done
-              echo "</details>" >> release_body.txt
-            fi
-
-            if [ ${#APPLE_FILES[@]} -gt 0 ]; then
-              echo "" >> release_body.txt
-              echo "<details>" >> release_body.txt
-              echo "<summary><b>🍎 Apple 產物（未簽名）</b></summary>" >> release_body.txt
-              echo "" >> release_body.txt
-              echo "> ⚠️ ldid ad-hoc 簽名，非 Apple 公證。iOS .tipa 需 TrollStore/sideload。" >> release_body.txt
-              echo "" >> release_body.txt
-              echo "| 類型 | 文件名 |" >> release_body.txt
-              echo "|------|--------|" >> release_body.txt
-              for key in "${!APPLE_FILES[@]}"; do
-                file_name="${APPLE_FILES[$key]}"
-                if [[ "$file_name" == *.tipa ]]; then
-                  echo "| iOS .tipa | \`${file_name}\` |" >> release_body.txt
-                else
-                  echo "| macOS .zip | \`${file_name}\` |" >> release_body.txt
-                fi
               done
               echo "</details>" >> release_body.txt
             fi
@@ -1594,7 +1517,7 @@ jobs:
 
             (
               cd "release_files/${target_id}"
-              find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" -o -name "*.upx" -o -name "*.tipa" \) -exec sha256sum {} \; | sed 's/ \.\// /' > SHA256SUMS.txt
+              find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.upx" \) -exec sha256sum {} \; | sed 's/ \.\// /' > SHA256SUMS.txt
             )
             echo "" >> release_body.txt
             echo "## 🔐 SHA256 Checksums" >> release_body.txt
@@ -1616,9 +1539,7 @@ jobs:
             FILES=(
               release_files/${target_id}/**/*.tar.gz
               release_files/${target_id}/**/*.zip
-              release_files/${target_id}/**/*.apk
               release_files/${target_id}/**/*.upx
-              release_files/${target_id}/**/*.tipa
             )
             shopt -u nullglob globstar
             [ -f "release_files/${target_id}/linux/install-linux.sh" ] && FILES+=("release_files/${target_id}/linux/install-linux.sh")
@@ -1639,6 +1560,7 @@ jobs:
             tar -czf /tmp/tg-payload-${target_id}.tar.gz -C "release_files/${target_id}" .
           done <<< "$MATRIX_LINES"
 
+          echo "tag_map=$tag_map" >> $GITHUB_OUTPUT
           echo "$MATRIX" | jq '[.[] | {target_id: .id, version_name: .ver}]' > release_files/build-info.json
           echo "release_version=${FIRST_VER}" >> $GITHUB_OUTPUT
 
@@ -1648,9 +1570,7 @@ jobs:
           subject-path: |
             release_files/**/*.tar.gz
             release_files/**/*.zip
-            release_files/**/*.apk
             release_files/**/*.upx
-            release_files/**/*.tipa
 
       - name: Upload Build Info Artifact
         if: always()
@@ -1669,8 +1589,62 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  publish_android:
+    runs-on: ubuntu-latest
+    needs: [build_android, publish_core]
+    if: always() && needs.check.outputs.has_update == 'true' && !cancelled()
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ./tmp/
+
+      - name: Upload APKs to releases
+        run: |
+          set -euo pipefail
+          TAG_MAP='${{ needs.publish_core.outputs.tag_map }}'
+          for apk_dir in ./tmp/apk-*; do
+            [ -d "$apk_dir" ] || continue
+            target_id=$(basename "$apk_dir" | sed 's/apk-//')
+            tag=$(echo "$TAG_MAP" | jq -r --arg tid "$target_id" '.[$tid] // empty')
+            [ -n "$tag" ] || { echo "::warning::No tag for $target_id, skipping"; continue; }
+            echo "Uploading APKs from $target_id to $tag..."
+            for f in "$apk_dir"/*.apk "$apk_dir"/*-metadata.json; do
+              [ -f "$f" ] || continue
+              gh release upload "$tag" "$f" --clobber 2>&1 || echo "::warning::Upload failed for $(basename "$f")"
+            done
+          done
+
+  publish_apple:
+    runs-on: ubuntu-latest
+    needs: [build_apple, publish_core]
+    if: always() && needs.check.outputs.has_update == 'true' && !cancelled()
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ./tmp/
+
+      - name: Upload Apple artifacts to releases
+        run: |
+          set -euo pipefail
+          TAG_MAP='${{ needs.publish_core.outputs.tag_map }}'
+          for apple_dir in ./tmp/apple-*; do
+            [ -d "$apple_dir" ] || continue
+            target_id=$(basename "$apple_dir" | sed 's/apple-//')
+            tag=$(echo "$TAG_MAP" | jq -r --arg tid "$target_id" '.[$tid] // empty')
+            [ -n "$tag" ] || { echo "::warning::No tag for $target_id, skipping"; continue; }
+            echo "Uploading Apple artifacts from $target_id to $tag..."
+            for f in "$apple_dir"/*; do
+              [ -f "$f" ] || continue
+              gh release upload "$tag" "$f" --clobber 2>&1 || echo "::warning::Upload failed for $(basename "$f")"
+            done
+          done
+
   finalize:
-    needs: [check, build_core, build_android, build_apple, publish]
+    needs: [check, build_core, build_android, build_apple, publish_core, publish_android, publish_apple]
     runs-on: ubuntu-latest
     if: always() && !cancelled()
     steps:
@@ -1747,7 +1721,9 @@ jobs:
           echo "| 核心編譯 | ${{ needs.build_core.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Android 客戶端 | ${{ needs.build_android.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Apple 客戶端 | ${{ needs.build_apple.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| 發佈打包 | ${{ needs.publish.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 核心發佈 | ${{ needs.publish_core.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Android 發佈 | ${{ needs.publish_android.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Apple 發佈 | ${{ needs.publish_apple.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           echo "#### 📦 產物詳情" >> "$GITHUB_STEP_SUMMARY"
@@ -1833,7 +1809,7 @@ jobs:
             });
 
   telegram_notify:
-    needs: [build_core, build_android, build_apple, publish, finalize]
+    needs: [build_core, build_android, build_apple, publish_core, publish_android, publish_apple, finalize]
     runs-on: ubuntu-latest
     # xz-dev/TelegramFileUploader 上傳大文件無內部超時，網絡問題時會無限 hang；
     # 給 job 級超時，避免佔用 runner 到 6h 上限。Telegram 推送正常幾秒完成。
@@ -1846,35 +1822,38 @@ jobs:
           TG_STATUS="success"
           declare -a STATUS_LINES
 
-          for job in build_core build_android build_apple publish; do
+          for job in build_core build_android build_apple publish_core publish_android publish_apple; do
             RESULT=""
             if [ "$job" = "build_core" ]; then RESULT="${{ needs.build_core.result }}"
             elif [ "$job" = "build_android" ]; then RESULT="${{ needs.build_android.result }}"
             elif [ "$job" = "build_apple" ]; then RESULT="${{ needs.build_apple.result }}"
-            elif [ "$job" = "publish" ]; then RESULT="${{ needs.publish.result }}"
+            elif [ "$job" = "publish_core" ]; then RESULT="${{ needs.publish_core.result }}"
+            elif [ "$job" = "publish_android" ]; then RESULT="${{ needs.publish_android.result }}"
+            elif [ "$job" = "publish_apple" ]; then RESULT="${{ needs.publish_apple.result }}"
             fi
 
             case "$RESULT" in
-              success) STATUS_LINES+=("✅ ${job}: success") ;;
+              success) STATUS_LINES+=("${job}: success") ;;
               failure)
-                # build_apple 非阻塞，失敗只標記不影響整體 TG_STATUS
-                if [ "$job" = "build_apple" ]; then
-                  STATUS_LINES+=("⚠️ ${job}: failure (non-blocking)")
+                if [ "$job" = "build_apple" ] || [ "$job" = "publish_apple" ]; then
+                  STATUS_LINES+=("${job}: failure (non-blocking)")
                 else
-                  TG_STATUS="failed"; STATUS_LINES+=("❌ ${job}: failure")
+                  TG_STATUS="failed"; STATUS_LINES+=("${job}: failure")
                 fi ;;
-              skipped) STATUS_LINES+=("⏭️ ${job}: skipped") ;;
-              *) STATUS_LINES+=("❓ ${job}: ${RESULT}") ;;
+              skipped) STATUS_LINES+=("${job}: skipped") ;;
+              *) STATUS_LINES+=("${job}: ${RESULT}") ;;
             esac
           done
 
           ALL_SKIPPED=true
-          for job in build_core build_android build_apple publish; do
+          for job in build_core build_android build_apple publish_core publish_android publish_apple; do
             RESULT=""
             if [ "$job" = "build_core" ]; then RESULT="${{ needs.build_core.result }}"
             elif [ "$job" = "build_android" ]; then RESULT="${{ needs.build_android.result }}"
             elif [ "$job" = "build_apple" ]; then RESULT="${{ needs.build_apple.result }}"
-            elif [ "$job" = "publish" ]; then RESULT="${{ needs.publish.result }}"
+            elif [ "$job" = "publish_core" ]; then RESULT="${{ needs.publish_core.result }}"
+            elif [ "$job" = "publish_android" ]; then RESULT="${{ needs.publish_android.result }}"
+            elif [ "$job" = "publish_apple" ]; then RESULT="${{ needs.publish_apple.result }}"
             fi
             if [ "$RESULT" != "skipped" ]; then ALL_SKIPPED=false; break; fi
           done
@@ -1960,7 +1939,7 @@ jobs:
           if [ -n "$FIRST_FILE" ]; then
             TG_VERSION=$(basename "$FIRST_FILE" | sed -E 's/.*-([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?)\.(apk|tar\.gz|zip|upx)/\1/')
           fi
-          echo "TG_VERSION=${TG_VERSION:-${{ needs.publish.outputs.release_version || 'unknown' }}}" >> $GITHUB_ENV
+          echo "TG_VERSION=${TG_VERSION:-${{ needs.publish_core.outputs.release_version || 'unknown' }}}" >> $GITHUB_ENV
 
       - name: Prepare SFA TG Files
         if: steps.status.outputs.status == 'success'
@@ -2113,7 +2092,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
   create_issue_on_failure:
-    needs: [build_core, build_android, build_apple, publish, finalize, telegram_notify]
+    needs: [build_core, build_android, build_apple, publish_core, publish_android, publish_apple, finalize, telegram_notify]
     if: failure() && (github.event_name == 'schedule' || github.event_name == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 5
