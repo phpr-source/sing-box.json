@@ -1140,6 +1140,8 @@ jobs:
           cache-dependency-path: 'sing-box/go.sum'
 
       - name: Install ldid
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
         run: brew install ldid
 
       - name: Build Libbox.xcframework (Apple)
@@ -1636,7 +1638,7 @@ jobs:
             echo "Uploading APKs from $target_id to $tag..."
             for f in "$apk_dir"/*.apk "$apk_dir"/*-metadata.json; do
               [ -f "$f" ] || continue
-              gh release upload "$tag" "$f" --clobber 2>&1 || echo "::warning::Upload failed for $(basename "$f")"
+              gh release upload "$tag" "$f" --clobber --repo ${{ github.repository }} 2>&1 || echo "::warning::Upload failed for $(basename "$f")"
             done
           done
 
@@ -1663,7 +1665,7 @@ jobs:
             echo "Uploading Apple artifacts from $target_id to $tag..."
             for f in "$apple_dir"/*; do
               [ -f "$f" ] || continue
-              gh release upload "$tag" "$f" --clobber 2>&1 || echo "::warning::Upload failed for $(basename "$f")"
+              gh release upload "$tag" "$f" --clobber --repo ${{ github.repository }} 2>&1 || echo "::warning::Upload failed for $(basename "$f")"
             done
           done
 
