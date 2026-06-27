@@ -1055,9 +1055,204 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  build_apple:
+    runs-on: macos-26
+    needs: [init, check]
+    timeout-minutes: 60
+    if: >-
+      needs.check.outputs.has_update == 'true' &&
+      needs.check.outputs.matrix != '[]' &&
+      needs.check.outputs.matrix != '' &&
+      github.event.inputs.enable_naive != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.check.outputs.matrix) }}
+    steps:
+      - name: Checkout Core
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.target.repo }}
+          ref: ${{ matrix.target.core_ref }}
+          path: sing-box
+          fetch-depth: 1
+          # Shallow full fetch (no filter:blob:none) so libbox export symbols aren't
+          # dropped. submodules: recursive pulls clients/apple (pinned by reF1nd to a
+          # SagerNet/sing-box-for-apple commit) plus its nested Frameworks/Runestone
+          # submodule so the SwiftPM Package.swift resolves. For cores on the *new*
+          # libbox API the next step replaces this pinned client with latest upstream.
+          submodules: recursive
+
+      - name: Sync Apple client to core's libbox API version
+        working-directory: sing-box
+        run: |
+          set -euo pipefail
+          # reF1nd pins clients/apple at SagerNet/sing-box-for-apple 794eb1741f, which
+          # matches reF1nd-stable's *old* libbox API (SagerNet stable v1.13.14 ships the
+          # same pin). But reF1nd-testing's libbox evolved: PlatformInterface gained
+          # openShellSession/usePlatformShell/startNeighborMonitor/lookupUser/etc and
+          # CommandClientHandler gained writeOutbounds, and it dropped LibboxSetMemoryLimit/
+          # LibboxRedirectStderr. The pinned 794eb1741f client doesn't implement those →
+          # "does not conform to protocol" + "cannot find ... in scope".
+          #
+          # Conversely, the latest upstream dev client now references symbols the *old*
+          # stable libbox doesn't export (LibboxGoVersion, LibboxPromoteOOMDraft,
+          # LibboxCommandOutbounds, LibboxRemoteConnectionOptions, crashReportSource,
+          # oomKillerEnabled, ...), so blindly replacing breaks stable.
+          #
+          # Resolution: detect the core's libbox API era from its Go source and only
+          # replace the client when the core is on the new API. WriteOutbounds in
+          # command_client.go is the clean signal — it exists only on the new API.
+          if grep -q 'WriteOutbounds' experimental/libbox/command_client.go; then
+            echo "::notice::Core is on the new libbox API (WriteOutbounds present). Replacing pinned Apple client with latest upstream dev branch."
+            rm -rf clients/apple
+            git clone --recurse-submodules --depth 1 https://github.com/SagerNet/sing-box-for-apple.git clients/apple
+          else
+            echo "::notice::Core is on the old libbox API (no WriteOutbounds). Keeping reF1nd-pinned Apple client (matches this libbox era)."
+          fi
+
+      - name: Apply Patches
+        working-directory: sing-box
+        run: |
+          set -euo pipefail
+          applied=0
+          for dir in "../patches/common" "../patches/${{ matrix.target.id }}"; do
+            [ -d "$dir" ] || continue
+            for p in "$dir"/*.patch; do
+              [ -f "$p" ] || continue
+              echo "::notice::Applying patch $(basename "$p")"
+              git apply -v "$p"
+              applied=$((applied+1))
+            done
+          done
+          echo "Applied $applied patch(es)."
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          # Apple 構建用 init 的動態 Go 版本（jsda 用 1.26.4 成功，Go 版本非因素）。
+          # 真正的約束是 Xcode：Apple client 用了 Swift 6 `isolated deinit` 特性，
+          # 需 Xcode 26.x（macos-26 runner 自帶 Xcode 26.5）。macos-latest 的 Xcode 16.4
+          # 報 'isolated' deinit requires frontend flag + LibboxStringIteratorProtocol
+          # has no member 'value' 等編譯器類型推導問題。
+          go-version: ${{ needs.init.outputs.go_version }}
+          cache: false
+          cache-dependency-path: 'sing-box/go.sum'
+
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Build Libbox.xcframework (Apple)
+        working-directory: sing-box
+        run: |
+          make lib_install
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          # No -platform flag → builds universal xcframework for
+          # ios,iossimulator,tvos,tvossimulator,macos so both SFI (iOS)
+          # and SFM (macOS) can link against the same framework.
+          go run ./cmd/internal/build_libbox -target apple
+          mv Libbox.xcframework clients/apple
+
+      - name: Build SFI (iOS, unsigned + ldid)
+        working-directory: sing-box/clients/apple
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project sing-box.xcodeproj \
+            -scheme SFI \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath DerivedData \
+            build \
+            STRIP_INSTALLED_PRODUCT=NO \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO
+
+          APP_PATH="DerivedData/Build/Products/Release-iphoneos/sing-box.app"
+          [ -d "$APP_PATH" ] || { echo "::error::sing-box.app not produced"; exit 1; }
+
+          # ldid 簽 entitlements（ad-hoc，TrollStore/越獄安裝用，非 Apple codesign）
+          ldid -SSFI/SFI.entitlements "$APP_PATH/sing-box"
+          ldid -SExtension/Extension.entitlements "$APP_PATH/PlugIns/Extension.appex/Extension" 2>/dev/null || true
+          ldid -SIntentsExtension/IntentsExtension.entitlements "$APP_PATH/Extensions/IntentsExtension.appex/IntentsExtension" 2>/dev/null || true
+
+          # 打包 .tipa（TrollStore 可直接安裝）
+          mkdir -p packages/Payload
+          cp -rp "$APP_PATH" packages/Payload
+          cd packages
+          zip -qr sing-box.tipa Payload
+
+      - name: Build SFM (macOS, unsigned + ldid)
+        working-directory: sing-box/clients/apple
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project sing-box.xcodeproj \
+            -scheme SFM \
+            -destination 'generic/platform=macOS' \
+            -configuration Release \
+            -sdk macosx \
+            -derivedDataPath DerivedData \
+            build \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO
+
+          APP_PATH="DerivedData/Build/Products/Release/sing-box.app"
+          [ -d "$APP_PATH" ] || { echo "::error::sing-box.app (macOS) not produced"; exit 1; }
+
+          # ldid sign main binary with macOS entitlements
+          ldid -SSFM/SFM.entitlements "$APP_PATH/Contents/MacOS/sing-box"
+          # Sign any .appex plugins if present (macOS NE via System Extensions)
+          shopt -s nullglob
+          for ex in "$APP_PATH/Contents/Plugins/"*.appex; do
+            ldid -S "$ex" 2>/dev/null || true
+          done
+          shopt -u nullglob
+
+          # Package as .zip (macOS .app bundle, not TrollStore .tipa)
+          mkdir -p packages
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" packages/sing-box.zip
+
+      - name: Collect Apple Artifacts
+        run: |
+          mkdir -p apple-out
+          VER="${{ matrix.target.ver }}"
+          TID="${{ matrix.target.id }}"
+          SFI_TIPA="sing-box/clients/apple/packages/sing-box.tipa"
+          SFM_ZIP="sing-box/clients/apple/packages/sing-box.zip"
+          if [ -f "$SFI_TIPA" ]; then
+            mv "$SFI_TIPA" "apple-out/SFI-${TID}-${VER}.tipa"
+            echo "Produced SFI-${TID}-${VER}.tipa"
+          else
+            echo "::error::SFI .tipa not produced"
+            exit 1
+          fi
+          if [ -f "$SFM_ZIP" ]; then
+            mv "$SFM_ZIP" "apple-out/SFM-${TID}-${VER}.zip"
+            echo "Produced SFM-${TID}-${VER}.zip"
+          fi
+          ls -la apple-out/
+
+      - name: Upload Apple Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-${{ matrix.target.id }}
+          path: apple-out/*
+          retention-days: 1
+          compression-level: 0
+
   publish:
     runs-on: ubuntu-latest
-    needs: [init, check, build_core, build_android]
+    needs: [init, check, build_core, build_android, build_apple]
+    # Apple build now blocks the workflow; publish runs via always() guards
     if: >-
       always() &&
       needs.check.outputs.has_update == 'true' &&
@@ -1168,10 +1363,10 @@ jobs:
             upstream_body=$(echo "$target" | jq -r '.body // ""')
             commit_msg=$(echo "$target" | jq -r '.msg // ""')
 
-            unset BUILDTAGS_MAP LINUX_FILES WINDOWS_FILES DARWIN_FILES ANDROID_FILES 2>/dev/null || true
-            declare -A BUILDTAGS_MAP=() LINUX_FILES=() WINDOWS_FILES=() DARWIN_FILES=() ANDROID_FILES=()
+            unset BUILDTAGS_MAP LINUX_FILES WINDOWS_FILES DARWIN_FILES ANDROID_FILES APPLE_FILES 2>/dev/null || true
+            declare -A BUILDTAGS_MAP=() LINUX_FILES=() WINDOWS_FILES=() DARWIN_FILES=() ANDROID_FILES=() APPLE_FILES=()
 
-            mkdir -p ./release_files/${target_id}/{linux,windows,darwin,android}
+            mkdir -p ./release_files/${target_id}/{linux,windows,darwin,android,apple}
 
             if [ "$PUBLISH_TYPE" = "versioned" ]; then
               if [[ "$target_id" == *"Testing"* ]]; then
@@ -1254,6 +1449,17 @@ jobs:
                 ANDROID_FILES["$APK_NAME"]="$APK_NAME"
               done
               cp "$apk_dir"/*-metadata.json "release_files/${target_id}/android/" 2>/dev/null || true
+            fi
+
+            # Apple 產物（.tipa for iOS TrollStore, .zip for macOS .app）
+            apple_dir="./tmp/apple-${target_id}"
+            if [[ -d "$apple_dir" ]]; then
+              for f in "$apple_dir"/SFI-*.tipa "$apple_dir"/SFM-*.zip; do
+                [ -f "$f" ] || continue
+                FNAME=$(basename "$f")
+                cp "$f" "release_files/${target_id}/apple/${FNAME}"
+                APPLE_FILES["$FNAME"]="$FNAME"
+              done
             fi
 
             cp /tmp/install-linux.sh release_files/${target_id}/linux/install-linux.sh
@@ -1359,6 +1565,26 @@ jobs:
               echo "</details>" >> release_body.txt
             fi
 
+            if [ ${#APPLE_FILES[@]} -gt 0 ]; then
+              echo "" >> release_body.txt
+              echo "<details>" >> release_body.txt
+              echo "<summary><b>🍎 Apple 產物（未簽名）</b></summary>" >> release_body.txt
+              echo "" >> release_body.txt
+              echo "> ⚠️ ldid ad-hoc 簽名，非 Apple 公證。iOS .tipa 需 TrollStore/sideload。" >> release_body.txt
+              echo "" >> release_body.txt
+              echo "| 類型 | 文件名 |" >> release_body.txt
+              echo "|------|--------|" >> release_body.txt
+              for key in "${!APPLE_FILES[@]}"; do
+                file_name="${APPLE_FILES[$key]}"
+                if [[ "$file_name" == *.tipa ]]; then
+                  echo "| iOS .tipa | \`${file_name}\` |" >> release_body.txt
+                else
+                  echo "| macOS .zip | \`${file_name}\` |" >> release_body.txt
+                fi
+              done
+              echo "</details>" >> release_body.txt
+            fi
+
             echo "" >> release_body.txt
             echo "---" >> release_body.txt
             echo "### 📜 History (歷史更新)" >> release_body.txt
@@ -1368,7 +1594,7 @@ jobs:
 
             (
               cd "release_files/${target_id}"
-              find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" -o -name "*.upx" \) -exec sha256sum {} \; | sed 's/ \.\// /' > SHA256SUMS.txt
+              find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.apk" -o -name "*.upx" -o -name "*.tipa" \) -exec sha256sum {} \; | sed 's/ \.\// /' > SHA256SUMS.txt
             )
             echo "" >> release_body.txt
             echo "## 🔐 SHA256 Checksums" >> release_body.txt
@@ -1392,6 +1618,7 @@ jobs:
               release_files/${target_id}/**/*.zip
               release_files/${target_id}/**/*.apk
               release_files/${target_id}/**/*.upx
+              release_files/${target_id}/**/*.tipa
             )
             shopt -u nullglob globstar
             [ -f "release_files/${target_id}/linux/install-linux.sh" ] && FILES+=("release_files/${target_id}/linux/install-linux.sh")
@@ -1423,6 +1650,7 @@ jobs:
             release_files/**/*.zip
             release_files/**/*.apk
             release_files/**/*.upx
+            release_files/**/*.tipa
 
       - name: Upload Build Info Artifact
         if: always()
@@ -1442,7 +1670,7 @@ jobs:
           compression-level: 0
 
   finalize:
-    needs: [check, build_core, build_android, publish]
+    needs: [check, build_core, build_android, build_apple, publish]
     runs-on: ubuntu-latest
     if: always() && !cancelled()
     steps:
@@ -1517,7 +1745,8 @@ jobs:
           echo "| 任務 | 執行狀態 |" >> "$GITHUB_STEP_SUMMARY"
           echo "|------|------|" >> "$GITHUB_STEP_SUMMARY"
           echo "| 核心編譯 | ${{ needs.build_core.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| 客戶端編譯 | ${{ needs.build_android.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Android 客戶端 | ${{ needs.build_android.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Apple 客戶端 | ${{ needs.build_apple.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| 發佈打包 | ${{ needs.publish.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
@@ -1604,8 +1833,11 @@ jobs:
             });
 
   telegram_notify:
-    needs: [build_core, build_android, publish, finalize]
+    needs: [build_core, build_android, build_apple, publish, finalize]
     runs-on: ubuntu-latest
+    # xz-dev/TelegramFileUploader 上傳大文件無內部超時，網絡問題時會無限 hang；
+    # 給 job 級超時，避免佔用 runner 到 6h 上限。Telegram 推送正常幾秒完成。
+    timeout-minutes: 15
     if: always() && (github.event.inputs.enable_telegram == 'true' || github.event_name == 'schedule')
     steps:
       - name: Generate Telegram Message
@@ -1614,26 +1846,34 @@ jobs:
           TG_STATUS="success"
           declare -a STATUS_LINES
 
-          for job in build_core build_android publish; do
+          for job in build_core build_android build_apple publish; do
             RESULT=""
             if [ "$job" = "build_core" ]; then RESULT="${{ needs.build_core.result }}"
             elif [ "$job" = "build_android" ]; then RESULT="${{ needs.build_android.result }}"
+            elif [ "$job" = "build_apple" ]; then RESULT="${{ needs.build_apple.result }}"
             elif [ "$job" = "publish" ]; then RESULT="${{ needs.publish.result }}"
             fi
 
             case "$RESULT" in
               success) STATUS_LINES+=("✅ ${job}: success") ;;
-              failure) TG_STATUS="failed"; STATUS_LINES+=("❌ ${job}: failure") ;;
+              failure)
+                # build_apple 非阻塞，失敗只標記不影響整體 TG_STATUS
+                if [ "$job" = "build_apple" ]; then
+                  STATUS_LINES+=("⚠️ ${job}: failure (non-blocking)")
+                else
+                  TG_STATUS="failed"; STATUS_LINES+=("❌ ${job}: failure")
+                fi ;;
               skipped) STATUS_LINES+=("⏭️ ${job}: skipped") ;;
               *) STATUS_LINES+=("❓ ${job}: ${RESULT}") ;;
             esac
           done
 
           ALL_SKIPPED=true
-          for job in build_core build_android publish; do
+          for job in build_core build_android build_apple publish; do
             RESULT=""
             if [ "$job" = "build_core" ]; then RESULT="${{ needs.build_core.result }}"
             elif [ "$job" = "build_android" ]; then RESULT="${{ needs.build_android.result }}"
+            elif [ "$job" = "build_apple" ]; then RESULT="${{ needs.build_apple.result }}"
             elif [ "$job" = "publish" ]; then RESULT="${{ needs.publish.result }}"
             fi
             if [ "$RESULT" != "skipped" ]; then ALL_SKIPPED=false; break; fi
@@ -1873,7 +2113,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
   create_issue_on_failure:
-    needs: [build_core, build_android, publish, finalize, telegram_notify]
+    needs: [build_core, build_android, build_apple, publish, finalize, telegram_notify]
     if: failure() && (github.event_name == 'schedule' || github.event_name == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 5
