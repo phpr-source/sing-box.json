@@ -213,7 +213,7 @@ jobs:
               if [[ "$branch" == *"testing"* ]]; then
                 ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | type == "string" and contains("reF1nd") and test("alpha|beta|rc"))][0].name // empty' 2>/dev/null | sed 's/^v//' || true)
               else
-                ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | type == "string" and contains("reF1nd") and (test("alpha|beta|rc") | not))][0].name // empty' 2>/dev/null | sed 's/^v//' || true)
+                ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | type == "string" and (contains("reF1nd") | not))][0].name // empty' 2>/dev/null | sed 's/^v//' || true)
               fi
 
               if [ -z "$ver" ] || [ "$ver" = "null" ]; then
