@@ -1114,7 +1114,7 @@ jobs:
       - name: Apply Patches
         working-directory: sing-box
         run: |
-          set -e
+          set -euo pipefail
           applied=0
           for dir in "../patches/common" "../patches/${{ matrix.target.id }}"; do
             [ -d "$dir" ] || continue
@@ -1211,9 +1211,11 @@ jobs:
           # ldid sign main binary with macOS entitlements
           ldid -SSFM/SFM.entitlements "$APP_PATH/Contents/MacOS/sing-box"
           # Sign any .appex plugins if present (macOS NE via System Extensions)
+          shopt -s nullglob
           for ex in "$APP_PATH/Contents/Plugins/"*.appex; do
-            [ -f "$ex" ] && ldid -S "$ex" 2>/dev/null || true
+            ldid -S "$ex" 2>/dev/null || true
           done
+          shopt -u nullglob
 
           # Package as .zip (macOS .app bundle, not TrollStore .tipa)
           mkdir -p packages
