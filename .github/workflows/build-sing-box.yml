@@ -1617,7 +1617,7 @@ jobs:
 
   publish_android:
     runs-on: ubuntu-latest
-    needs: [build_android, publish_core]
+    needs: [check, build_android, publish_core]
     if: always() && needs.check.outputs.has_update == 'true' && !cancelled()
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1644,7 +1644,7 @@ jobs:
 
   publish_apple:
     runs-on: ubuntu-latest
-    needs: [build_apple, publish_core]
+    needs: [check, build_apple, publish_core]
     if: always() && needs.check.outputs.has_update == 'true' && !cancelled()
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1961,11 +1961,7 @@ jobs:
       - name: Determine TG Version
         if: steps.status.outputs.status == 'success'
         run: |
-          FIRST_FILE=$(find dist -type f \( -name "*.apk" -o -name "*.tar.gz" -o -name "*.zip" -o -name "*.upx" \) 2>/dev/null | head -1)
-          if [ -n "$FIRST_FILE" ]; then
-            TG_VERSION=$(basename "$FIRST_FILE" | sed -E 's/.*-([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?)\.(apk|tar\.gz|zip|upx)/\1/')
-          fi
-          echo "TG_VERSION=${TG_VERSION:-${{ needs.publish_core.outputs.release_version || 'unknown' }}}" >> $GITHUB_ENV
+          echo "TG_VERSION=${{ needs.publish_core.outputs.release_version || 'unknown' }}" >> $GITHUB_ENV
 
       - name: Prepare SFA TG Files
         if: steps.status.outputs.status == 'success'
