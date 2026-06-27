@@ -1250,7 +1250,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     needs: [init, check, build_core, build_android, build_apple]
-    # build_apple 有 continue-on-error，其失敗不阻塞 publish；不要求 apple 成功
+    # Apple build now blocks the workflow; publish runs via always() guards
     if: >-
       always() &&
       needs.check.outputs.has_update == 'true' &&
