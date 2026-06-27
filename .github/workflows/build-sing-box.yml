@@ -1157,6 +1157,8 @@ jobs:
         working-directory: sing-box/clients/apple
         run: |
           set -euo pipefail
+          # Clear SwiftPM cache to avoid stale repo references
+          rm -rf ~/Library/Caches/org.swift.swiftpm
           xcodebuild \
             -project sing-box.xcodeproj \
             -scheme SFI \
@@ -1191,6 +1193,8 @@ jobs:
         working-directory: sing-box/clients/apple
         run: |
           set -euo pipefail
+          # Clear SwiftPM cache to avoid stale repo references
+          rm -rf ~/Library/Caches/org.swift.swiftpm
           xcodebuild \
             -project sing-box.xcodeproj \
             -scheme SFM \
