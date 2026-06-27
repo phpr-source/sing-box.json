@@ -1438,14 +1438,22 @@ jobs:
               printf '%s\n' "$upstream_body" >> release_body.txt
             else
               echo "## 📝 Changelog (更新日誌)" >> release_body.txt
-              echo '```text' >> release_body.txt
-              commit_msg_safe=$(printf '%s' "$commit_msg" | tr '`' "'")
-              printf '%s\n' "$commit_msg_safe" >> release_body.txt
-              echo '```' >> release_body.txt
+              if [ -n "$commit_msg" ] && [ "$commit_msg" != "null" ]; then
+                echo '```text' >> release_body.txt
+                commit_msg_safe=$(printf '%s' "$commit_msg" | tr '`' "'")
+                printf '%s\n' "$commit_msg_safe" >> release_body.txt
+                echo '```' >> release_body.txt
+              else
+                echo "- 無更新說明" >> release_body.txt
+              fi
             fi
 
             echo "" >> release_body.txt
             echo "## 🔧 構建標籤" >> release_body.txt
+            echo "" >> release_body.txt
+            echo "<details>" >> release_body.txt
+            echo "<summary>點擊展開查看詳細的構建標籤</summary>" >> release_body.txt
+            echo "" >> release_body.txt
             if [ ${#BUILDTAGS_MAP[@]} -gt 0 ]; then
               for p in "${!BUILDTAGS_MAP[@]}"; do
                 echo "- **${p}**: \`${BUILDTAGS_MAP[$p]}\`" >> release_body.txt
@@ -1453,13 +1461,17 @@ jobs:
             else
               echo "- 無構建標籤資訊" >> release_body.txt
             fi
+            echo "" >> release_body.txt
+            echo "</details>" >> release_body.txt
+            echo "" >> release_body.txt
 
             echo "" >> release_body.txt
             echo "## 📦 Assets (產物下載)" >> release_body.txt
 
             if [ ${#LINUX_FILES[@]} -gt 0 ]; then
               echo "" >> release_body.txt
-              echo "<details><summary><b>🐧 Linux 產物</b></summary>" >> release_body.txt
+              echo "<details>" >> release_body.txt
+              echo "<summary>🐧 Linux 產物</summary>" >> release_body.txt
               echo "" >> release_body.txt
               echo "| 架構 | 文件名 | 說明 |" >> release_body.txt
               echo "|------|--------|------|" >> release_body.txt
@@ -1479,7 +1491,8 @@ jobs:
 
             if [ ${#WINDOWS_FILES[@]} -gt 0 ]; then
               echo "" >> release_body.txt
-              echo "<details><summary><b>🪟 Windows 產物</b></summary>" >> release_body.txt
+              echo "<details>" >> release_body.txt
+              echo "<summary>🪟 Windows 產物</summary>" >> release_body.txt
               echo "" >> release_body.txt
               echo "| 架構 | 文件名 | 說明 |" >> release_body.txt
               echo "|------|--------|------|" >> release_body.txt
@@ -1499,7 +1512,8 @@ jobs:
 
             if [ ${#DARWIN_FILES[@]} -gt 0 ]; then
               echo "" >> release_body.txt
-              echo "<details><summary><b>🍎 Darwin 產物</b></summary>" >> release_body.txt
+              echo "<details>" >> release_body.txt
+              echo "<summary>🍎 Darwin 產物</summary>" >> release_body.txt
               echo "" >> release_body.txt
               echo "| 架構 | 文件名 | 說明 |" >> release_body.txt
               echo "|------|--------|------|" >> release_body.txt
