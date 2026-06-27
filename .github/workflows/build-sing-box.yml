@@ -717,7 +717,7 @@ jobs:
           SUFFIX="${{ steps.env.outputs.suffix }}"
 
           mkdir -p release_files
-          STANDALONE_NAME="sing-box-${TARGET_ID}-${PLATFORM}${SUFFIX}-${VER}"
+          STANDALONE_NAME="sing-box-${VER}-${PLATFORM}${SUFFIX}"
 
           if [ "$UPX_SUPPORTED" = "true" ]; then
             cp "$BIN_NAME" "${STANDALONE_NAME}.upx.tmp"
@@ -1473,19 +1473,20 @@ jobs:
               echo "<details>" >> release_body.txt
               echo "<summary>🐧 Linux 產物</summary>" >> release_body.txt
               echo "" >> release_body.txt
-              echo "| 架構 | 文件名 | 說明 |" >> release_body.txt
-              echo "|------|--------|------|" >> release_body.txt
+              echo '<table>' >> release_body.txt
+              echo '<tr><th>架構</th><th>文件名</th><th>說明</th></tr>' >> release_body.txt
               for plat in "${!LINUX_FILES[@]}"; do
                 file_name="${LINUX_FILES[$plat]}"
                 plat_display="${plat#linux-}"
                 if [[ "$file_name" == *.upx ]]; then
-                  echo "| ${plat_display} | \`${file_name}\` | 獨立二進制 (UPX) |" >> release_body.txt
+                  echo "<tr><td>${plat_display}</td><td><code>${file_name}</code></td><td>獨立二進制 (UPX)</td></tr>" >> release_body.txt
                 elif [[ "$file_name" == *.tar.gz ]]; then
-                  echo "| ${plat_display} | \`${file_name}\` | 打包壓縮檔 |" >> release_body.txt
+                  echo "<tr><td>${plat_display}</td><td><code>${file_name}</code></td><td>打包壓縮檔</td></tr>" >> release_body.txt
                 else
-                  echo "| ${plat_display} | \`${file_name}\` | 獨立二進制 |" >> release_body.txt
+                  echo "<tr><td>${plat_display}</td><td><code>${file_name}</code></td><td>獨立二進制</td></tr>" >> release_body.txt
                 fi
               done
+              echo '</table>' >> release_body.txt
               echo "</details>" >> release_body.txt
             fi
 
@@ -1494,19 +1495,20 @@ jobs:
               echo "<details>" >> release_body.txt
               echo "<summary>🪟 Windows 產物</summary>" >> release_body.txt
               echo "" >> release_body.txt
-              echo "| 架構 | 文件名 | 說明 |" >> release_body.txt
-              echo "|------|--------|------|" >> release_body.txt
+              echo '<table>' >> release_body.txt
+              echo '<tr><th>架構</th><th>文件名</th><th>說明</th></tr>' >> release_body.txt
               for plat in "${!WINDOWS_FILES[@]}"; do
                 file_name="${WINDOWS_FILES[$plat]}"
                 plat_display="${plat#windows-}"
                 if [[ "$file_name" == *.upx ]]; then
-                  echo "| ${plat_display} | \`${file_name}\` | 獨立二進制 (UPX) |" >> release_body.txt
+                  echo "<tr><td>${plat_display}</td><td><code>${file_name}</code></td><td>獨立二進制 (UPX)</td></tr>" >> release_body.txt
                 elif [[ "$file_name" == *.zip ]]; then
-                  echo "| ${plat_display} | \`${file_name}\` | 打包壓縮檔 |" >> release_body.txt
+                  echo "<tr><td>${plat_display}</td><td><code>${file_name}</code></td><td>打包壓縮檔</td></tr>" >> release_body.txt
                 else
-                  echo "| ${plat_display} | \`${file_name}\` | 獨立二進制 |" >> release_body.txt
+                  echo "<tr><td>${plat_display}</td><td><code>${file_name}</code></td><td>獨立二進制</td></tr>" >> release_body.txt
                 fi
               done
+              echo '</table>' >> release_body.txt
               echo "</details>" >> release_body.txt
             fi
 
@@ -1515,13 +1517,14 @@ jobs:
               echo "<details>" >> release_body.txt
               echo "<summary>🍎 Darwin 產物</summary>" >> release_body.txt
               echo "" >> release_body.txt
-              echo "| 架構 | 文件名 | 說明 |" >> release_body.txt
-              echo "|------|--------|------|" >> release_body.txt
+              echo '<table>' >> release_body.txt
+              echo '<tr><th>架構</th><th>文件名</th><th>說明</th></tr>' >> release_body.txt
               for plat in "${!DARWIN_FILES[@]}"; do
                 file_name="${DARWIN_FILES[$plat]}"
                 plat_display="${plat#darwin-}"
-                echo "| ${plat_display} | \`${file_name}\` | 打包壓縮檔 |" >> release_body.txt
+                echo "<tr><td>${plat_display}</td><td><code>${file_name}</code></td><td>打包壓縮檔</td></tr>" >> release_body.txt
               done
+              echo '</table>' >> release_body.txt
               echo "</details>" >> release_body.txt
             fi
 
@@ -1538,9 +1541,11 @@ jobs:
             )
             echo "" >> release_body.txt
             echo "## 🔐 SHA256 Checksums" >> release_body.txt
-            echo "| 文件名稱 | SHA-256 |" >> release_body.txt
-            echo "|----------|---------|" >> release_body.txt
-            awk -F'  ' '{printf "| `%s` | `%s` |\n", $2, $1}' "release_files/${target_id}/SHA256SUMS.txt" >> release_body.txt
+            echo "" >> release_body.txt
+            echo '<table>' >> release_body.txt
+            echo '<tr><th>文件名稱</th><th>SHA-256</th></tr>' >> release_body.txt
+            awk -F'  ' '{printf "<tr><td><code>%s</code></td><td><code>%s</code></td></tr>\n", $2, $1}' "release_files/${target_id}/SHA256SUMS.txt" >> release_body.txt
+            echo '</table>' >> release_body.txt
 
             echo "Checking if release/tag $tag_name exists..."
             if gh release view "$tag_name" --json id -q '.id' 2>/dev/null; then
