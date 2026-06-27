@@ -1260,7 +1260,6 @@ jobs:
       needs.check.outputs.has_update == 'true' &&
       !cancelled()
     outputs:
-      tag_map: ${{ steps.prepare.outputs.tag_map }}
       release_version: ${{ steps.prepare.outputs.release_version }}
     steps:
       - name: Checkout Repository
@@ -1560,7 +1559,7 @@ jobs:
             tar -czf /tmp/tg-payload-${target_id}.tar.gz -C "release_files/${target_id}" .
           done <<< "$MATRIX_LINES"
 
-          echo "tag_map=$tag_map" >> $GITHUB_OUTPUT
+          echo "$tag_map" > release_files/tag_map.json
           echo "$MATRIX" | jq '[.[] | {target_id: .id, version_name: .ver}]' > release_files/build-info.json
           echo "release_version=${FIRST_VER}" >> $GITHUB_OUTPUT
 
@@ -1577,7 +1576,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-info
-          path: release_files/build-info.json
+          path: |
+            release_files/build-info.json
+            release_files/tag_map.json
           retention-days: 1
           compression-level: 0
 
@@ -1603,7 +1604,7 @@ jobs:
       - name: Upload APKs to releases
         run: |
           set -euo pipefail
-          TAG_MAP='${{ needs.publish_core.outputs.tag_map }}'
+          TAG_MAP=$(cat ./tmp/build-info/tag_map.json 2>/dev/null || echo '{}')
           for apk_dir in ./tmp/apk-*; do
             [ -d "$apk_dir" ] || continue
             target_id=$(basename "$apk_dir" | sed 's/apk-//')
@@ -1630,7 +1631,7 @@ jobs:
       - name: Upload Apple artifacts to releases
         run: |
           set -euo pipefail
-          TAG_MAP='${{ needs.publish_core.outputs.tag_map }}'
+          TAG_MAP=$(cat ./tmp/build-info/tag_map.json 2>/dev/null || echo '{}')
           for apple_dir in ./tmp/apple-*; do
             [ -d "$apple_dir" ] || continue
             target_id=$(basename "$apple_dir" | sed 's/apple-//')
