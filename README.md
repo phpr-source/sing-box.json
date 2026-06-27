@@ -2,7 +2,7 @@
 
 > 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的 Stable 和 Testing 分支。
 
-## 📦 最新版本狀態 (2026-06-27 09:47 UTC+8)
+## 📦 最新版本狀態 (2026-06-27 12:56 UTC+8)
 
 - 🔄 強制構建 **[reF1nd_Stable](https://github.com/reF1nd/sing-box/tree/reF1nd-stable)** `vunknown` (2026-06-27) [reF1nd_Stable vunknown]
 - 🔄 強制構建 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** `vunknown` (2026-06-27) [reF1nd_Testing vunknown]
@@ -39,4 +39,4 @@ bash <(curl -sSL https://github.com/phpr-source/sing-box.json/releases/download/
 
 [🔗 前往 Releases 下載](https://github.com/phpr-source/sing-box.json/releases)
 
-![Build Status](https://img.shields.io/github/actions/workflow/status/phpr-source/sing-box.json/build-sing-box.yml?branch=feat-build-apple)
+![Build Status](https://img.shields.io/github/actions/workflow/status/phpr-source/sing-box.json/build-sing-box.yml?branch=feat-refactor-publish)
