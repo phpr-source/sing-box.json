@@ -489,10 +489,10 @@ jobs:
           echo "suffix=${ARCHIVE_SUFFIX}" >> $GITHUB_OUTPUT
           echo "cgo_val=${CGO_VAL}" >> $GITHUB_OUTPUT
 
-          # Archive name: strip variant+goamd64 for purego (standard-compatible naming)
+          # Archive name: strip -purego suffix for standard-compatible naming
           ARCHIVE_NAME="${{ matrix.platform.name }}"
           if [ "${{ matrix.platform.variant }}" = "purego" ]; then
-            ARCHIVE_NAME=$(echo "$ARCHIVE_NAME" | sed 's/-v3-purego$//' | sed 's/-purego$//')
+            ARCHIVE_NAME=$(echo "$ARCHIVE_NAME" | sed 's/-purego$//')
           fi
           echo "archive_name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
 
@@ -755,10 +755,13 @@ jobs:
             fi
             if [ "$UPX_OK" = "true" ]; then
               mv "${STANDALONE_NAME}.upx.tmp" "${STANDALONE_NAME}.upx"
-              # Package UPX binary as tar.gz (no naked .upx in Release)
+              # Package UPX as tar.gz, binary renamed to sing-box for script compatibility
+              mkdir -p upx_tmp
+              cp "${STANDALONE_NAME}.upx" "upx_tmp/$BIN_NAME"
+              cp LICENSE "upx_tmp/" 2>/dev/null || true
               UPX_ARCHIVE="${STANDALONE_NAME}-upx.tar.gz"
-              tar --no-same-owner -czf "release_files/${UPX_ARCHIVE}" "${STANDALONE_NAME}.upx" LICENSE 2>/dev/null || \
-              tar --no-same-owner -czf "release_files/${UPX_ARCHIVE}" "${STANDALONE_NAME}.upx"
+              tar --no-same-owner -C upx_tmp -czf "release_files/${UPX_ARCHIVE}" "$BIN_NAME" LICENSE
+              rm -rf upx_tmp
               echo "standalone_bin=${STANDALONE_NAME}.upx" >> $GITHUB_ENV
             else
               rm -f "${STANDALONE_NAME}.upx.tmp"
@@ -1265,15 +1268,15 @@ jobs:
           SFI_TIPA="sing-box/clients/apple/packages/sing-box.tipa"
           SFM_ZIP="sing-box/clients/apple/packages/sing-box.zip"
           if [ -f "$SFI_TIPA" ]; then
-            mv "$SFI_TIPA" "apple-out/SFI-${TID}-${VER}.tipa"
-            echo "Produced SFI-${TID}-${VER}.tipa"
+            mv "$SFI_TIPA" "apple-out/SFI-${VER}.tipa"
+            echo "Produced SFI-${VER}.tipa"
           else
             echo "::error::SFI .tipa not produced"
             exit 1
           fi
           if [ -f "$SFM_ZIP" ]; then
-            mv "$SFM_ZIP" "apple-out/SFM-${TID}-${VER}.zip"
-            echo "Produced SFM-${TID}-${VER}.zip"
+            mv "$SFM_ZIP" "apple-out/SFM-${VER}.zip"
+            echo "Produced SFM-${VER}.zip"
           fi
           ls -la apple-out/
 
@@ -1423,23 +1426,6 @@ jobs:
                   else
                     cp "$f" "release_files/${target_id}/linux/$name"
                     LINUX_FILES["$platform"]="$name"
-                  fi
-                done
-              fi
-            done
-
-            for bin_dir in ./tmp/bin-${target_id}-*; do
-              if [[ -d "$bin_dir" ]]; then
-                platform=$(basename "$bin_dir" | sed "s/bin-${target_id}-//")
-                for f in "$bin_dir"/*; do
-                  [ -f "$f" ] || continue
-                  name=$(basename "$f")
-                  if [[ "$platform" == *"windows"* ]]; then
-                    cp "$f" "release_files/${target_id}/windows/$name"
-                  elif [[ "$platform" == *"darwin"* ]]; then
-                    cp "$f" "release_files/${target_id}/darwin/$name"
-                  else
-                    cp "$f" "release_files/${target_id}/linux/$name"
                   fi
                 done
               fi
