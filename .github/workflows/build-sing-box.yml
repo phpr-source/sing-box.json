@@ -1181,8 +1181,25 @@ jobs:
       - name: Build Libbox.xcframework (Apple)
         working-directory: sing-box
         run: |
-          make lib_install
+          if grep -q '^lib_install:' Makefile 2>/dev/null; then
+            make lib_install
+          else
+            MOBILE_COMMIT=$(grep -A1 'golang.org/x/mobile.*=>' go.mod 2>/dev/null \
+              | grep 'sagernet/mobile' \
+              | grep -oE '[0-9a-f]{12,}' \
+              | tail -1 || true)
+
+            if [ -n "$MOBILE_COMMIT" ]; then
+              echo "::notice::Installing gomobile from sagernet/mobile fork @ ${MOBILE_COMMIT}"
+              go install "github.com/sagernet/mobile/cmd/gomobile@${MOBILE_COMMIT}" \
+                && go install "github.com/sagernet/mobile/cmd/gobind@${MOBILE_COMMIT}"
+            else
+              echo "::error::No sagernet/mobile fork found. Cannot produce compatible framework."
+              exit 1
+            fi
+          fi
           export PATH="$PATH:$(go env GOPATH)/bin"
+          gomobile init
           # No -platform flag → builds universal xcframework for
           # ios,iossimulator,tvos,tvossimulator,macos so both SFI (iOS)
           # and SFM (macOS) can link against the same framework.
@@ -1250,10 +1267,13 @@ jobs:
 
           # ldid sign main binary with macOS entitlements
           ldid -SSFM/SFM.entitlements "$APP_PATH/Contents/MacOS/sing-box"
-          # Sign any .appex plugins if present (macOS NE via System Extensions)
+          # 寻找 appex 内部的执行文件进行签署（直接签目录无效，Mach-O 在 Contents/MacOS 下）
           shopt -s nullglob
           for ex in "$APP_PATH/Contents/Plugins/"*.appex; do
-            ldid -S "$ex" 2>/dev/null || true
+            binary=$(find "$ex/Contents/MacOS" -type f | head -n 1)
+            if [ -n "$binary" ]; then
+              ldid -S "$binary" 2>/dev/null || true
+            fi
           done
           shopt -u nullglob
 
@@ -1339,7 +1359,13 @@ jobs:
 
           ARCH=$(uname -m)
           case "$ARCH" in
-            x86_64|amd64)  FILE_ARCH="amd64-v3" ;;
+            x86_64|amd64)
+              if grep -q "avx2" /proc/cpuinfo 2>/dev/null; then
+                FILE_ARCH="amd64-v3"
+              else
+                FILE_ARCH="amd64"
+              fi
+              ;;
             aarch64|arm64) FILE_ARCH="arm64" ;;
             armv7l)        FILE_ARCH="armv7" ;;
             armv6l)        FILE_ARCH="armv6" ;;
@@ -1358,7 +1384,7 @@ jobs:
           ASSET_URL=$(curl -sSL -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
             | grep -oE '"browser_download_url":\s*"[^"]+"' | cut -d '"' -f 4 \
-            | grep "linux" | grep -E "${FILE_ARCH}[-.]" | grep "\.tar\.gz" | head -n 1)
+            | grep "linux" | grep -E "${FILE_ARCH}[-.]" | grep -vE "glibc|musl" | grep "\.tar\.gz" | head -n 1)
           [ -z "$ASSET_URL" ] && { echo "No release found for $FILE_ARCH"; exit 1; }
           curl -fSL -o "$WORK_DIR/archive.tar.gz" "$ASSET_URL"
           tar -xzf "$WORK_DIR/archive.tar.gz" -C "$WORK_DIR"
@@ -1735,7 +1761,8 @@ jobs:
             }
 
             if (!branchExists) {
-              const { data: ref } = await github.rest.repos.getBranch({ owner, repo, branch: context.repo.defaultBranch });
+              const defaultBranch = context.payload.repository?.default_branch || 'main';
+              const { data: ref } = await github.rest.repos.getBranch({ owner, repo, branch: defaultBranch });
               await github.rest.git.createRef({ owner, repo, ref: `refs/heads/${branch}`, sha: ref.commit.sha });
             }
 
