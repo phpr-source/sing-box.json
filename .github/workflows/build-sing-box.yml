@@ -319,31 +319,40 @@ jobs:
       matrix:
         target: ${{ fromJson(needs.check.outputs.matrix) }}
         platform:
-          - { name: linux-amd64-v3-glibc, goos: linux, goarch: amd64, goamd64: v3, variant: glibc, cgo: 1, upx: true }
-          - { name: linux-amd64-v3-musl,  goos: linux, goarch: amd64, goamd64: v3, variant: musl,  cgo: 1, upx: true }
-          - { name: linux-amd64-v3-purego,goos: linux, goarch: amd64, goamd64: v3, variant: purego,cgo: 0, upx: true, tags_extra: with_purego }
-          - { name: linux-arm64-glibc,   goos: linux, goarch: arm64, variant: glibc, cgo: 1, upx: true }
-          - { name: linux-arm64-musl,    goos: linux, goarch: arm64, variant: musl,  cgo: 1, upx: true }
-          - { name: linux-arm64-purego,  goos: linux, goarch: arm64, variant: purego,cgo: 0, upx: true, tags_extra: with_purego }
-          - { name: linux-armv7-glibc,   goos: linux, goarch: arm, goarm: 7, variant: glibc, cgo: 1, upx: true }
-          - { name: linux-armv7-musl,    goos: linux, goarch: arm, goarm: 7, variant: musl,  cgo: 1, upx: true }
-          - { name: linux-armv6-glibc,   goos: linux, goarch: arm, goarm: 6, variant: glibc, cgo: 1, upx: true }
-          - { name: linux-armv6-musl,    goos: linux, goarch: arm, goarm: 6, variant: musl,  cgo: 1, upx: true }
-          - { name: linux-mips64le-glibc,goos: linux, goarch: mips64le, variant: glibc, cgo: 1, upx: false }
-          - { name: linux-mipsle-glibc,  goos: linux, goarch: mipsle,   variant: glibc, cgo: 1, upx: false }
-          - { name: linux-mips64-glibc,  goos: linux, goarch: mips64,   variant: glibc, cgo: 1, upx: false }
-          - { name: linux-mips-glibc,    goos: linux, goarch: mips,     variant: glibc, cgo: 1, upx: false }
-          - { name: linux-riscv64-glibc, goos: linux, goarch: riscv64,  variant: glibc, cgo: 1, upx: false }
-          - { name: windows-amd64-v3, goos: windows, goarch: amd64, goamd64: v3, upx: false }
-          - { name: windows-arm64, goos: windows, goarch: arm64, upx: false }
-          - { name: darwin-amd64, goos: darwin, goarch: amd64, goamd64: v1, upx: false, cgo: "1" }
-          - { name: darwin-arm64, goos: darwin, goarch: arm64, upx: false, cgo: "1" }
+          # --- x86_64 基础兼容版 (J1900/J4125/N5105 等无 AVX2 设备) ---
+          - { name: linux-amd64-purego,  goos: linux, goarch: amd64, goamd64: v1, variant: purego, cgo: 0, upx: true, tags_extra: with_purego }
+          - { name: windows-amd64,       goos: windows, goarch: amd64, goamd64: v1, upx: false }
+          - { name: darwin-amd64,        goos: darwin,  goarch: amd64, goamd64: v1, upx: false, cgo: "1" }
+
+          # --- x86_64 高性能 v3 (N100/酷睿/Zen, 要求 AVX2) ---
+          - { name: linux-amd64-v3-purego, goos: linux, goarch: amd64, goamd64: v3, variant: purego, cgo: 0, upx: true, tags_extra: with_purego }
+          - { name: linux-amd64-v3-glibc,  goos: linux, goarch: amd64, goamd64: v3, variant: glibc,  cgo: 1, upx: true }
+          - { name: linux-amd64-v3-musl,   goos: linux, goarch: amd64, goamd64: v3, variant: musl,   cgo: 1, upx: true }
+          - { name: windows-amd64-v3,      goos: windows, goarch: amd64, goamd64: v3, upx: false }
+          - { name: darwin-amd64-v3,       goos: darwin,  goarch: amd64, goamd64: v3, upx: false, cgo: "1" }
+
+          # --- ARM64 (Mac/R2S/R4S/树莓派4/5) ---
+          - { name: linux-arm64-purego, goos: linux, goarch: arm64, variant: purego, cgo: 0, upx: true, tags_extra: with_purego }
+          - { name: linux-arm64-glibc,  goos: linux, goarch: arm64, variant: glibc,  cgo: 1, upx: true }
+          - { name: linux-arm64-musl,   goos: linux, goarch: arm64, variant: musl,   cgo: 1, upx: true }
+          - { name: windows-arm64,      goos: windows, goarch: arm64, upx: false }
+          - { name: darwin-arm64,       goos: darwin,  goarch: arm64, upx: false, cgo: "1" }
+
+          # --- ARMv7 (斐讯/网件/树莓派2/3) ---
+          - { name: linux-armv7-purego, goos: linux, goarch: arm, goarm: 7, variant: purego, cgo: 0, upx: true, tags_extra: with_purego }
+          - { name: linux-armv7-musl,   goos: linux, goarch: arm, goarm: 7, variant: musl,   cgo: 1, upx: true }
+
+          # --- 传统嵌入式 (OpenWrt, purego + softfloat 防崩溃) ---
+          - { name: linux-mipsle-purego,  goos: linux, goarch: mipsle,  gomips: softfloat, variant: purego, cgo: 0, upx: false, tags_extra: with_purego }
+          - { name: linux-mips-purego,    goos: linux, goarch: mips,    gomips: softfloat, variant: purego, cgo: 0, upx: false, tags_extra: with_purego }
+          - { name: linux-riscv64-purego, goos: linux, goarch: riscv64, variant: purego, cgo: 0, upx: false, tags_extra: with_purego }
     runs-on: ${{ matrix.platform.goos == 'darwin' && 'macos-latest' || 'ubuntu-latest' }}
     env:
       GOOS: ${{ matrix.platform.goos }}
       GOARCH: ${{ matrix.platform.goarch }}
       GOAMD64: ${{ matrix.platform.goamd64 }}
       GOARM: ${{ matrix.platform.goarm }}
+      GOMIPS: ${{ matrix.platform.gomips }}
     steps:
       - name: Platform Filter
         id: filter
@@ -470,6 +479,13 @@ jobs:
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
           echo "suffix=${ARCHIVE_SUFFIX}" >> $GITHUB_OUTPUT
           echo "cgo_val=${CGO_VAL}" >> $GITHUB_OUTPUT
+
+          # Archive name: strip variant+goamd64 for purego (standard-compatible naming)
+          ARCHIVE_NAME="${{ matrix.platform.name }}"
+          if [ "${{ matrix.platform.variant }}" = "purego" ]; then
+            ARCHIVE_NAME=$(echo "$ARCHIVE_NAME" | sed 's/-v3-purego$//' | sed 's/-purego$//')
+          fi
+          echo "archive_name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
 
       - name: Install GCC cross-compilers for glibc targets
         if: >-
@@ -717,7 +733,8 @@ jobs:
           SUFFIX="${{ steps.env.outputs.suffix }}"
 
           mkdir -p release_files
-          STANDALONE_NAME="sing-box-${VER}-${PLATFORM}${SUFFIX}"
+          ARCHIVE_NAME="${{ steps.env.outputs.archive_name }}"
+          STANDALONE_NAME="sing-box-${VER}-${ARCHIVE_NAME}"
 
           if [ "$UPX_SUPPORTED" = "true" ]; then
             cp "$BIN_NAME" "${STANDALONE_NAME}.upx.tmp"
@@ -729,6 +746,10 @@ jobs:
             fi
             if [ "$UPX_OK" = "true" ]; then
               mv "${STANDALONE_NAME}.upx.tmp" "${STANDALONE_NAME}.upx"
+              # Package UPX binary as tar.gz (no naked .upx in Release)
+              UPX_ARCHIVE="${STANDALONE_NAME}-upx.tar.gz"
+              tar --no-same-owner -czf "release_files/${UPX_ARCHIVE}" "${STANDALONE_NAME}.upx" LICENSE 2>/dev/null || \
+              tar --no-same-owner -czf "release_files/${UPX_ARCHIVE}" "${STANDALONE_NAME}.upx"
               echo "standalone_bin=${STANDALONE_NAME}.upx" >> $GITHUB_ENV
             else
               rm -f "${STANDALONE_NAME}.upx.tmp"
@@ -1017,14 +1038,14 @@ jobs:
               ABI="-universal"
             fi
             
-            new_name="SFA-${{ matrix.target.id }}${ABI}-${VER}.apk"
+            new_name="SFA-${VER}${ABI}.apk"
             mv -f "$apk" "apks/$new_name"
           done
 
           if [ -d "$UNIVERSAL_DIR" ]; then
             for apk in "$UNIVERSAL_DIR"/*.apk; do
               [ -f "$apk" ] || continue
-              new_name="SFA-${{ matrix.target.id }}-universal-${VER}.apk"
+              new_name="SFA-${VER}-universal.apk"
               mv -f "$apk" "apks/$new_name"
             done
           fi
@@ -1479,8 +1500,8 @@ jobs:
               for plat in "${!LINUX_FILES[@]}"; do
                 file_name="${LINUX_FILES[$plat]}"
                 plat_display="${plat#linux-}"
-                if [[ "$file_name" == *.upx ]]; then
-                  echo "<tr><td>${plat_display}</td><td><code>${file_name}</code></td><td>獨立二進制 (UPX)</td></tr>" >> release_body.txt
+                if [[ "$file_name" == *.tar.gz ]] && [[ "$file_name" == *-upx.* ]]; then
+                  echo "<tr><td>${plat_display}</td><td><code>${file_name}</code></td><td>打包壓縮檔 (UPX)</td></tr>" >> release_body.txt
                 elif [[ "$file_name" == *.tar.gz ]]; then
                   echo "<tr><td>${plat_display}</td><td><code>${file_name}</code></td><td>打包壓縮檔</td></tr>" >> release_body.txt
                 else
@@ -1538,7 +1559,7 @@ jobs:
 
             (
               cd "release_files/${target_id}"
-              find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.upx" \) -exec sha256sum {} \; | sed 's/ \.\// /' > SHA256SUMS.txt
+              find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec sha256sum {} \; | sed 's/ \.\// /' > SHA256SUMS.txt
             )
             echo "" >> release_body.txt
             echo "## 🔐 SHA256 Checksums" >> release_body.txt
@@ -1562,7 +1583,6 @@ jobs:
             FILES=(
               release_files/${target_id}/**/*.tar.gz
               release_files/${target_id}/**/*.zip
-              release_files/${target_id}/**/*.upx
             )
             shopt -u nullglob globstar
             [ -f "release_files/${target_id}/linux/install-linux.sh" ] && FILES+=("release_files/${target_id}/linux/install-linux.sh")
@@ -1593,7 +1613,6 @@ jobs:
           subject-path: |
             release_files/**/*.tar.gz
             release_files/**/*.zip
-            release_files/**/*.upx
 
       - name: Upload Build Info Artifact
         if: always()
@@ -1788,7 +1807,7 @@ jobs:
           ## 📦 文件命名規則
 
           - **打包版本** (\`xxx.tar.gz\` / \`xxx.zip\`): 包含 LICENSE 的標準發行版
-          - **獨立二進制** (\`xxx.upx\` / \`xxx\`): 可直接替換執行檔，方便軟路由使用
+          - **UPX 壓縮版** (\`xxx-upx.tar.gz\`): 經 UPX 壓縮的精簡版，適合小閃存設備
 
           ## 🛠️ 支持的版本與特性
 
