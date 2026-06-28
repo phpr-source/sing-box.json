@@ -211,12 +211,13 @@ jobs:
             else
               # git ls-remote 替代 REST API: 0 API 消耗、无分页限制
               local repo_url="https://github.com/$repo.git"
-              local tags=$(git ls-remote --tags --refs "$repo_url" | awk -F'/' '{print $3}' | sort -V -r)
+              local tags=$(git ls-remote --tags --refs "$repo_url" | awk -F'/' '{print $3}' | sort -V -r || echo "")
               local raw_tag=""
               if [[ "$branch" == *"testing"* ]]; then
-                raw_tag=$(echo "$tags" | grep -iE 'reF1nd.*(alpha|beta|rc)' | head -n 1)
+                # 拆分 grep: 先筛 reF1nd 再筛预发布关键字, 防止顺序不匹配; || true 避免 pipefail 中断
+                raw_tag=$(echo "$tags" | grep -i 'reF1nd' | grep -iE '(alpha|beta|rc)' | head -n 1 || true)
               else
-                raw_tag=$(echo "$tags" | grep -i 'reF1nd' | grep -ivE '(alpha|beta|rc)' | head -n 1)
+                raw_tag=$(echo "$tags" | grep -i 'reF1nd' | grep -ivE '(alpha|beta|rc)' | head -n 1 || true)
               fi
 
               if [ -n "$raw_tag" ]; then
