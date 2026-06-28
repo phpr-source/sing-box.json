@@ -1960,7 +1960,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: 'tg-payloads|apk-*|apple-*'
+          pattern: '{tg-payloads,apk-*,apple-*}'
           merge-multiple: true
 
       - name: Extract TG payloads
