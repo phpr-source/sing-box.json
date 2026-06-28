@@ -222,13 +222,13 @@ jobs:
               if [ -n "$raw_tag" ]; then
                 ver=$(echo "$raw_tag" | sed 's/^v//')
                 core_ref="$raw_tag"
-                # 获取 tag 对应的 commit SHA, 而非 branch HEAD
-                local tag_sha=$(git ls-remote --tags "$repo_url" "${raw_tag}^{}" | awk '{print $1}')
-                [ -z "$tag_sha" ] && tag_sha=$(git ls-remote --tags "$repo_url" "$raw_tag" | awk '{print $1}')
+                # 获取 tag 对应的 commit SHA, 精确匹配 refs/tags/ 防模糊
+                local tag_sha=$(git ls-remote --tags "$repo_url" "refs/tags/${raw_tag}^{}" | awk '{print $1}')
+                [ -z "$tag_sha" ] && tag_sha=$(git ls-remote --tags "$repo_url" "refs/tags/$raw_tag" | awk '{print $1}' | head -n 1)
                 local commit_info=$(api_call_with_retry "https://api.github.com/repos/$repo/commits/$tag_sha")
               else
                 # 兜底: 日期前缀 SHA, 保证单调递增
-                local branch_sha=$(git ls-remote --heads "$repo_url" "$branch" | awk '{print $1}')
+                local branch_sha=$(git ls-remote --heads "$repo_url" "refs/heads/$branch" | awk '{print $1}' | head -n 1)
                 if [ -n "$branch_sha" ]; then
                   local today=$(TZ=Asia/Shanghai date '+%Y%m%d')
                   ver="${today}-$(echo "$branch_sha" | cut -c1-8)"
@@ -1955,12 +1955,13 @@ jobs:
 
           echo "status=${TG_STATUS}" >> $GITHUB_OUTPUT
 
-      - name: Download release packages for TG
+      - name: Download all release packages for TG
         if: steps.status.outputs.status == 'success'
         uses: actions/download-artifact@v4
         with:
-          name: tg-payloads
           path: dist
+          pattern: 'tg-payloads|apk-*|apple-*'
+          merge-multiple: true
 
       - name: Extract TG payloads
         if: steps.status.outputs.status == 'success'
@@ -2121,6 +2122,36 @@ jobs:
             `${{ env.TG_DARWIN_TAG }}`
             📦 *版本:* `${{ env.TG_VERSION }}`
           files: ${{ env.TG_DARWIN_FILES }}
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+      - name: Prepare Apple TG Files
+        if: steps.status.outputs.status == 'success'
+        run: |
+          files=$(find dist -type f \( -name "SFI-*.tipa" -o -name "SFM-*.zip" \) 2>/dev/null | head -10)
+          if [ -n "$files" ]; then
+            [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
+            EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
+            echo "TG_APPLE_FILES<<$EOF_MARKER" >> $GITHUB_ENV
+            echo "$files" >> $GITHUB_ENV
+            echo "$EOF_MARKER" >> $GITHUB_ENV
+            echo "TG_APPLE_TAG=$TAG" >> $GITHUB_ENV
+            echo "SEND_APPLE=true" >> $GITHUB_ENV
+          fi
+
+      - name: Send Apple clients to Telegram
+        if: env.SEND_APPLE == 'true'
+        uses: xz-dev/TelegramFileUploader@v1
+        continue-on-error: true
+        with:
+          to-who: "${{ secrets.CHAT_ID }}"
+          message: |
+            🍎 *SFI (iOS 巨魔/越獄) 更新*
+            `${{ env.TG_APPLE_TAG }}`
+            📦 *版本:* `${{ env.TG_VERSION }}`
+          files: ${{ env.TG_APPLE_FILES }}
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
