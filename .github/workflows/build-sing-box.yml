@@ -1269,7 +1269,7 @@ jobs:
           ldid -SSFM/SFM.entitlements "$APP_PATH/Contents/MacOS/sing-box"
           # 寻找 appex 内部的执行文件进行签署（直接签目录无效，Mach-O 在 Contents/MacOS 下）
           shopt -s nullglob
-          for ex in "$APP_PATH/Contents/Plugins/"*.appex; do
+          for ex in "$APP_PATH/Contents/PlugIns/"*.appex; do
             binary=$(find "$ex/Contents/MacOS" -type f | head -n 1)
             if [ -n "$binary" ]; then
               ldid -S "$binary" 2>/dev/null || true
