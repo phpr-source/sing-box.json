@@ -1581,6 +1581,7 @@ jobs:
             )
             shopt -u nullglob globstar
             [ -f "release_files/${target_id}/linux/install-linux.sh" ] && FILES+=("release_files/${target_id}/linux/install-linux.sh")
+            [ -f "release_files/${target_id}/SHA256SUMS.txt" ] && FILES+=("release_files/${target_id}/SHA256SUMS.txt")
 
             if [ ${#FILES[@]} -gt 0 ]; then
               echo "Publishing $tag_name..."
