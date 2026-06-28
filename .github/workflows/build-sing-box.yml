@@ -209,35 +209,44 @@ jobs:
               core_ref="$branch"
               time="$(TZ=Asia/Shanghai date '+%Y-%m-%d')"
             else
-              local tag_data=$(api_call_with_retry "https://api.github.com/repos/$repo/tags?per_page=100")
+              # git ls-remote 替代 REST API: 0 API 消耗、无分页限制
+              local repo_url="https://github.com/$repo.git"
+              local tags=$(git ls-remote --tags --refs "$repo_url" | awk -F'/' '{print $3}' | sort -V -r)
+              local raw_tag=""
               if [[ "$branch" == *"testing"* ]]; then
-                ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | type == "string" and contains("reF1nd") and test("alpha|beta|rc"))][0].name // empty' 2>/dev/null | sed 's/^v//' || true)
+                raw_tag=$(echo "$tags" | grep -iE 'reF1nd.*(alpha|beta|rc)' | head -n 1)
               else
-                ver=$(echo "$tag_data" | jq -r '[.[] | select(.name | type == "string" and contains("reF1nd") and (test("alpha|beta|rc") | not))][0].name // empty' 2>/dev/null | sed 's/^v//' || true)
+                raw_tag=$(echo "$tags" | grep -i 'reF1nd' | grep -ivE '(alpha|beta|rc)' | head -n 1)
               fi
 
-              if [ -z "$ver" ] || [ "$ver" = "null" ]; then
-                local commit_data=$(api_call_with_retry "https://api.github.com/repos/$repo/commits?sha=$branch&per_page=1")
-                local full_sha=$(echo "$commit_data" | jq -r '.[0].sha // empty' 2>/dev/null || true)
-                if [ -n "$full_sha" ]; then
-                  ver=$(echo "$full_sha" | cut -c1-8)
-                  core_ref="$full_sha"
+              if [ -n "$raw_tag" ]; then
+                ver=$(echo "$raw_tag" | sed 's/^v//')
+                core_ref="$raw_tag"
+                # 获取 tag 对应的 commit SHA, 而非 branch HEAD
+                local tag_sha=$(git ls-remote --tags "$repo_url" "${raw_tag}^{}" | awk '{print $1}')
+                [ -z "$tag_sha" ] && tag_sha=$(git ls-remote --tags "$repo_url" "$raw_tag" | awk '{print $1}')
+                local commit_info=$(api_call_with_retry "https://api.github.com/repos/$repo/commits/$tag_sha")
+              else
+                # 兜底: 日期前缀 SHA, 保证单调递增
+                local branch_sha=$(git ls-remote --heads "$repo_url" "$branch" | awk '{print $1}')
+                if [ -n "$branch_sha" ]; then
+                  local today=$(TZ=Asia/Shanghai date '+%Y%m%d')
+                  ver="${today}-$(echo "$branch_sha" | cut -c1-8)"
+                  core_ref="$branch_sha"
+                  local commit_info=$(api_call_with_retry "https://api.github.com/repos/$repo/commits/$branch_sha")
                 else
                   echo "::warning::[$id] Cannot read commit SHA. Skipping."
                   return 0
                 fi
-              else
-                core_ref="v$ver"
               fi
 
               if [ -n "$ver" ] && [ "$ver" != "null" ]; then
                 local release_info=$(api_call_optional "https://api.github.com/repos/$repo/releases/tags/v$ver")
                 upstream_body=$(echo "$release_info" | jq -r '.body // empty' 2>/dev/null || echo "")
-                local commit_info=$(api_call_with_retry "https://api.github.com/repos/$repo/commits/$branch")
                 local commit_date=$(echo "$commit_info" | jq -r '.commit.committer.date // empty' 2>/dev/null || echo "")
                 commit_msg=$(echo "$commit_info" | jq -r '.commit.message // empty' 2>/dev/null | head -n 5 | sed 's/\r//g' || true)
                 [ -z "$commit_msg" ] && commit_msg="無更新說明"
-                
+
                 if [ -n "$commit_date" ] && [ "$commit_date" != "null" ]; then
                   time=$(TZ=Asia/Shanghai date -d "$commit_date" '+%Y-%m-%d' 2>/dev/null || TZ=Asia/Shanghai date '+%Y-%m-%d')
                 else
