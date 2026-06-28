@@ -1983,7 +1983,7 @@ jobs:
         run: |
           files=$(find dist -type f -name "SFA-*.apk" 2>/dev/null | head -10)
           if [ -n "$files" ]; then
-            [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
+            [[ "$files" =~ (alpha|beta|rc|test) ]] && TAG="#testing" || TAG="#stable"
             EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
             echo "TG_APK_FILES<<$EOF_MARKER" >> $GITHUB_ENV
             echo "$files" >> $GITHUB_ENV
@@ -2013,7 +2013,7 @@ jobs:
         run: |
           files=$(find dist -type f -name "sing-box-*-android-*.tar.gz" 2>/dev/null | head -10)
           if [ -n "$files" ]; then
-            [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
+            [[ "$files" =~ (alpha|beta|rc|test) ]] && TAG="#testing" || TAG="#stable"
             EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
             echo "TG_ACLI_FILES<<$EOF_MARKER" >> $GITHUB_ENV
             echo "$files" >> $GITHUB_ENV
@@ -2043,7 +2043,7 @@ jobs:
         run: |
           files=$(find dist -type f -name "sing-box-*-linux-*.tar.gz" 2>/dev/null | head -10)
           if [ -n "$files" ]; then
-            [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
+            [[ "$files" =~ (alpha|beta|rc|test) ]] && TAG="#testing" || TAG="#stable"
             EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
             echo "TG_LINUX_FILES<<$EOF_MARKER" >> $GITHUB_ENV
             echo "$files" >> $GITHUB_ENV
@@ -2073,7 +2073,7 @@ jobs:
         run: |
           files=$(find dist -type f -name "sing-box-*-windows-*.zip" 2>/dev/null | head -10)
           if [ -n "$files" ]; then
-            [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
+            [[ "$files" =~ (alpha|beta|rc|test) ]] && TAG="#testing" || TAG="#stable"
             EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
             echo "TG_WIN_FILES<<$EOF_MARKER" >> $GITHUB_ENV
             echo "$files" >> $GITHUB_ENV
@@ -2103,7 +2103,7 @@ jobs:
         run: |
           files=$(find dist -type f -name "sing-box-*-darwin-*.tar.gz" 2>/dev/null | head -10)
           if [ -n "$files" ]; then
-            [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
+            [[ "$files" =~ (alpha|beta|rc|test) ]] && TAG="#testing" || TAG="#stable"
             EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
             echo "TG_DARWIN_FILES<<$EOF_MARKER" >> $GITHUB_ENV
             echo "$files" >> $GITHUB_ENV
@@ -2133,7 +2133,7 @@ jobs:
         run: |
           files=$(find dist -type f \( -name "SFI-*.tipa" -o -name "SFM-*.zip" \) 2>/dev/null | head -10)
           if [ -n "$files" ]; then
-            [[ "$files" == *"Testing"* ]] && TAG="#testing" || TAG="#stable"
+            [[ "$files" =~ (alpha|beta|rc|test) ]] && TAG="#testing" || TAG="#stable"
             EOF_MARKER=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
             echo "TG_APPLE_FILES<<$EOF_MARKER" >> $GITHUB_ENV
             echo "$files" >> $GITHUB_ENV
