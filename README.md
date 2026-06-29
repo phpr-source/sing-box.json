@@ -4,8 +4,7 @@
 
 ## 📦 最新版本狀態 (2026-06-30 05:26 UTC+8)
 
-- ✨ 更新 **[reF1nd_Stable](https://github.com/reF1nd/sing-box/tree/reF1nd-stable)** 至 `v1.13.14-reF1nd.1`，發佈於 2026-06-25 [reF1nd_Stable v1.13.14-reF1nd.1]
-- ✨ 更新 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** 至 `v1.14.0-alpha.36-reF1nd`，發佈於 2026-06-28 [reF1nd_Testing v1.14.0-alpha.36-reF1nd]
+- 🔄 強制構建 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** `v62fdbb6a` (2026-06-30) [reF1nd_Testing v62fdbb6a]
 
 ---
 
