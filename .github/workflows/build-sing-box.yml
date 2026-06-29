@@ -43,7 +43,7 @@ on:
         type: boolean
         default: false
       enable_naive:
-        description: "Enable naive outbound (Linux/Windows only)"
+        description: "Enable naive outbound (Linux/Windows only). Android CLI builds are skipped when enabled."
         required: false
         type: boolean
         default: false
@@ -76,9 +76,10 @@ permissions:
 
 env:
   GO_VERSION_PIN: ""
-  TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_wireguard,with_tailscale,with_cloudflared,with_usbip"
-  TAGS_CLI_EXTRA: "with_acme,with_ccm,with_ocm"
+  TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_utls,with_clash_api,with_wireguard,with_tailscale"
+  TAGS_CLI_EXTRA: "with_dhcp,with_acme,with_ccm,with_ocm,with_cloudflared,with_usbip"
   TAGS_SFA_EXTRA: "ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird"
+  # Applied to SFA AAR (gui) only. Android CLI (Termux) gets it via tags_extra in build_core matrix.
   TAGS_ANDROID_EXTRA: "with_conntrack"
   CURL_TIMEOUT_API: 60
 
@@ -111,7 +112,7 @@ jobs:
           else
             VERSION=$(curl -m ${CURL_TIMEOUT_API} -sL https://go.dev/VERSION?m=text | head -n 1 | sed 's/go//')
             if [ -z "$VERSION" ]; then
-              VERSION="1.24.4"
+              VERSION="1.24.7"
               echo "::warning::Failed to fetch Go version, falling back to ${VERSION}"
             fi
             echo "version=${VERSION}" >> $GITHUB_OUTPUT
@@ -309,7 +310,7 @@ jobs:
 
       - name: Upload Metadata
         if: steps.check.outputs.has_update == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: workflow-metadata
           path: release_notes.txt
@@ -331,21 +332,23 @@ jobs:
         platform:
           # --- x86_64 基础兼容版 (J1900/J4125/N5105 等无 AVX2 设备) ---
           - { name: linux-amd64-purego,  goos: linux, goarch: amd64, goamd64: v1, variant: purego, cgo: 0, upx: true, tags_extra: with_purego }
-          - { name: windows-amd64,       goos: windows, goarch: amd64, goamd64: v1, upx: false }
+          - { name: linux-amd64-glibc,   goos: linux, goarch: amd64, goamd64: v1, variant: glibc,  cgo: 1, upx: true }
+          - { name: linux-amd64-musl,    goos: linux, goarch: amd64, goamd64: v1, variant: musl,   cgo: 1, upx: true }
+          - { name: windows-amd64,       goos: windows, goarch: amd64, goamd64: v1, upx: false, tags_extra: with_purego }
           - { name: darwin-amd64,        goos: darwin,  goarch: amd64, goamd64: v1, upx: false, cgo: "1" }
 
           # --- x86_64 高性能 v3 (N100/酷睿/Zen, 要求 AVX2) ---
           - { name: linux-amd64-v3-purego, goos: linux, goarch: amd64, goamd64: v3, variant: purego, cgo: 0, upx: true, tags_extra: with_purego }
           - { name: linux-amd64-v3-glibc,  goos: linux, goarch: amd64, goamd64: v3, variant: glibc,  cgo: 1, upx: true }
           - { name: linux-amd64-v3-musl,   goos: linux, goarch: amd64, goamd64: v3, variant: musl,   cgo: 1, upx: true }
-          - { name: windows-amd64-v3,      goos: windows, goarch: amd64, goamd64: v3, upx: false }
+          - { name: windows-amd64-v3,      goos: windows, goarch: amd64, goamd64: v3, upx: false, tags_extra: with_purego }
           - { name: darwin-amd64-v3,       goos: darwin,  goarch: amd64, goamd64: v3, upx: false, cgo: "1" }
 
           # --- ARM64 (Mac/R2S/R4S/树莓派4/5) ---
           - { name: linux-arm64-purego, goos: linux, goarch: arm64, variant: purego, cgo: 0, upx: true, tags_extra: with_purego }
           - { name: linux-arm64-glibc,  goos: linux, goarch: arm64, variant: glibc,  cgo: 1, upx: true }
           - { name: linux-arm64-musl,   goos: linux, goarch: arm64, variant: musl,   cgo: 1, upx: true }
-          - { name: windows-arm64,      goos: windows, goarch: arm64, upx: false }
+          - { name: windows-arm64,      goos: windows, goarch: arm64, upx: false, tags_extra: with_purego }
           - { name: darwin-arm64,       goos: darwin,  goarch: arm64, upx: false, cgo: "1" }
 
           # --- ARMv7 (斐讯/网件/树莓派2/3) ---
@@ -356,6 +359,13 @@ jobs:
           - { name: linux-mipsle-purego,  goos: linux, goarch: mipsle,  gomips: softfloat, variant: purego, cgo: 0, upx: false, tags_extra: with_purego }
           - { name: linux-mips-purego,    goos: linux, goarch: mips,    gomips: softfloat, variant: purego, cgo: 0, upx: false, tags_extra: with_purego }
           - { name: linux-riscv64-purego, goos: linux, goarch: riscv64, variant: purego, cgo: 0, upx: false, tags_extra: with_purego }
+          - { name: linux-riscv64-glibc,  goos: linux, goarch: riscv64, variant: glibc,  cgo: 1, upx: false }
+
+          # --- Android CLI (Termux/ADB 用户) ---
+          - { name: android-arm64,  goos: android, goarch: arm64,           ndk_triple: "aarch64-linux-android23", cgo: "1", upx: false, tags_extra: with_conntrack }
+          - { name: android-arm,    goos: android, goarch: arm,    goarm: 7, ndk_triple: "armv7a-linux-androideabi23", cgo: "1", upx: false, tags_extra: with_conntrack }
+          - { name: android-amd64,  goos: android, goarch: amd64,  goamd64: v1, ndk_triple: "x86_64-linux-android23",    cgo: "1", upx: false, tags_extra: with_conntrack }
+          - { name: android-386,    goos: android, goarch: 386,             ndk_triple: "i686-linux-android23",         cgo: "1", upx: false, tags_extra: with_conntrack }
     runs-on: ${{ matrix.platform.goos == 'darwin' && 'macos-latest' || 'ubuntu-latest' }}
     env:
       GOOS: ${{ matrix.platform.goos }}
@@ -380,6 +390,16 @@ jobs:
         id: check_naive
         if: steps.filter.outputs.skip != 'true'
         run: |
+          if [ "${{ matrix.platform.goos }}" = "android" ]; then
+            if [ "${{ github.event.inputs.enable_naive }}" = "true" ]; then
+              # Android CLI has no cronet cross-compilation environment, so naive is unavailable
+              echo "::warning::Android CLI targets are not compatible with naive outbound. Skipping."
+              echo "skip=true" >> $GITHUB_OUTPUT
+            else
+              echo "skip=false" >> $GITHUB_OUTPUT
+            fi
+            exit 0
+          fi
           if [ "${{ github.event.inputs.enable_naive }}" = "true" ]; then
             if [[ "${{ matrix.platform.goos }}" != "linux" && "${{ matrix.platform.goos }}" != "windows" ]]; then
               echo "skip=true" >> $GITHUB_OUTPUT
@@ -408,12 +428,19 @@ jobs:
 
       - name: Checkout Core
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ matrix.target.repo }}
           ref: ${{ steps.resolve.outputs.ref }}
           path: sing-box
           fetch-depth: 1
+
+      - name: Clean Workspace
+        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
+        working-directory: sing-box
+        run: |
+          git clean -fdx
+          git reset --hard
 
       - name: Apply Patches
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
@@ -432,16 +459,9 @@ jobs:
           done
           echo "Applied $applied patch(es)."
 
-      - name: Clean Workspace
-        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
-        working-directory: sing-box
-        run: |
-          git clean -fdx
-          git reset --hard
-
       - name: Setup Go
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ needs.init.outputs.go_version }}
           cache: true
@@ -461,14 +481,17 @@ jobs:
           fi
 
           if [ "$ENABLE_NAIVE" = "true" ]; then
-            TAGS="${TAGS},with_naive_outbound"
-            if [ "${{ matrix.platform.goos }}" = "windows" ]; then
-              TAGS="${TAGS},with_purego"
+            # Add naive tag everywhere except:
+            # - android (no cronet cross-compilation environment)
+            # - linux + purego (CGO_ENABLED=0, cannot link cronet-go C lib)
+            if [ "${{ matrix.platform.goos }}" != "android" ] && ! { [ "${{ matrix.platform.goos }}" = "linux" ] && [ "${{ matrix.platform.variant }}" = "purego" ]; }; then
+              TAGS="${TAGS},with_naive_outbound"
             fi
           fi
 
           case "${{ matrix.platform.variant }}" in
             musl)
+              TAGS="${TAGS},with_musl"
               if [[ "${{ matrix.platform.name }}" != *-musl ]]; then ARCHIVE_SUFFIX="-musl"; fi
               if [ "${{ matrix.platform.goarch }}" = "amd64" ]; then
                 sudo apt-get update && sudo apt-get install -y musl-tools
@@ -476,6 +499,7 @@ jobs:
               fi
               ;;
             purego)
+              TAGS="${TAGS},with_purego"
               if [[ "${{ matrix.platform.name }}" != *-purego ]]; then ARCHIVE_SUFFIX="-purego"; fi
               ;;
             glibc)
@@ -524,7 +548,6 @@ jobs:
           steps.env.outputs.cgo_val == '1' &&
           matrix.platform.goos == 'linux' &&
           matrix.platform.variant == 'musl' &&
-          github.event.inputs.enable_naive != 'true' &&
           matrix.platform.goarch != 'amd64'
         uses: goto-bus-stop/setup-zig@v2
         with:
@@ -537,7 +560,6 @@ jobs:
           steps.env.outputs.cgo_val == '1' &&
           matrix.platform.goos == 'linux' &&
           matrix.platform.variant == 'musl' &&
-          github.event.inputs.enable_naive != 'true' &&
           matrix.platform.goarch != 'amd64'
         run: |
           case "${{ matrix.platform.goarch }}" in
@@ -554,8 +576,8 @@ jobs:
           esac
 
       - name: Cache Chromium toolchain
-        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
-        uses: actions/cache@v4
+        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && steps.env.outputs.cgo_val == '1' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
+        uses: actions/cache@v5
         with:
           path: |
             ~/cronet-go/naiveproxy/src/third_party/llvm-build/
@@ -566,19 +588,19 @@ jobs:
           restore-keys: chromium-toolchain-${{ matrix.platform.goarch }}-${{ matrix.platform.variant || 'default' }}-
 
       - name: Free disk space for cronet toolchain
-        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
+        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && steps.env.outputs.cgo_val == '1' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
           df -h
 
       - name: Setup ccache
-        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
+        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && steps.env.outputs.cgo_val == '1' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
         uses: hendrikmuhs/ccache-action@v1
         with:
           key: ${{ runner.os }}-cgo-${{ matrix.platform.goarch }}
 
       - name: Export ccache compilers
-        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
+        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && steps.env.outputs.cgo_val == '1' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
         run: |
           if [[ -z "${CC:-}" ]]; then
             echo "CC=ccache gcc" >> "$GITHUB_ENV"
@@ -586,7 +608,7 @@ jobs:
           fi
 
       - name: Setup cronet-go
-        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && (matrix.platform.goos == 'linux' || matrix.platform.goos == 'windows')
+        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && (matrix.platform.goos == 'windows' || (matrix.platform.goos == 'linux' && steps.env.outputs.cgo_val == '1'))
         timeout-minutes: 25
         run: |
           set -euo pipefail
@@ -626,6 +648,12 @@ jobs:
             CGO_ENABLED=0 go run -v ./cmd/build-naive extract-lib --target="windows/${{ matrix.platform.goarch }}" -o "$GITHUB_WORKSPACE/sing-box/dist"
           fi
 
+      - name: Setup Android NDK
+        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && matrix.platform.goos == 'android'
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
+
       - name: Log Build Environment
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
         run: |
@@ -658,7 +686,7 @@ jobs:
           cp LICENSE dist/ 2>/dev/null || true
 
           TAGS_STR="${{ steps.env.outputs.tags }}"
-          LDFLAGS="-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid="
+          LDFLAGS="-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid="
 
           if [ "${{ matrix.platform.goos }}" = "linux" ] && [ "$CGO_ENABLED" = "1" ]; then
             if [ "${{ matrix.platform.variant }}" = "musl" ]; then
@@ -672,6 +700,12 @@ jobs:
 
           BIN_NAME="sing-box"
           if [ "${{ matrix.platform.goos }}" = "windows" ]; then BIN_NAME="sing-box.exe"; fi
+
+          NDK_TRIPLE="${{ matrix.platform.ndk_triple || '' }}"
+          if [ -n "$NDK_TRIPLE" ] && [ -n "${ANDROID_NDK_HOME:-}" ]; then
+            export CC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/${NDK_TRIPLE}-clang"
+            export CXX="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/${NDK_TRIPLE}-clang++"
+          fi
 
           go build -v -trimpath -ldflags "$LDFLAGS" -tags "$TAGS_STR" -o "dist/$BIN_NAME" ./cmd/sing-box
 
@@ -718,7 +752,7 @@ jobs:
           FILE_HEADER=$(file "$BIN_NAME")
           echo "Detected: $FILE_HEADER"
 
-          if [ "${{ matrix.platform.goos }}" = "linux" ]; then
+          if [ "${{ matrix.platform.goos }}" = "linux" ] || [ "${{ matrix.platform.goos }}" = "android" ]; then
             if ! echo "$FILE_HEADER" | grep -qi "ELF"; then
               echo "::error::File is not a valid ELF executable!"; exit 1
             fi
@@ -729,6 +763,25 @@ jobs:
           fi
 
           echo "✅ Verification passed."
+
+          if [ "${{ matrix.platform.goos }}" = "linux" ]; then
+            if command -v ldd &>/dev/null; then
+              LDD_OUTPUT=$(ldd "$BIN_NAME" 2>&1 || true)
+              echo "ldd: $LDD_OUTPUT"
+              # For musl/purego builds, confirm static; glibc is expected to be dynamic (skipped)
+              if [ "${{ matrix.platform.variant }}" = "musl" ] || [ "${{ matrix.platform.variant }}" = "purego" ]; then
+                if echo "$LDD_OUTPUT" | grep -qi "not a dynamic executable\|statically linked"; then
+                  echo "✅ Static link confirmed."
+                elif echo "$LDD_OUTPUT" | grep -qi "not found\|no such file"; then
+                  echo "::warning::ldd reports unresolved dynamic libraries — binary may not be statically linked."
+                  echo "$LDD_OUTPUT" | grep "not found" | head -5
+                else
+                  echo "::warning::Expected static binary but ldd shows dynamic dependencies:"
+                  echo "$LDD_OUTPUT" | grep -v "^\s*$" | head -5
+                fi
+              fi
+            fi
+          fi
 
       - name: Compress and Package
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
@@ -799,7 +852,7 @@ jobs:
 
       - name: Upload Package Artifact
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pkg-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
           path: |
@@ -809,7 +862,7 @@ jobs:
 
       - name: Upload Standalone Binary Artifact
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
           path: sing-box/dist/${{ env.standalone_bin }}
@@ -818,7 +871,7 @@ jobs:
 
       - name: Upload Metadata Artifact
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: meta-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
           path: sing-box/dist/artifact-meta.json
@@ -833,7 +886,6 @@ jobs:
       needs.check.outputs.has_update == 'true' &&
       needs.check.outputs.matrix != '[]' &&
       needs.check.outputs.matrix != '' &&
-      github.event.inputs.enable_naive != 'true' &&
       needs.init.outputs.android_secrets_valid == 'true'
     strategy:
       fail-fast: false
@@ -848,13 +900,20 @@ jobs:
 
       - name: Checkout Core
         if: matrix.target.sfa_repo != 'none'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ matrix.target.repo }}
           ref: ${{ matrix.target.core_ref }}
           path: sing-box
           fetch-depth: 0
           filter: blob:none
+
+      - name: Clean Workspace
+        if: matrix.target.sfa_repo != 'none'
+        working-directory: sing-box
+        run: |
+          git clean -fdx
+          git reset --hard
 
       - name: Apply Patches
         if: matrix.target.sfa_repo != 'none'
@@ -875,7 +934,7 @@ jobs:
 
       - name: Checkout Android Client
         if: matrix.target.sfa_repo != 'none'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ matrix.target.sfa_repo }}
           ref: ${{ matrix.target.sfa_branch }}
@@ -887,7 +946,7 @@ jobs:
 
       - name: Setup Go
         if: matrix.target.sfa_repo != 'none'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ needs.init.outputs.go_version }}
           cache: true
@@ -935,6 +994,7 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
+          set -euo pipefail
           cd sing-box
 
           if grep -q '^lib_install:' Makefile 2>/dev/null; then
@@ -956,10 +1016,14 @@ jobs:
           fi
 
           export PATH="$PATH:$(go env GOPATH)/bin"
-          gomobile init
+          gomobile init || { echo "::error::gomobile init failed"; exit 1; }
 
           TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_SFA_EXTRA }},${{ env.TAGS_ANDROID_EXTRA }}"
           TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
+
+          if [ "${{ github.event.inputs.enable_naive }}" = "true" ]; then
+            TAGS="${TAGS},with_naive_outbound"
+          fi
 
           gomobile bind -v \
             -o libbox.aar \
@@ -972,6 +1036,31 @@ jobs:
             -tags="${TAGS}" \
             -ldflags="-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid=" \
             ./experimental/libbox/
+
+          # Legacy AAR for Android 5.x (api21), without naive support for smaller footprint
+          TAGS_LEGACY="${{ env.TAGS_COMMON }},${{ env.TAGS_SFA_EXTRA }},${{ env.TAGS_ANDROID_EXTRA }}"
+          TAGS_LEGACY=$(echo "${TAGS_LEGACY}" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
+
+          # Capture exit code so set -e does not swallow the error check below
+          gomobile_exit=0
+          gomobile bind -v \
+            -o libbox-legacy.aar \
+            -target android \
+            -androidapi 21 \
+            -javapkg=io.nekohasekai \
+            -libname=box \
+            -trimpath \
+            -buildvcs=false \
+            -tags="${TAGS_LEGACY}" \
+            -ldflags="-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid=" \
+            ./experimental/libbox/ || gomobile_exit=$?
+
+          if [ ! -f "libbox.aar" ]; then echo "::error::libbox.aar not found!"; exit 1; fi
+          if [ ! -f "libbox-legacy.aar" ]; then
+            echo "::error::libbox-legacy.aar not found (gomobile exit code: ${gomobile_exit})!"
+            exit 1
+          fi
+          ls -lh libbox.aar libbox-legacy.aar
 
       - name: Prepare Android Client
         if: matrix.target.sfa_repo != 'none'
@@ -999,10 +1088,14 @@ jobs:
             -Pandroid.injected.signing.key.password="${{ secrets.ALIAS_PASS }}"
           )
           
-          echo "::group::Building APKs (assembleOtherRelease)"
+          echo "::group::Building release APKs"
           ./gradlew :app:assembleOtherRelease "${SIGNING_ARGS[@]}"
           echo "::endgroup::"
-          
+
+          echo "::group::Building legacy APKs (Android 5.x)"
+          ./gradlew :app:assembleOtherLegacyRelease "${SIGNING_ARGS[@]}" || echo "::warning::Legacy APK build failed (non-blocking)."
+          echo "::endgroup::"
+
           REL_DIR="app/build/outputs/apk/other/release"
           UNIVERSAL_APK_FOUND=false
           if [ -d "$REL_DIR" ]; then
@@ -1018,10 +1111,10 @@ jobs:
             echo "::notice::Universal APK already produced by assembleOtherRelease."
           else
             echo "::group::Attempting separate Universal APK build"
-            if ./gradlew :app:assembleUniversalRelease "${SIGNING_ARGS[@]}" 2>/dev/null; then
+            if ./gradlew :app:assembleUniversalRelease "${SIGNING_ARGS[@]}" 2>&1; then
               echo "::notice::Universal APK built via assembleUniversalRelease."
             else
-              echo "::notice::assembleUniversalRelease task not available. Only ABI-split APKs will be included."
+              echo "::warning::assembleUniversalRelease task failed or not available. See log above for details."
             fi
             echo "::endgroup::"
           fi
@@ -1063,6 +1156,15 @@ jobs:
             done
           fi
 
+          LEGACY_DIR="app/build/outputs/apk/otherLegacy/release"
+          if [ -d "$LEGACY_DIR" ]; then
+            for apk in "$LEGACY_DIR"/*.apk; do
+              [ -f "$apk" ] || continue
+              new_name="SFA-${VER}-legacy-$(basename "$apk")"
+              mv -f "$apk" "apks/$new_name"
+            done
+          fi
+
           TAGS_USED="${{ env.TAGS_COMMON }},${{ env.TAGS_SFA_EXTRA }},${{ env.TAGS_ANDROID_EXTRA }}"
           TAGS_USED=$(echo "$TAGS_USED" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
 
@@ -1080,7 +1182,7 @@ jobs:
 
       - name: Upload APK Artifacts
         if: matrix.target.sfa_repo != 'none'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: apk-${{ matrix.target.id }}
           path: |
@@ -1090,21 +1192,22 @@ jobs:
           compression-level: 0
 
   build_apple:
+    # Self-hosted runner with Xcode 26.5 (required for Swift 6 `isolated deinit`).
+    # macos-latest (Xcode 16.4) cannot compile the Apple client.
     runs-on: macos-26
     needs: [init, check]
     timeout-minutes: 60
     if: >-
       needs.check.outputs.has_update == 'true' &&
       needs.check.outputs.matrix != '[]' &&
-      needs.check.outputs.matrix != '' &&
-      github.event.inputs.enable_naive != 'true'
+      needs.check.outputs.matrix != ''
     strategy:
       fail-fast: false
       matrix:
         target: ${{ fromJson(needs.check.outputs.matrix) }}
     steps:
       - name: Checkout Core
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ matrix.target.repo }}
           ref: ${{ matrix.target.core_ref }}
@@ -1116,6 +1219,12 @@ jobs:
           # submodule so the SwiftPM Package.swift resolves. For cores on the *new*
           # libbox API the next step replaces this pinned client with latest upstream.
           submodules: recursive
+
+      - name: Clean Workspace
+        working-directory: sing-box
+        run: |
+          git clean -fdx
+          git reset --hard
 
       - name: Sync Apple client to core's libbox API version
         working-directory: sing-box
@@ -1137,6 +1246,10 @@ jobs:
           # Resolution: detect the core's libbox API era from its Go source and only
           # replace the client when the core is on the new API. WriteOutbounds in
           # command_client.go is the clean signal — it exists only on the new API.
+          if [ ! -f experimental/libbox/command_client.go ]; then
+            echo "::error::experimental/libbox/command_client.go not found — cannot determine libbox API era. Aborting."
+            exit 1
+          fi
           if grep -q 'WriteOutbounds' experimental/libbox/command_client.go; then
             echo "::notice::Core is on the new libbox API (WriteOutbounds present). Replacing pinned Apple client with latest upstream dev branch."
             rm -rf clients/apple
@@ -1162,7 +1275,7 @@ jobs:
           echo "Applied $applied patch(es)."
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           # Apple 構建用 init 的動態 Go 版本（jsda 用 1.26.4 成功，Go 版本非因素）。
           # 真正的約束是 Xcode：Apple client 用了 Swift 6 `isolated deinit` 特性，
@@ -1199,7 +1312,7 @@ jobs:
             fi
           fi
           export PATH="$PATH:$(go env GOPATH)/bin"
-          gomobile init
+          gomobile init || { echo "::error::gomobile init failed"; exit 1; }
           # No -platform flag → builds universal xcframework for
           # ios,iossimulator,tvos,tvossimulator,macos so both SFI (iOS)
           # and SFM (macOS) can link against the same framework.
@@ -1234,7 +1347,7 @@ jobs:
           # ldid 簽 entitlements（ad-hoc，TrollStore/越獄安裝用，非 Apple codesign）
           ldid -SSFI/SFI.entitlements "$APP_PATH/sing-box"
           ldid -SExtension/Extension.entitlements "$APP_PATH/PlugIns/Extension.appex/Extension" 2>/dev/null || true
-          ldid -SIntentsExtension/IntentsExtension.entitlements "$APP_PATH/Extensions/IntentsExtension.appex/IntentsExtension" 2>/dev/null || true
+          ldid -SIntentsExtension/IntentsExtension.entitlements "$APP_PATH/PlugIns/IntentsExtension.appex/IntentsExtension" 2>/dev/null || true
 
           # 打包 .tipa（TrollStore 可直接安裝）
           mkdir -p packages/Payload
@@ -1298,11 +1411,14 @@ jobs:
           if [ -f "$SFM_ZIP" ]; then
             mv "$SFM_ZIP" "apple-out/SFM-${VER}.zip"
             echo "Produced SFM-${VER}.zip"
+          else
+            echo "::error::SFM .zip not produced"
+            exit 1
           fi
           ls -la apple-out/
 
       - name: Upload Apple Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: apple-${{ matrix.target.id }}
           path: apple-out/*
@@ -1323,7 +1439,7 @@ jobs:
       release_version: ${{ steps.prepare.outputs.release_version }}
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Configure Git User
         run: |
@@ -1331,7 +1447,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ./tmp/
 
@@ -1413,10 +1529,10 @@ jobs:
             upstream_body=$(echo "$target" | jq -r '.body // ""')
             commit_msg=$(echo "$target" | jq -r '.msg // ""')
 
-            unset BUILDTAGS_MAP LINUX_FILES WINDOWS_FILES DARWIN_FILES 2>/dev/null || true
-            declare -A BUILDTAGS_MAP=() LINUX_FILES=() WINDOWS_FILES=() DARWIN_FILES=()
+            unset BUILDTAGS_MAP LINUX_FILES WINDOWS_FILES DARWIN_FILES ANDROID_FILES 2>/dev/null || true
+            declare -A BUILDTAGS_MAP=() LINUX_FILES=() WINDOWS_FILES=() DARWIN_FILES=() ANDROID_FILES=()
 
-            mkdir -p ./release_files/${target_id}/{linux,windows,darwin}
+            mkdir -p ./release_files/${target_id}/{linux,windows,darwin,android}
 
             if [ "$PUBLISH_TYPE" = "versioned" ]; then
               if [[ "$target_id" == *"Testing"* ]]; then
@@ -1450,6 +1566,9 @@ jobs:
                   elif [[ "$platform" == *"darwin"* ]]; then
                     cp "$f" "release_files/${target_id}/darwin/$name"
                     DARWIN_FILES["$platform"]="$name"
+                  elif [[ "$platform" == *"android"* ]]; then
+                    cp "$f" "release_files/${target_id}/android/$name"
+                    ANDROID_FILES["$platform"]="$name"
                   else
                     cp "$f" "release_files/${target_id}/linux/$name"
                     LINUX_FILES["$platform"]="$name"
@@ -1572,6 +1691,22 @@ jobs:
               echo "</details>" >> release_body.txt
             fi
 
+            if [ ${#ANDROID_FILES[@]} -gt 0 ]; then
+              echo "" >> release_body.txt
+              echo "<details>" >> release_body.txt
+              echo "<summary>📱 Android CLI 產物 (Termux)</summary>" >> release_body.txt
+              echo "" >> release_body.txt
+              echo '<table>' >> release_body.txt
+              echo '<tr><th>架構</th><th>文件名</th><th>說明</th></tr>' >> release_body.txt
+              for plat in "${!ANDROID_FILES[@]}"; do
+                file_name="${ANDROID_FILES[$plat]}"
+                plat_display="${plat#android-}"
+                echo "<tr><td>${plat_display}</td><td><code>${file_name}</code></td><td>打包壓縮檔</td></tr>" >> release_body.txt
+              done
+              echo '</table>' >> release_body.txt
+              echo "</details>" >> release_body.txt
+            fi
+
             echo "" >> release_body.txt
             echo "---" >> release_body.txt
             echo "### 📜 History (歷史更新)" >> release_body.txt
@@ -1639,7 +1774,7 @@ jobs:
 
       - name: Upload Build Info Artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-info
           path: |
@@ -1649,7 +1784,7 @@ jobs:
           compression-level: 0
 
       - name: Upload Telegram Payloads
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tg-payloads
           path: /tmp/tg-payload-*.tar.gz
@@ -1663,7 +1798,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: ./tmp/
 
@@ -1690,7 +1825,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: ./tmp/
 
@@ -1715,12 +1850,12 @@ jobs:
     runs-on: ubuntu-latest
     if: always() && !cancelled()
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download Metadata & Build Infos
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ./downloads/
 
@@ -1986,7 +2121,7 @@ jobs:
 
       - name: Download all release packages for TG
         if: steps.status.outputs.status == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: '{tg-payloads,apk-*,apple-*}'
