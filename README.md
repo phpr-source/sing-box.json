@@ -2,9 +2,9 @@
 
 > 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的 Stable 和 Testing 分支。
 
-## 📦 最新版本狀態 (2026-06-29 11:26 UTC+8)
+## 📦 最新版本狀態 (2026-06-30 05:26 UTC+8)
 
-- ✨ 更新 **[reF1nd_Stable](https://github.com/reF1nd/sing-box/tree/reF1nd-stable)** 至 `vd7f9dfab`，發佈於 2026-06-25 [reF1nd_Stable vd7f9dfab]
+- 🔄 強制構建 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** `v62fdbb6a` (2026-06-30) [reF1nd_Testing v62fdbb6a]
 
 ---
 
@@ -23,7 +23,7 @@ bash <(curl -sSL https://github.com/phpr-source/sing-box.json/releases/download/
 ## 📦 文件命名規則
 
 - **打包版本** (`xxx.tar.gz` / `xxx.zip`): 包含 LICENSE 的標準發行版
-- **獨立二進制** (`xxx.upx` / `xxx`): 可直接替換執行檔，方便軟路由使用
+- **UPX 壓縮版** (`xxx-upx.tar.gz`): 經 UPX 壓縮的精簡版，適合小閃存設備
 
 ## 🛠️ 支持的版本與特性
 
