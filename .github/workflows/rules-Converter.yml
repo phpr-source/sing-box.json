@@ -12,7 +12,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: write
 
@@ -100,16 +100,20 @@ jobs:
           ./geodat2srs geosite -i temp/geosite.dat -o temp_site --prefix ""
           for f in temp_site/*.srs; do
             rule=$(basename "$f" .srs)
+            echo "[$rule] decompile..."
             ./sb-core rule-set decompile --output temp.json "$f"
             jq --argjson v "$FORMAT_VER" '.version=$v' temp.json > "rules/geosite-json/$rule.json"
+            echo "[$rule] compile..."
             ./sb-core rule-set compile --output "rules/geosite-srs/$rule.srs" "rules/geosite-json/$rule.json"
           done
 
           ./geodat2srs geoip -i temp/geoip.dat -o temp_ip --prefix ""
           for rule in $WANTED_IP; do
             if [ -f "temp_ip/$rule.srs" ]; then
+              echo "[$rule] decompile..."
               ./sb-core rule-set decompile --output temp.json "temp_ip/$rule.srs"
               jq --argjson v "$FORMAT_VER" '.version=$v' temp.json > "rules/geoip-json/$rule.json"
+              echo "[$rule] compile..."
               ./sb-core rule-set compile --output "rules/geoip-srs/$rule.srs" "rules/geoip-json/$rule.json"
             fi
           done
