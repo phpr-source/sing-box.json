@@ -1,15 +1,11 @@
 {
-  "built_at": "2026-08-10T02:00:37Z",
-  "run_id": "31346536272",
-  "commit_sha": "531165874915d252ca7d1a24f09e4cd87fbaecb1",
+  "built_at": "2026-08-11T02:06:27Z",
+  "run_id": "31448546943",
+  "commit_sha": "53601627f9049145bc9e922dbcb54ca982182efb",
   "targets": [
     {
-      "target_id": "reF1nd_Stable",
-      "version_name": "1.13.18-reF1nd"
-    },
-    {
       "target_id": "reF1nd_Testing",
-      "version_name": "1.14.0-beta.12-reF1nd"
+      "version_name": "1.14.0-beta.13-reF1nd"
     }
   ]
 }
