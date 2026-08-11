@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       rebuild_target:
-        description: "Rebuild specific target only (leave empty for all)"
+        description: "Rebuild specific target only (Rebuild all by default)"
         required: false
         type: choice
-        default: ""
+        default: "all"
         options:
-          - ""
+          - "all"
           - "reF1nd_Stable"
           - "reF1nd_Testing"
       rebuild_platform:
@@ -75,7 +75,7 @@ permissions:
   attestations: write
 
 env:
-  GO_VERSION_PIN: ""
+  # Go 版本不在此配置：由各 build job 的 setup-go 从 sing-box/go.mod 的 go directive 读取
   TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_utls,with_clash_api,with_wireguard,with_tailscale"
   TAGS_CLI_EXTRA: "with_dhcp,with_acme,with_ccm,with_ocm,with_cloudflared,with_usbip"
   TAGS_SFA_EXTRA: "ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird"
@@ -87,7 +87,6 @@ jobs:
   init:
     runs-on: ubuntu-latest
     outputs:
-      go_version: ${{ steps.go.outputs.version }}
       start_time: ${{ steps.time.outputs.start }}
       android_secrets_valid: ${{ steps.validate.outputs.android_secrets_valid }}
       version_code: ${{ steps.calc.outputs.code }}
@@ -101,22 +100,6 @@ jobs:
         run: |
           CODE=$(( ($(date +%s) / 60) + ${{ github.run_number }} ))
           echo "code=$CODE" >> $GITHUB_OUTPUT
-
-      - name: Determine Go version
-        id: go
-        run: |
-          PINNED="${{ env.GO_VERSION_PIN }}"
-          if [ -n "$PINNED" ]; then
-            echo "version=${PINNED}" >> $GITHUB_OUTPUT
-            echo "::notice::Using pinned Go version: ${PINNED}"
-          else
-            VERSION=$(curl -m ${CURL_TIMEOUT_API} -sL https://go.dev/VERSION?m=text | head -n 1 | sed 's/go//')
-            if [ -z "$VERSION" ]; then
-              VERSION="1.24.7"
-              echo "::warning::Failed to fetch Go version, falling back to ${VERSION}"
-            fi
-            echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          fi
 
       - name: Validate Secrets
         id: validate
@@ -176,7 +159,8 @@ jobs:
 
           FORCE_BUILD="${{ github.event.inputs.force_build || 'false' }}"
           OVERRIDE_VERSION="${{ github.event.inputs.override_version || '' }}"
-          TARGET_FILTER="${{ github.event.inputs.rebuild_target || '' }}"
+          TARGET_FILTER="${{ github.event.inputs.rebuild_target || 'all' }}"
+          [ "$TARGET_FILTER" = "all" ] && TARGET_FILTER=""
           SKIP_CHECK="${{ github.event.inputs.skip_version_check || 'false' }}"
 
           LAST_BUILD_INFO="{}"
@@ -463,7 +447,7 @@ jobs:
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
         uses: actions/setup-go@v6
         with:
-          go-version: ${{ needs.init.outputs.go_version }}
+          go-version-file: sing-box/go.mod
           cache: true
           cache-dependency-path: sing-box/go.sum
 
@@ -948,7 +932,7 @@ jobs:
         if: matrix.target.sfa_repo != 'none'
         uses: actions/setup-go@v6
         with:
-          go-version: ${{ needs.init.outputs.go_version }}
+          go-version-file: sing-box/go.mod
           cache: true
           cache-dependency-path: 'sing-box/go.sum'
 
@@ -1277,12 +1261,12 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          # Apple 構建用 init 的動態 Go 版本（jsda 用 1.26.4 成功，Go 版本非因素）。
+          # Go 版本由 sing-box core 的 go.mod go directive 決定（與 CLI/Android 一致）。
           # 真正的約束是 Xcode：Apple client 用了 Swift 6 `isolated deinit` 特性，
           # 需 Xcode 26.x（macos-26 runner 自帶 Xcode 26.5）。macos-latest 的 Xcode 16.4
           # 報 'isolated' deinit requires frontend flag + LibboxStringIteratorProtocol
           # has no member 'value' 等編譯器類型推導問題。
-          go-version: ${{ needs.init.outputs.go_version }}
+          go-version-file: sing-box/go.mod
           cache: false
           cache-dependency-path: 'sing-box/go.sum'
 
