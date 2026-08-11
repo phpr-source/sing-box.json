@@ -2022,6 +2022,14 @@ jobs:
       - name: Generate Telegram Message
         id: status
         run: |
+          # Missing secrets → set status=skipped so every downstream TG step
+          # (downloads, prepares, and the 6 TelegramFileUploader steps that hang
+          # on empty credentials) is skipped instead of timing out the job.
+          if [ -z "${{ secrets.API_ID }}" ] || [ -z "${{ secrets.API_HASH }}" ] || [ -z "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] || [ -z "${{ secrets.CHAT_ID }}" ]; then
+            echo "::warning::Telegram secrets missing — skipping Telegram notification and file uploads."
+            echo "status=skipped" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           TG_STATUS="success"
           declare -a STATUS_LINES
 
