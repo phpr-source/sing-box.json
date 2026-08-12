@@ -57,7 +57,7 @@ jobs:
           TOTAL=$(echo "$CACHE_LIST" | jq '[.[].size_in_bytes] | add // 0')
           echo "Total cache usage: $TOTAL bytes (budget $BUDGET_BYTES)"
           if [ "$TOTAL" -gt "$BUDGET_BYTES" ]; then
-            echo "$CACHE_LIST" | jq -r 'sort_by(.last_accessed_at // .created_at) | .[] | "\(.id)\t\(.size_in_bytes)\t\(.last_accessed_at // .created_at)"' | \
+            # 进程替换（非管道）：while 在主 shell 执行，TOTAL 更新才生效
             while IFS=$'\t' read -r cache_id cache_size cache_time; do
               [ -z "$cache_id" ] && continue
               if [ "$TOTAL" -le "$BUDGET_BYTES" ]; then
@@ -68,7 +68,7 @@ jobs:
               gh api -X DELETE "repos/${{ github.repository }}/actions/caches/$cache_id" || true
               TOTAL=$((TOTAL - cache_size))
               sleep 1
-            done
+            done < <(echo "$CACHE_LIST" | jq -r 'sort_by(.last_accessed_at // .created_at) | .[] | "\(.id)\t\(.size_in_bytes)\t\(.last_accessed_at // .created_at)"')
           else
             echo "Within budget, no eviction needed."
           fi

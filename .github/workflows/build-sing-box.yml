@@ -455,10 +455,26 @@ jobs:
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
         id: env
         run: |
-          TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_CLI_EXTRA }}"
           CGO_VAL="${{ matrix.platform.cgo || '0' }}"
           ARCHIVE_SUFFIX=""
           ENABLE_NAIVE="${{ github.event.inputs.enable_naive || 'false' }}"
+
+          # 基础 tags 以 reF1nd 上游为基准：跟随源码 release/ 目录的 tag 文件自动同步
+          # （上游新增 tag 如 with_openvpn/with_openconnect 无需人工维护）。
+          # 老版本源码缺文件时 fallback 到 env；env 中的本地独有 tag
+          # （with_cloudflared/with_usbip 等）经下方 sort -u 合并去重后保留。
+          TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_CLI_EXTRA }}"
+          if [ "${{ matrix.platform.goos }}" = "windows" ]; then
+            TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS_WINDOWS"
+          elif [ "$ENABLE_NAIVE" = "true" ]; then
+            TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS"
+          else
+            TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS_OTHERS"
+          fi
+          SRC_TAGS=$(cat "$TAGS_FILE" 2>/dev/null || true)
+          if [ -n "$SRC_TAGS" ]; then
+            TAGS="${SRC_TAGS},${TAGS}"
+          fi
 
           if [ -n "${{ matrix.platform.tags_extra }}" ]; then
             TAGS="${TAGS},${{ matrix.platform.tags_extra }}"
@@ -1892,6 +1908,9 @@ jobs:
             echo "Uploading Apple artifacts from $target_id to $tag..."
             for f in "$apple_dir"/*; do
               [ -f "$f" ] || continue
+              # 排除构建时校验清单：release 根级 SHA256SUMS.txt 由 publish_core 生成，
+              # 避免同名覆盖导致用户校验 Linux 产物失败
+              [ "$(basename "$f")" = "SHA256SUMS.txt" ] && continue
               gh release upload "$tag" "$f" --clobber --repo ${{ github.repository }} 2>&1 || echo "::warning::Upload failed for $(basename "$f")"
             done
           done

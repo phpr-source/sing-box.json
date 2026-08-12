@@ -1,0 +1,86 @@
+name: Patch Compatibility Check
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # 每日 02:00 UTC（北京时间 10:00）
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-patches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify patches against upstream branches
+        run: |
+          set -e
+          FAILED=0
+          FAILED_MSG=""
+          for branch in reF1nd-stable reF1nd-testing; do
+            echo "=== Cloning $branch ==="
+            rm -rf /tmp/sing-box
+            git clone --quiet --depth 1 --branch "$branch" https://github.com/reF1nd/sing-box.git /tmp/sing-box
+            for dir in common reF1nd_Stable reF1nd_Testing; do
+              case "$branch:$dir" in
+                reF1nd-stable:reF1nd_Stable | reF1nd-testing:reF1nd_Testing | *:common) ;;
+                *) continue ;;
+              esac
+              for p in "patches/$dir"/*.patch; do
+                [ -f "$p" ] || continue
+                if git -C /tmp/sing-box apply --check "$PWD/$p" 2>/tmp/patch_err.txt; then
+                  echo "OK: $branch / $dir / $(basename "$p")"
+                else
+                  echo "::error::PATCH BROKEN: $branch / $dir / $(basename "$p")"
+                  cat /tmp/patch_err.txt
+                  FAILED=1
+                  FAILED_MSG="${FAILED_MSG}- $branch / $dir / $(basename "$p")"$'\n'
+                fi
+              done
+            done
+            rm -rf /tmp/sing-box
+          done
+          if [ "$FAILED" -eq 1 ]; then
+            echo "failed_msg=$FAILED_MSG" >> "$GITHUB_ENV"
+            exit 1
+          fi
+          echo "All patches apply cleanly against reF1nd-stable and reF1nd-testing."
+
+      - name: Open issue on patch breakage
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const msg = process.env.FAILED_MSG || 'Unknown patches failed';
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo, state: 'open'
+            });
+            const title = '⚠️ Patch compatibility check failed';
+            if (existing.data.some(i => i.title === title)) {
+              console.log('Issue already open, skipping.');
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              title,
+              body: 'One or more build-time patches no longer apply cleanly against upstream reF1nd/sing-box.\n\nBroken patches:\n```\n' + msg + '```\n\nFix or remove them in `patches/` before the next build (patch failure is a hard build error).'
+            });
+
+      - name: Close resolved issue
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo, state: 'open'
+            });
+            const title = '⚠️ Patch compatibility check failed';
+            for (const i of existing.data.filter(i => i.title === title)) {
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: i.number, state: 'closed'
+              });
+            }
