@@ -1,0 +1,13 @@
+diff --git a/common/urltest/urltest.go b/common/urltest/urltest.go
+index 6da9601..30b7c26 100644
+--- a/common/urltest/urltest.go
++++ b/common/urltest/urltest.go
+@@ -86,7 +86,7 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (uint16, error)
+ 
+ func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err error) {
+ 	if link == "" {
+-		link = "https://www.gstatic.com/generate_204"
++		link = "https://cp.cloudflare.com/generate_204"
+ 	}
+ 	linkURL, err := url.Parse(link)
+ 	if err != nil {

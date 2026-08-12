@@ -50,3 +50,25 @@ Applied 1 patch(es).
 
 If a patch fails, the build stops immediately with an error showing
 which file/hunk conflicted.
+
+## Current Patches
+
+### common/ (all targets)
+
+| Patch | Effect |
+|---|---|
+| `change_default_urltest.patch` | Default urltest URL `www.gstatic.com/generate_204` → `cp.cloudflare.com/generate_204` (more reachable in CN networks) |
+| `http_add_uot.patch` | HTTP outbound gains `udp_over_tcp` option (UDP over TCP, same mechanism as socks/shadowsocks) |
+| `make_log_better_log.patch` | Log timestamp format `[2006-01-02 15:04:05 UTC-07]` |
+
+### reF1nd_Stable/ + reF1nd_Testing/
+
+| Patch | Effect |
+|---|---|
+| `make_log_better_option.patch` | Expose `disable_color` as a JSON log option (per-branch variant: branch layouts differ) |
+
+> All patches verified against `reF1nd-stable` / `reF1nd-testing` (2026-08-12),
+> source: [yagh779/sing-box-releases](https://github.com/yagh779/sing-box-releases) (patches branch),
+> regenerated against current upstream. `null_ip_reject.patch` from the same source
+> was **not** adopted (DNS reply semantics, upstream itself leaves it unapplied).
+

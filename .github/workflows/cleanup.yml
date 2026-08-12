@@ -49,6 +49,30 @@ jobs:
             PAGE=$((PAGE + 1))
           done
 
+          # 预算控制：GitHub 免费缓存 10GB，保留 9GB 头寸。
+          # 超限时按 last_accessed_at 最旧的先删，直到回到预算内（防 25 平台矩阵缓存膨胀撞上限）。
+          echo "Checking total cache usage against 9GB budget..."
+          BUDGET_BYTES=$((9 * 1024 * 1024 * 1024))
+          CACHE_LIST=$(gh api "repos/${{ github.repository }}/actions/caches?per_page=100" --jq '.actions_caches')
+          TOTAL=$(echo "$CACHE_LIST" | jq '[.[].size_in_bytes] | add // 0')
+          echo "Total cache usage: $TOTAL bytes (budget $BUDGET_BYTES)"
+          if [ "$TOTAL" -gt "$BUDGET_BYTES" ]; then
+            echo "$CACHE_LIST" | jq -r 'sort_by(.last_accessed_at // .created_at) | .[] | "\(.id)\t\(.size_in_bytes)\t\(.last_accessed_at // .created_at)"' | \
+            while IFS=$'\t' read -r cache_id cache_size cache_time; do
+              [ -z "$cache_id" ] && continue
+              if [ "$TOTAL" -le "$BUDGET_BYTES" ]; then
+                echo "Back under budget."
+                break
+              fi
+              echo "Evicting cache $cache_id (${cache_size}B, last accessed $cache_time)"
+              gh api -X DELETE "repos/${{ github.repository }}/actions/caches/$cache_id" || true
+              TOTAL=$((TOTAL - cache_size))
+              sleep 1
+            done
+          else
+            echo "Within budget, no eviction needed."
+          fi
+
   cleanup-releases:
     runs-on: ubuntu-latest
     steps:
