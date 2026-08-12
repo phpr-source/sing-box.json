@@ -834,6 +834,14 @@ jobs:
             echo "package_file=${TAR_NAME}" >> $GITHUB_ENV
           fi
 
+      - name: Generate Build Checksums
+        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
+        run: |
+          cd sing-box/dist/release_files
+          rm -f SHA256SUMS.txt
+          find . -type f ! -name SHA256SUMS.txt -exec sha256sum {} + | sed 's| \./| |' > SHA256SUMS.txt
+          echo "Generated $(wc -l < SHA256SUMS.txt) checksum(s)"
+
       - name: Upload Package Artifact
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
         uses: actions/upload-artifact@v7
@@ -1164,6 +1172,14 @@ jobs:
               build_tags: $tags
             }' > "apks/SFA-${{ matrix.target.id }}-metadata.json"
 
+      - name: Generate Build Checksums
+        if: matrix.target.sfa_repo != 'none'
+        run: |
+          cd sing-box-for-android/apks
+          rm -f SHA256SUMS.txt
+          find . -type f ! -name SHA256SUMS.txt -exec sha256sum {} + | sed 's| \./| |' > SHA256SUMS.txt
+          echo "Generated $(wc -l < SHA256SUMS.txt) checksum(s)"
+
       - name: Upload APK Artifacts
         if: matrix.target.sfa_repo != 'none'
         uses: actions/upload-artifact@v7
@@ -1172,6 +1188,7 @@ jobs:
           path: |
             sing-box-for-android/apks/*.apk
             sing-box-for-android/apks/*-metadata.json
+            sing-box-for-android/apks/SHA256SUMS.txt
           retention-days: 1
           compression-level: 0
 
@@ -1401,6 +1418,13 @@ jobs:
           fi
           ls -la apple-out/
 
+      - name: Generate Build Checksums
+        run: |
+          cd apple-out
+          rm -f SHA256SUMS.txt
+          find . -type f ! -name SHA256SUMS.txt -exec sha256sum {} + | sed 's| \./| |' > SHA256SUMS.txt
+          echo "Generated $(wc -l < SHA256SUMS.txt) checksum(s)"
+
       - name: Upload Apple Artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -1434,6 +1458,21 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: ./tmp/
+
+      - name: Verify Build Checksums
+        run: |
+          set -e
+          FAILED=0
+          while IFS= read -r sumfile; do
+            echo "::group::Verify $(basename "$(dirname "$sumfile")")"
+            (cd "$(dirname "$sumfile")" && sha256sum -c SHA256SUMS.txt) || FAILED=1
+            echo "::endgroup::"
+          done < <(find ./tmp -path "*/pkg-*" -name SHA256SUMS.txt)
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::Package artifact checksum verification failed, aborting release"
+            exit 1
+          fi
+          echo "All package artifacts verified OK."
 
       - name: Process, Collect & Prepare Releases
         id: prepare
@@ -1786,6 +1825,20 @@ jobs:
         with:
           path: ./tmp/
 
+      - name: Verify Build Checksums
+        run: |
+          set -e
+          FAILED=0
+          while IFS= read -r sumfile; do
+            echo "Verifying $(basename "$(dirname "$sumfile")")"
+            (cd "$(dirname "$sumfile")" && sha256sum -c SHA256SUMS.txt) || FAILED=1
+          done < <(find ./tmp -path "*/apk-*" -name SHA256SUMS.txt)
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::APK artifact checksum verification failed, aborting upload"
+            exit 1
+          fi
+          echo "All APK artifacts verified OK."
+
       - name: Upload APKs to releases
         run: |
           set -euo pipefail
@@ -1812,6 +1865,20 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: ./tmp/
+
+      - name: Verify Build Checksums
+        run: |
+          set -e
+          FAILED=0
+          while IFS= read -r sumfile; do
+            echo "Verifying $(basename "$(dirname "$sumfile")")"
+            (cd "$(dirname "$sumfile")" && sha256sum -c SHA256SUMS.txt) || FAILED=1
+          done < <(find ./tmp -path "*/apple-*" -name SHA256SUMS.txt)
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::Apple artifact checksum verification failed, aborting upload"
+            exit 1
+          fi
+          echo "All Apple artifacts verified OK."
 
       - name: Upload Apple artifacts to releases
         run: |
