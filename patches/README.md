@@ -57,6 +57,7 @@ which file/hunk conflicted.
 
 | Patch | Effect |
 |---|---|
+| `xhttp-core-directories.patch` | VLESS XHTTP 支持（新增目录）：`common/xray/`（XRAY 基础设施 50 文件）+ `common/congestion/` + `common/kmutex/`。来源：shtorm-7/sing-box-extended（extended 分支） |
 | `change_default_urltest.patch` | Default urltest URL `www.gstatic.com/generate_204` → `cp.cloudflare.com/generate_204` (more reachable in CN networks) |
 | `http_add_uot.patch` | HTTP outbound gains `udp_over_tcp` option (UDP over TCP, same mechanism as socks/shadowsocks) |
 | `make_log_better_log.patch` | Log timestamp format `[2006-01-02 15:04:05 UTC-07]` |
@@ -65,10 +66,20 @@ which file/hunk conflicted.
 
 | Patch | Effect |
 |---|---|
+| `xhttp-wiring.patch` | XHTTP 接入：`transport/v2rayxhttp/`（10 文件）+ `constant/v2ray.go`（+`xhttp` 类型）+ `option/v2ray_transport.go`（XHTTP 选项，含本地 `Range[T]` 替代私有 sing fork 的 `badoption.Range`）+ `option/range.go` + `transport/v2ray/transport.go` 注册 + `transport/v2rayhttp/conn.go`（HWIDContext）。**分支差异**：testing 版适配 sing-quic v0.7 API（`qtls.DialEarly` 签名变化），stable 版用 v0.6；testing 版含 `DescribeSchema` 变体 |
 | `make_log_better_option.patch` | Expose `disable_color` as a JSON log option (per-branch variant: branch layouts differ) |
 
 > All patches verified against `reF1nd-stable` / `reF1nd-testing` (2026-08-12),
 > source: [yagh779/sing-box-releases](https://github.com/yagh779/sing-box-releases) (patches branch),
 > regenerated against current upstream. `null_ip_reject.patch` from the same source
 > was **not** adopted (DNS reply semantics, upstream itself leaves it unapplied).
+>
+> **XHTTP 维护说明**：xhttp 系列 patch 来源为
+> [shtorm-7/sing-box-extended](https://github.com/shtorm-7/sing-box-extended)
+> （钉版 commit `e8f69364`，extended 分支）。本地适配点：
+> ① `badoption.Range` 本地化为 `option/range.go`（官方 sing 无此类型）；
+> ② `xhttp.NewClient` 去除 logger 参数（reF1nd 构造器类型无 logger）；
+> ③ testing 版适配 sing-quic v0.7 API。上游修复或 reF1nd 基线变化时：
+> 重新执行"干净 clone → 应用 → 编译 → git diff 重生成"流程，或手工合并。
+> check-patches.yml 每日自动验证可应用性。
 
