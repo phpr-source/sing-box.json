@@ -65,7 +65,10 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+  # 絕不取消進行中的 run：publish 階段會刪除並重建 release tag，中途取消會留下
+  # 混合新舊資產的同名 release。新 run 排隊等待（同組僅保留最新排隊者）。
+  # 對齊 reF1nd publish.yml 的 cancel-in-progress: false 保護語義。
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -211,6 +214,11 @@ jobs:
                 # 获取 tag 对应的 commit SHA, 精确匹配 refs/tags/ 防模糊
                 local tag_sha=$(git ls-remote --tags "$repo_url" "refs/tags/${raw_tag}^{}" | awk '{print $1}')
                 [ -z "$tag_sha" ] && tag_sha=$(git ls-remote --tags "$repo_url" "refs/tags/$raw_tag" | awk '{print $1}' | head -n 1)
+                # 锁定 commit SHA（对齐 reF1nd resolve_source）：上游会 force-move tag，
+                # 各 build job 若按 tag 名各自 checkout，同一版本号可能检出不同 commit。
+                # check 阶段解析成功后统一传 SHA，matrix 全 job 检出完全一致的源码。
+                # if 形式（非 && 短路）：tag_sha 为空时不能以非零退出触发 set -e。
+                if [ -n "$tag_sha" ]; then core_ref="$tag_sha"; fi
                 local commit_info=$(api_call_with_retry "https://api.github.com/repos/$repo/commits/$tag_sha")
               else
                 # 兜底: 日期前缀 SHA, 保证单调递增
