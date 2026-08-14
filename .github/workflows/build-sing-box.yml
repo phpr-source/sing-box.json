@@ -471,8 +471,12 @@ jobs:
           # （上游新增 tag 如 with_openvpn/with_openconnect 无需人工维护）。
           # 老版本源码缺文件时 fallback 到 env；env 中的本地独有 tag
           # （with_cloudflared/with_usbip 等）经下方 sort -u 合并去重后保留。
+          # 注意：上游 DEFAULT_BUILD_TAGS / DEFAULT_BUILD_TAGS_WINDOWS 默认含
+          # with_naive_outbound（其 CI 总是搭建 cronet）。本地 cronet 由 enable_naive
+          # 门控：未开启时绝不能带入 naive tag——产物无 libcronet 会在运行时
+          # "cronet: library not found" 崩溃。故 naive 关闭时统一读 OTHERS 文件。
           TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_CLI_EXTRA }}"
-          if [ "${{ matrix.platform.goos }}" = "windows" ]; then
+          if [ "$ENABLE_NAIVE" = "true" ] && [ "${{ matrix.platform.goos }}" = "windows" ]; then
             TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS_WINDOWS"
           elif [ "$ENABLE_NAIVE" = "true" ]; then
             TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS"
@@ -488,13 +492,20 @@ jobs:
             TAGS="${TAGS},${{ matrix.platform.tags_extra }}"
           fi
 
-          if [ "$ENABLE_NAIVE" = "true" ]; then
-            # Add naive tag everywhere except:
-            # - android (no cronet cross-compilation environment)
-            # - linux + purego (CGO_ENABLED=0, cannot link cronet-go C lib)
-            if [ "${{ matrix.platform.goos }}" != "android" ] && ! { [ "${{ matrix.platform.goos }}" = "linux" ] && [ "${{ matrix.platform.variant }}" = "purego" ]; }; then
-              TAGS="${TAGS},with_naive_outbound"
-            fi
+          # naive 资格判定（统一管住文件来源 + 显式追加两个入口）：
+          # - android：无 cronet 交叉编译环境
+          # - linux + purego：CGO_ENABLED=0 无法链接 cronet-go C 库
+          NAIVE_ELIGIBLE=true
+          if [ "${{ matrix.platform.goos }}" = "android" ]; then
+            NAIVE_ELIGIBLE=false
+          elif [ "${{ matrix.platform.goos }}" = "linux" ] && [ "${{ matrix.platform.variant }}" = "purego" ]; then
+            NAIVE_ELIGIBLE=false
+          fi
+          if [ "$ENABLE_NAIVE" = "true" ] && [ "$NAIVE_ELIGIBLE" = "true" ]; then
+            TAGS="${TAGS},with_naive_outbound"
+          elif [ "$NAIVE_ELIGIBLE" = "false" ]; then
+            # 上游 DEFAULT_BUILD_TAGS 默认含 naive，合并进来的需剔除
+            TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^with_naive_outbound$' | grep -v '^$' | paste -sd, -)
           fi
 
           case "${{ matrix.platform.variant }}" in
