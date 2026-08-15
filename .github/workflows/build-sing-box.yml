@@ -493,12 +493,11 @@ jobs:
           fi
 
           # naive 资格判定（统一管住文件来源 + 显式追加两个入口）：
-          # - android：无 cronet 交叉编译环境
-          # - linux + purego：CGO_ENABLED=0 无法链接 cronet-go C 库
+          # - android：无 cronet 交叉编译环境（NDK cgo 未适配，上游虽支持但本地未跟进）
+          # - linux + purego 不再排除：CGO=0 走 purego 动态加载（libcronet.so 随包分发），
+          #   与上游 linux purego + naive 行为一致
           NAIVE_ELIGIBLE=true
           if [ "${{ matrix.platform.goos }}" = "android" ]; then
-            NAIVE_ELIGIBLE=false
-          elif [ "${{ matrix.platform.goos }}" = "linux" ] && [ "${{ matrix.platform.variant }}" = "purego" ]; then
             NAIVE_ELIGIBLE=false
           fi
           if [ "$ENABLE_NAIVE" = "true" ] && [ "$NAIVE_ELIGIBLE" = "true" ]; then
@@ -627,7 +626,7 @@ jobs:
           fi
 
       - name: Setup cronet-go
-        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && (matrix.platform.goos == 'windows' || (matrix.platform.goos == 'linux' && steps.env.outputs.cgo_val == '1'))
+        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && (matrix.platform.goos == 'windows' || matrix.platform.goos == 'linux')
         timeout-minutes: 25
         run: |
           set -euo pipefail
@@ -641,6 +640,23 @@ jobs:
           fi
 
           TARGET="${{ matrix.platform.goos }}/${{ matrix.platform.goarch }}"
+
+          if [ "${{ matrix.platform.goos }}" = "linux" ] && [ "${{ steps.env.outputs.cgo_val }}" != "1" ]; then
+            # linux purego：CGO=0 动态加载模式，只需抽取预编译 libcronet.so（上游
+            # build-stable.yml Extract libcronet.so 步骤同方案），无需 chromium 工具链
+            CRONET_VER=$(cat sing-box/.github/CRONET_GO_VERSION 2>/dev/null || echo "main")
+            LIB_PATH="lib/linux_${{ matrix.platform.goarch }}/libcronet.so"
+            rm -rf "$RUNNER_TEMP/cronet-go-lib"
+            git init "$RUNNER_TEMP/cronet-go-lib"
+            git -C "$RUNNER_TEMP/cronet-go-lib" remote add origin https://github.com/sagernet/cronet-go.git
+            git -C "$RUNNER_TEMP/cronet-go-lib" sparse-checkout set --no-cone "/$LIB_PATH"
+            git -C "$RUNNER_TEMP/cronet-go-lib" fetch --depth=1 --filter=blob:none origin "$CRONET_VER"
+            git -C "$RUNNER_TEMP/cronet-go-lib" checkout FETCH_HEAD
+            mkdir -p "$GITHUB_WORKSPACE/sing-box/dist"
+            cp "$RUNNER_TEMP/cronet-go-lib/$LIB_PATH" "$GITHUB_WORKSPACE/sing-box/dist/"
+            ls -la "$GITHUB_WORKSPACE/sing-box/dist/libcronet.so"
+            exit 0
+          fi
 
           if [ "${{ matrix.platform.goos }}" = "linux" ]; then
             git -C "$HOME/cronet-go" submodule update --init --recursive --depth=1 2>/dev/null || true
@@ -662,9 +678,21 @@ jobs:
             go run ./cmd/build-naive --target="$TARGET" env 2>/dev/null | grep -E '^[A-Za-z0-9_]+=' | grep -vE '^(CC|CXX)=' >> "$GITHUB_ENV" || exit 1
 
           elif [ "${{ matrix.platform.goos }}" = "windows" ]; then
+            # 上游方案（reF1nd build-stable.yml L505-515）：sparse-checkout 直接抽取
+            # 预编译 libcronet.dll。cronet-go 的 build-naive 无 extract-lib 子命令
+            # （仅 build/download-toolchain/env/generate-net-errors/package/publish），
+            # 预编译库在 lib/windows_<arch>/ 模块中单文件存放。
+            CRONET_VER=$(cat "$GITHUB_WORKSPACE/sing-box/.github/CRONET_GO_VERSION" 2>/dev/null || echo "main")
+            LIB_PATH="lib/windows_${{ matrix.platform.goarch }}/libcronet.dll"
+            rm -rf "$RUNNER_TEMP/cronet-go-lib"
+            git init "$RUNNER_TEMP/cronet-go-lib"
+            git -C "$RUNNER_TEMP/cronet-go-lib" remote add origin https://github.com/sagernet/cronet-go.git
+            git -C "$RUNNER_TEMP/cronet-go-lib" sparse-checkout set --no-cone "/$LIB_PATH"
+            git -C "$RUNNER_TEMP/cronet-go-lib" fetch --depth=1 --filter=blob:none origin "$CRONET_VER"
+            git -C "$RUNNER_TEMP/cronet-go-lib" checkout FETCH_HEAD
             mkdir -p "$GITHUB_WORKSPACE/sing-box/dist"
-            cd "$HOME/cronet-go"
-            CGO_ENABLED=0 go run -v ./cmd/build-naive extract-lib --target="windows/${{ matrix.platform.goarch }}" -o "$GITHUB_WORKSPACE/sing-box/dist"
+            cp "$RUNNER_TEMP/cronet-go-lib/$LIB_PATH" "$GITHUB_WORKSPACE/sing-box/dist/"
+            ls -la "$GITHUB_WORKSPACE/sing-box/dist/libcronet.dll"
           fi
 
       - name: Setup Android NDK
