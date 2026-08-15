@@ -1290,36 +1290,42 @@ jobs:
           git clean -fdx
           git reset --hard
 
-      - name: Sync Apple client to core's libbox API version
+      - name: Verify Apple client matches core libbox API era
         working-directory: sing-box
         run: |
           set -euo pipefail
-          # reF1nd pins clients/apple at SagerNet/sing-box-for-apple 794eb1741f, which
-          # matches reF1nd-stable's *old* libbox API (SagerNet stable v1.13.14 ships the
-          # same pin). But reF1nd-testing's libbox evolved: PlatformInterface gained
-          # openShellSession/usePlatformShell/startNeighborMonitor/lookupUser/etc and
-          # CommandClientHandler gained writeOutbounds, and it dropped LibboxSetMemoryLimit/
-          # LibboxRedirectStderr. The pinned 794eb1741f client doesn't implement those →
-          # "does not conform to protocol" + "cannot find ... in scope".
-          #
-          # Conversely, the latest upstream dev client now references symbols the *old*
-          # stable libbox doesn't export (LibboxGoVersion, LibboxPromoteOOMDraft,
-          # LibboxCommandOutbounds, LibboxRemoteConnectionOptions, crashReportSource,
-          # oomKillerEnabled, ...), so blindly replacing breaks stable.
-          #
-          # Resolution: detect the core's libbox API era from its Go source and only
-          # replace the client when the core is on the new API. WriteOutbounds in
-          # command_client.go is the clean signal — it exists only on the new API.
+          # 信任 reF1nd 維護的 clients/apple submodule pin：pin 與 core 同倉庫同 commit
+          # 鎖定（reF1nd 自己的 releases 即按此構建）。歷史上曾出現 pin 滯後
+          # （794eb174 舊 API client 配新 API core），當時採用「檢測到新 API 就替換為
+          # 上游 dev HEAD」的權宜；但 2026-08 起 SagerNet dev 進入 Taildrop API 時代
+          # （sendTaildropFiles/LibboxTaildropChunkSize），超前於 reF1nd core 的
+          # WriteOutbounds 時代，盲拉 dev 反而導致 Swift 編譯失敗（實證 run 31874050896）。
+          # 而 reF1nd 現已按時代維護 pin（如 testing core 17388882 → client 9e17f432
+          # "Bump version 1.13.18"，無 Taildrop 引用）。故此處僅做時代一致性校驗：
+          # 不一致立即失敗（比 Swift 編譯錯誤更早、更明確），絕不替換。
           if [ ! -f experimental/libbox/command_client.go ]; then
             echo "::error::experimental/libbox/command_client.go not found — cannot determine libbox API era. Aborting."
             exit 1
           fi
           if grep -q 'WriteOutbounds' experimental/libbox/command_client.go; then
-            echo "::notice::Core is on the new libbox API (WriteOutbounds present). Replacing pinned Apple client with latest upstream dev branch."
-            rm -rf clients/apple
-            git clone --recurse-submodules --depth 1 https://github.com/SagerNet/sing-box-for-apple.git clients/apple
+            CORE_ERA="WriteOutbounds"
           else
-            echo "::notice::Core is on the old libbox API (no WriteOutbounds). Keeping reF1nd-pinned Apple client (matches this libbox era)."
+            CORE_ERA="old"
+          fi
+          # Taildrop 是比 WriteOutbounds 更新的時代信號（core 側）
+          CORE_HAS_TAILDROP=false
+          if grep -rql 'TaildropSendSession\|sendTaildropFiles' experimental/libbox/ 2>/dev/null; then
+            CORE_HAS_TAILDROP=true
+          fi
+          # 客戶端側 Taildrop 引用（若 core 無該 API 則為超前不匹配）
+          CLIENT_USES_TAILDROP=false
+          if grep -rql 'TaildropSendSession\|sendTaildropFiles\|LibboxTaildropChunkSize' clients/apple/Library/ 2>/dev/null; then
+            CLIENT_USES_TAILDROP=true
+          fi
+          echo "::notice::Core libbox era: ${CORE_ERA}, core Taildrop API: ${CORE_HAS_TAILDROP}, client uses Taildrop: ${CLIENT_USES_TAILDROP} (pin: $(git -C clients/apple rev-parse --short HEAD 2>/dev/null || echo unknown))"
+          if [ "$CLIENT_USES_TAILDROP" = "true" ] && [ "$CORE_HAS_TAILDROP" = "false" ]; then
+            echo "::error::Pinned Apple client references Taildrop APIs the core does not export (client ahead of core). reF1nd pin mismatch — check the submodule pin on the core commit."
+            exit 1
           fi
 
       - name: Apply Patches
