@@ -418,6 +418,17 @@ jobs:
           fi
           echo "ref=$COMMIT" >> $GITHUB_OUTPUT
 
+      - name: Checkout Repository
+        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
+        uses: actions/checkout@v6
+        with:
+          # 主仓（本仓库）检出到 workspace 根：Apply Patches 依赖 ../patches/ 目录。
+          # 历史缺陷：此前从未检出主仓，patches/ 不存在导致所有 build_core 静默应用 0 个
+          # patch（XHTTP/autoban 等从未进入 CLI 产物）。
+          sparse-checkout: |
+            patches
+          sparse-checkout-cone-mode: false
+
       - name: Checkout Core
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
         uses: actions/checkout@v6
@@ -953,6 +964,15 @@ jobs:
           echo "::notice::Skipping Android build for ${{ matrix.target.id }} (no client configured)"
           exit 0
 
+      - name: Checkout Repository
+        if: matrix.target.sfa_repo != 'none'
+        uses: actions/checkout@v6
+        with:
+          # 主仓检出（patches/ 所需，见 build_core 同名步骤注释）
+          sparse-checkout: |
+            patches
+          sparse-checkout-cone-mode: false
+
       - name: Checkout Core
         if: matrix.target.sfa_repo != 'none'
         uses: actions/checkout@v6
@@ -1270,6 +1290,14 @@ jobs:
       matrix:
         target: ${{ fromJson(needs.check.outputs.matrix) }}
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+        with:
+          # 主仓检出（patches/ 所需，见 build_core 同名步骤注释）
+          sparse-checkout: |
+            patches
+          sparse-checkout-cone-mode: false
+
       - name: Checkout Core
         uses: actions/checkout@v6
         with:
