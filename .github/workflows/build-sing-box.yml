@@ -1291,44 +1291,50 @@ jobs:
           git reset --hard
 
       - name: Verify Apple client matches core libbox API era
+        id: era
         working-directory: sing-box
         run: |
           set -euo pipefail
-          # 信任 reF1nd 維護的 clients/apple submodule pin：pin 與 core 同倉庫同 commit
-          # 鎖定（reF1nd 自己的 releases 即按此構建）。歷史上曾出現 pin 滯後
-          # （794eb174 舊 API client 配新 API core），當時採用「檢測到新 API 就替換為
-          # 上游 dev HEAD」的權宜；但 2026-08 起 SagerNet dev 進入 Taildrop API 時代
-          # （sendTaildropFiles/LibboxTaildropChunkSize），超前於 reF1nd core 的
-          # WriteOutbounds 時代，盲拉 dev 反而導致 Swift 編譯失敗（實證 run 31874050896）。
-          # 而 reF1nd 現已按時代維護 pin（如 testing core 17388882 → client 9e17f432
-          # "Bump version 1.13.18"，無 Taildrop 引用）。故此處僅做時代一致性校驗：
-          # 不一致立即失敗（比 Swift 編譯錯誤更早、更明確），絕不替換。
+          # reF1nd 上游不構建 Apple 客戶端（build-stable/testing.yml 均無 Apple job），
+          # core 的 clients/apple pin 只是隨版本 bump 的副產品，不保證與 core 的
+          # libbox API 匹配。testing core 的 libbox 含 fork 獨有協議要求（如
+          # LookupSFTPServer/ReadSystemSSHHostKey，SagerNet 官方客戶端永遠不會實現），
+          # 官方客戶端無論 pin 還是 dev 都可能不匹配（落後或超前）。
+          # 策略：已知信號檢測 mismatch → 跳過 Apple 構建（job success、無產物、
+          # 醒目 warning），不讓 Apple 拖垮整個 run；未知新信號仍會在 xcodebuild
+          # 真失敗暴露。
           if [ ! -f experimental/libbox/command_client.go ]; then
             echo "::error::experimental/libbox/command_client.go not found — cannot determine libbox API era. Aborting."
             exit 1
           fi
-          if grep -q 'WriteOutbounds' experimental/libbox/command_client.go; then
-            CORE_ERA="WriteOutbounds"
-          else
-            CORE_ERA="old"
-          fi
-          # Taildrop 是比 WriteOutbounds 更新的時代信號（core 側）
+          SKIP="false"
+          # 信號 1（客戶端超前）：客戶端引用 Taildrop API 而 core 未導出
+          # 注意 if 形式：grep && VAR=... 在無匹配時整體非零，會觸發 set -e 退出
           CORE_HAS_TAILDROP=false
           if grep -rql 'TaildropSendSession\|sendTaildropFiles' experimental/libbox/ 2>/dev/null; then
             CORE_HAS_TAILDROP=true
           fi
-          # 客戶端側 Taildrop 引用（若 core 無該 API 則為超前不匹配）
           CLIENT_USES_TAILDROP=false
           if grep -rql 'TaildropSendSession\|sendTaildropFiles\|LibboxTaildropChunkSize' clients/apple/Library/ 2>/dev/null; then
             CLIENT_USES_TAILDROP=true
           fi
-          echo "::notice::Core libbox era: ${CORE_ERA}, core Taildrop API: ${CORE_HAS_TAILDROP}, client uses Taildrop: ${CLIENT_USES_TAILDROP} (pin: $(git -C clients/apple rev-parse --short HEAD 2>/dev/null || echo unknown))"
           if [ "$CLIENT_USES_TAILDROP" = "true" ] && [ "$CORE_HAS_TAILDROP" = "false" ]; then
-            echo "::error::Pinned Apple client references Taildrop APIs the core does not export (client ahead of core). reF1nd pin mismatch — check the submodule pin on the core commit."
-            exit 1
+            SKIP="true"
+            echo "::warning::Apple client (pin $(git -C clients/apple rev-parse --short HEAD 2>/dev/null || echo unknown)) uses Taildrop APIs the core does not export (client ahead of core). Skipping Apple build."
           fi
+          # 信號 2（客戶端落後）：core 的 libbox 協議含 fork 獨有要求（LookupSFTPServer 等）
+          # 而客戶端未實現 → Swift "does not conform to protocol"
+          if [ "$SKIP" = "false" ] && grep -q 'LookupSFTPServer\|ReadSystemSSHHostKey' experimental/libbox/platform.go 2>/dev/null; then
+            if ! grep -rq 'lookupSFTPServer\|readSystemSSHHostKey' clients/apple/Library/ 2>/dev/null; then
+              SKIP="true"
+              echo "::warning::Core libbox requires fork-exclusive platform APIs (LookupSFTPServer/ReadSystemSSHHostKey) that the official client does not implement (client behind core). Skipping Apple build."
+            fi
+          fi
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+          echo "::notice::era check done: skip=$SKIP (core Taildrop=$CORE_HAS_TAILDROP, client Taildrop=$CLIENT_USES_TAILDROP, pin=$(git -C clients/apple rev-parse --short HEAD 2>/dev/null || echo unknown))"
 
       - name: Apply Patches
+        if: steps.era.outputs.skip != 'true'
         working-directory: sing-box
         run: |
           set -euo pipefail
@@ -1345,6 +1351,7 @@ jobs:
           echo "Applied $applied patch(es)."
 
       - name: Setup Go
+        if: steps.era.outputs.skip != 'true'
         uses: actions/setup-go@v6
         with:
           # Go 版本由 sing-box core 的 go.mod go directive 決定（與 CLI/Android 一致）。
@@ -1357,11 +1364,13 @@ jobs:
           cache-dependency-path: 'sing-box/go.sum'
 
       - name: Install ldid
+        if: steps.era.outputs.skip != 'true'
         env:
           HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
         run: brew install ldid
 
       - name: Build Libbox.xcframework (Apple)
+        if: steps.era.outputs.skip != 'true'
         working-directory: sing-box
         run: |
           if grep -q '^lib_install:' Makefile 2>/dev/null; then
@@ -1390,6 +1399,7 @@ jobs:
           mv Libbox.xcframework clients/apple
 
       - name: Build SFI (iOS, unsigned + ldid)
+        if: steps.era.outputs.skip != 'true'
         working-directory: sing-box/clients/apple
         run: |
           set -euo pipefail
@@ -1426,6 +1436,7 @@ jobs:
           zip -qr sing-box.tipa Payload
 
       - name: Build SFM (macOS, unsigned + ldid)
+        if: steps.era.outputs.skip != 'true'
         working-directory: sing-box/clients/apple
         run: |
           set -euo pipefail
@@ -1465,6 +1476,7 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" packages/sing-box.zip
 
       - name: Collect Apple Artifacts
+        if: steps.era.outputs.skip != 'true'
         run: |
           mkdir -p apple-out
           VER="${{ matrix.target.ver }}"
@@ -1488,6 +1500,7 @@ jobs:
           ls -la apple-out/
 
       - name: Generate Build Checksums
+        if: steps.era.outputs.skip != 'true'
         run: |
           cd apple-out
           rm -f SHA256SUMS.txt
@@ -1495,6 +1508,7 @@ jobs:
           echo "Generated $(wc -l < SHA256SUMS.txt) checksum(s)"
 
       - name: Upload Apple Artifacts
+        if: steps.era.outputs.skip != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: apple-${{ matrix.target.id }}
