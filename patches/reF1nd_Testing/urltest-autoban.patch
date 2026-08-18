@@ -1,8 +1,8 @@
 diff --git a/option/group.go b/option/group.go
-index dfec153..bde1b6f 100644
+index dfec153..2abc1e0 100644
 --- a/option/group.go
 +++ b/option/group.go
-@@ -16,6 +16,19 @@ type URLTestOutboundOptions struct {
+@@ -16,6 +16,22 @@ type URLTestOutboundOptions struct {
  	IdleTimeout               badoption.Duration     `json:"idle_timeout,omitempty"`
  	InterruptExistConnections bool                   `json:"interrupt_exist_connections,omitempty"`
  	Fallback                  URLTestFallbackOptions `json:"fallback,omitempty"`
@@ -15,8 +15,11 @@ index dfec153..bde1b6f 100644
 +	Enabled bool `json:"enabled,omitempty"`
 +	// 每日检查时刻，本地时区 "HH:MM"（如 ["08:00","12:30","21:00"]）
 +	CheckTimes []string `json:"check_times"`
-+	// 连续失败阈值：连续 N 个时段全失败才永久淘汰（默认 3）
++	// 连续失败阈值：连续 N 个失败时段才永久淘汰（默认 3）
 +	FailThreshold int `json:"fail_threshold,omitempty"`
++	// 失败时段冷却窗口（如 "30m"，默认 30m）：窗口内多次失败只计 1 个时段；
++	// 窗口外的失败（含手动测试）都推进淘汰计数
++	FailCooldown badoption.Duration `json:"fail_cooldown,omitempty"`
 +	// 状态持久化文件名（相对路径，存于应用工作目录；默认 autoban.json）
 +	Path string `json:"path,omitempty"`
  }
@@ -24,16 +27,17 @@ index dfec153..bde1b6f 100644
  type GroupCommonOption struct {
 diff --git a/protocol/group/autoban.go b/protocol/group/autoban.go
 new file mode 100644
-index 0000000..02e2b27
+index 0000000..e666b79
 --- /dev/null
 +++ b/protocol/group/autoban.go
-@@ -0,0 +1,270 @@
+@@ -0,0 +1,308 @@
 +package group
 +
 +import (
 +	"context"
 +	"encoding/json"
 +	"os"
++	"sort"
 +	"sync"
 +	"time"
 +
@@ -43,49 +47,70 @@ index 0000000..02e2b27
 +
 +// AutoBan 实现基于多时段定时探测的节点淘汰与恢复：
 +//   - 每天在设定的多个时刻（check_times，本地时区 "HH:MM"）各做一轮全量 urltest
-+//   - 任一时段测试失败的节点被暂时禁用（跳过选择，等价于临时删除）
-+//   - 后续时段测试成功即自动恢复
-+//   - 连续 fail_threshold 个时段全部失败的节点被永久淘汰（banned，跳过选择且不再自动恢复）
-+//   - 淘汰状态持久化到 JSON 文件（跨重启保留；文件由 filemanager 解析到
-+//     SFA/libbox 工作目录，与 cache.db 同机制）
++//   - 任一测试（定时/手动/常规 interval）失败的节点被暂时禁用（跳过选择，等价临时删除）
++//   - 之后任何一次测试成功即自动恢复
++//   - 连续 fail_threshold 个"失败时段"的节点被永久淘汰（banned）
++//   - 失败时段计数带冷却窗口（cooldown，默认 30m）：同节点窗口内多次失败只计 1 个时段，
++//     防止分钟级 interval 自动测试快速刷满阈值；窗口外的每次失败（含手动测试）都推进计数，
++//     因此用户在非设定时间主动测试同样具有淘汰效力
++//   - 淘汰状态持久化到 JSON 文件（跨重启保留；由 filemanager 解析到 SFA/libbox 工作目录）
 +type AutoBan struct {
 +	access sync.Mutex
 +	ctx    context.Context
-+	// 淘汰阈值：连续失败达到该次数即永久淘汰
++	// 淘汰阈值：连续失败时段达到该数即永久淘汰
 +	threshold int
-+	// 每日检查时刻（本地时区）
++	// 每日检查时刻（本地时区，已排序）
 +	times []time.Time
-+	// 状态表：realTag -> 连续失败次数（达到阈值后记录为 -1 表示 banned）
-+	strikes   map[string]int
-+	banned    map[string]bool
-+	lastCheck time.Time
++	// 失败时段冷却窗口
++	cooldown time.Duration
++	// 状态：realTag -> 失败时段计数
++	strikes map[string]int
++	banned  map[string]bool
++	// realTag -> 上次计入失败时段的时间（冷却判定）
++	lastFailAt map[string]time.Time
++	lastCheck  time.Time
++	// 全量节点清单回调（定时任务首轮探测需要：strikes/banned 初始为空，
++	// 只遍历已知状态会漏掉从未失败过的节点）
++	allTagsFunc func() []string
 +	// 持久化路径（空则不持久化）
 +	path string
 +	// 测试回调：由 URLTestGroup 注入，对单个出站做一次真实 urltest
 +	testFunc func(ctx context.Context, tag string) (uint16, bool)
-+	// 淘汰/恢复回调：由 URLTestGroup 注入（当前用于日志）
-+	onBan    func(tag string)
-+	onUnban  func(tag string)
++	// 淘汰/恢复回调
++	onBan   func(tag string)
++	onUnban func(tag string)
 +	checking bool
-+	closed   chan struct{}
++	closed  chan struct{}
 +}
 +
-+func NewAutoBan(ctx context.Context, threshold int, times []time.Time, path string) *AutoBan {
++func NewAutoBan(ctx context.Context, threshold int, times []time.Time, cooldown time.Duration, path string) *AutoBan {
 +	if threshold <= 0 {
 +		threshold = 3
 +	}
++	if cooldown <= 0 {
++		cooldown = 30 * time.Minute
++	}
++	sorted := append([]time.Time(nil), times...)
++	sort.Slice(sorted, func(i, j int) bool {
++		if sorted[i].Hour() != sorted[j].Hour() {
++			return sorted[i].Hour() < sorted[j].Hour()
++		}
++		return sorted[i].Minute() < sorted[j].Minute()
++	})
 +	return &AutoBan{
-+		ctx:       ctx,
-+		threshold: threshold,
-+		times:     times,
-+		strikes:   make(map[string]int),
-+		banned:    make(map[string]bool),
-+		path:      path,
-+		closed:    make(chan struct{}),
++		ctx:        ctx,
++		threshold:  threshold,
++		times:      sorted,
++		cooldown:   cooldown,
++		strikes:    make(map[string]int),
++		banned:     make(map[string]bool),
++		lastFailAt: make(map[string]time.Time),
++		path:       path,
++		closed:     make(chan struct{}),
 +	}
 +}
 +
-+// Start 启动每日定时调度（goroutine，按 check_times 逐日对齐）
++// Start 启动每日定时调度
 +func (a *AutoBan) Start() {
 +	if len(a.times) == 0 {
 +		return
@@ -115,11 +140,10 @@ index 0000000..02e2b27
 +	}
 +}
 +
-+// nextCheckTime 计算从 from 起下一个检查时刻（含今日未到时刻）
++// nextCheckTime 计算从 from 起下一个检查时刻（含今日未到时刻；times 已排序）
 +func (a *AutoBan) nextCheckTime(from time.Time) time.Time {
 +	best := time.Time{}
 +	for _, daily := range a.times {
-+		// 今日该时刻
 +		today := time.Date(from.Year(), from.Month(), from.Day(), daily.Hour(), daily.Minute(), 0, 0, from.Location())
 +		if today.After(from) && (best.IsZero() || today.Before(best)) {
 +			best = today
@@ -128,19 +152,13 @@ index 0000000..02e2b27
 +	if !best.IsZero() {
 +		return best
 +	}
-+	// 今日全部已过：取明日最早时刻
++	// 今日全部已过：取明日最早时刻（times[0] 已排序）
 +	tomorrow := from.AddDate(0, 0, 1)
-+	best = time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), a.times[0].Hour(), a.times[0].Minute(), 0, 0, tomorrow.Location())
-+	for _, daily := range a.times[1:] {
-+		cand := time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), daily.Hour(), daily.Minute(), 0, 0, tomorrow.Location())
-+		if cand.Before(best) {
-+			best = cand
-+		}
-+	}
-+	return best
++	return time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), a.times[0].Hour(), a.times[0].Minute(), 0, 0, tomorrow.Location())
 +}
 +
-+// runScheduledCheck 执行一轮全量测试并更新淘汰状态
++// runScheduledCheck 执行一轮全量测试并更新淘汰状态。
++// 节点清单 = 全量回调 + 状态表中的节点（含已 banned 的——继续探测保证恢复通道）。
 +func (a *AutoBan) runScheduledCheck() {
 +	if a.testFunc == nil {
 +		return
@@ -151,19 +169,25 @@ index 0000000..02e2b27
 +		return
 +	}
 +	a.checking = true
-+	tags := make([]string, 0, len(a.strikes)+len(a.banned))
-+	for tag := range a.banned {
-+		tags = append(tags, tag)
-+	}
-+	seen := make(map[string]bool)
-+	for tag := range a.strikes {
-+		if !a.banned[tag] && !seen[tag] {
-+			seen[tag] = true
-+			tags = append(tags, tag)
++	tagSet := make(map[string]bool)
++	if a.allTagsFunc != nil {
++		for _, tag := range a.allTagsFunc() {
++			tagSet[tag] = true
 +		}
 +	}
++	for tag := range a.banned {
++		tagSet[tag] = true
++	}
++	for tag := range a.strikes {
++		tagSet[tag] = true
++	}
++	tags := make([]string, 0, len(tagSet))
++	for tag := range tagSet {
++		tags = append(tags, tag)
++	}
++	sort.Strings(tags)
 +	a.access.Unlock()
-+	// 逐个测试（banned 节点也参与：全部时段失败才淘汰，恢复机制要求继续探测）
++
 +	for _, tag := range tags {
 +		select {
 +		case <-a.closed:
@@ -173,23 +197,9 @@ index 0000000..02e2b27
 +		_, ok := a.testFunc(a.ctx, tag)
 +		a.access.Lock()
 +		if ok {
-+			if a.banned[tag] {
-+				delete(a.banned, tag)
-+				delete(a.strikes, tag)
-+				if a.onUnban != nil {
-+					a.onUnban(tag)
-+				}
-+			} else if a.strikes[tag] > 0 {
-+				delete(a.strikes, tag)
-+			}
++			a.recoverLocked(tag)
 +		} else {
-+			a.strikes[tag]++
-+			if a.strikes[tag] >= a.threshold && !a.banned[tag] {
-+				a.banned[tag] = true
-+				if a.onBan != nil {
-+					a.onBan(tag)
-+				}
-+			}
++			a.recordFailLocked(tag, time.Now())
 +		}
 +		a.access.Unlock()
 +	}
@@ -200,30 +210,51 @@ index 0000000..02e2b27
 +	a.access.Unlock()
 +}
 +
-+// RecordResult 供 URLTestGroup 在常规 interval 测试中同步结果：
-+// 成功清零并恢复；失败只计数（不立即淘汰，阈值判定留给定时任务）
++// RecordResult 供 URLTestGroup 在常规 interval / 手动测试中同步结果：
++// 成功立即恢复；失败在冷却窗口外计入一个失败时段（手动测试因此具有淘汰效力）。
 +func (a *AutoBan) RecordResult(tag string, ok bool) {
 +	a.access.Lock()
 +	defer a.access.Unlock()
 +	if ok {
-+		if a.banned[tag] {
-+			delete(a.banned, tag)
-+			delete(a.strikes, tag)
-+			if a.onUnban != nil {
-+				a.onUnban(tag)
-+			}
-+		} else if a.strikes[tag] > 0 {
-+			delete(a.strikes, tag)
-+		}
++		a.recoverLocked(tag)
 +		return
 +	}
-+	a.strikes[tag]++
-+	if a.strikes[tag] >= a.threshold && !a.banned[tag] {
-+		a.banned[tag] = true
-+		if a.onBan != nil {
-+			a.onBan(tag)
++	a.recordFailLocked(tag, time.Now())
++}
++
++// recoverLocked 成功路径：清零并恢复（需持锁）
++func (a *AutoBan) recoverLocked(tag string) {
++	if a.banned[tag] {
++		delete(a.banned, tag)
++		delete(a.strikes, tag)
++		delete(a.lastFailAt, tag)
++		if a.onUnban != nil {
++			a.onUnban(tag)
++		}
++		a.saveLocked()
++		return
++	}
++	if a.strikes[tag] > 0 {
++		delete(a.strikes, tag)
++		delete(a.lastFailAt, tag)
++		a.saveLocked()
++	}
++}
++
++// recordFailLocked 失败路径（需持锁）：冷却窗口外计入一个失败时段；
++// 窗口内仅刷新 lastFailAt（保持暂时禁用语义）
++func (a *AutoBan) recordFailLocked(tag string, now time.Time) {
++	last, seen := a.lastFailAt[tag]
++	if !seen || now.Sub(last) >= a.cooldown {
++		a.strikes[tag]++
++		if a.strikes[tag] >= a.threshold && !a.banned[tag] {
++			a.banned[tag] = true
++			if a.onBan != nil {
++				a.onBan(tag)
++			}
 +		}
 +	}
++	a.lastFailAt[tag] = now
 +	a.saveLocked()
 +}
 +
@@ -234,17 +265,22 @@ index 0000000..02e2b27
 +	return a.banned[tag]
 +}
 +
-+// Striked 节点是否有未恢复的失败计数（暂时禁用中）
++// Striked 节点是否处于失败未恢复状态（暂时禁用中）
 +func (a *AutoBan) Striked(tag string) bool {
 +	a.access.Lock()
 +	defer a.access.Unlock()
-+	return a.strikes[tag] > 0
++	if a.strikes[tag] > 0 {
++		return true
++	}
++	_, hasFail := a.lastFailAt[tag]
++	return hasFail
 +}
 +
 +type autoBanState struct {
-+	Banned    []string    `json:"banned"`
-+	Strikes   map[string]int `json:"strikes"`
-+	LastCheck time.Time   `json:"last_check"`
++	Banned    []string           `json:"banned"`
++	Strikes   map[string]int     `json:"strikes"`
++	LastFail  map[string]time.Time `json:"last_fail"`
++	LastCheck time.Time          `json:"last_check"`
 +}
 +
 +// Load 从持久化文件恢复状态
@@ -274,6 +310,10 @@ index 0000000..02e2b27
 +	if a.strikes == nil {
 +		a.strikes = make(map[string]int)
 +	}
++	a.lastFailAt = state.LastFail
++	if a.lastFailAt == nil {
++		a.lastFailAt = make(map[string]time.Time)
++	}
 +	a.lastCheck = state.LastCheck
 +	return nil
 +}
@@ -286,6 +326,7 @@ index 0000000..02e2b27
 +	state := autoBanState{
 +		Banned:    make([]string, 0, len(a.banned)),
 +		Strikes:   a.strikes,
++		LastFail:  a.lastFailAt,
 +		LastCheck: a.lastCheck,
 +	}
 +	for tag := range a.banned {
@@ -299,7 +340,7 @@ index 0000000..02e2b27
 +	_ = filemanager.WriteFile(a.ctx, path, content, 0o644)
 +}
 diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
-index 77125cd..e830aed 100644
+index 77125cd..3de5ecf 100644
 --- a/protocol/group/urltest.go
 +++ b/protocol/group/urltest.go
 @@ -48,6 +48,7 @@ type URLTest struct {
@@ -327,17 +368,24 @@ index 77125cd..e830aed 100644
 +		if path == "" {
 +			path = "autoban.json"
 +		}
-+		outbound.autoBan = NewAutoBan(ctx, ab.FailThreshold, checkTimes, path)
++		outbound.autoBan = NewAutoBan(ctx, ab.FailThreshold, checkTimes, time.Duration(ab.FailCooldown), path)
 +	}
  	return outbound, nil
  }
  
-@@ -138,6 +154,33 @@ func (s *URLTest) Start() error {
+@@ -138,6 +154,40 @@ func (s *URLTest) Start() error {
  		return err
  	}
  	s.group = group
 +	if s.autoBan != nil {
 +		group.autoBan = s.autoBan
++		s.autoBan.allTagsFunc = func() []string {
++			tags := make([]string, 0, len(group.outbounds))
++			for _, detour := range group.outbounds {
++				tags = append(tags, RealTag(detour))
++			}
++			return tags
++		}
 +		s.autoBan.testFunc = func(ctx context.Context, tag string) (uint16, bool) {
 +			p, loaded := s.outbound.Outbound(tag)
 +			if !loaded {
@@ -366,7 +414,7 @@ index 77125cd..e830aed 100644
  	return nil
  }
  
-@@ -147,6 +190,9 @@ func (s *URLTest) PostStart() error {
+@@ -147,6 +197,9 @@ func (s *URLTest) PostStart() error {
  }
  
  func (s *URLTest) Close() error {
@@ -376,7 +424,7 @@ index 77125cd..e830aed 100644
  	return common.Close(
  		common.PtrOrNil(s.group),
  	)
-@@ -347,6 +393,7 @@ type URLTestGroup struct {
+@@ -347,6 +400,7 @@ type URLTestGroup struct {
  	lastActive                   common.TypedValue[time.Time]
  
  	fallback URLTestFallback
@@ -384,7 +432,7 @@ index 77125cd..e830aed 100644
  }
  
  func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, fallback URLTestFallback, interruptExternalConnections bool) (*URLTestGroup, error) {
-@@ -447,7 +494,11 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -447,7 +501,11 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  		if !common.Contains(detour.Network(), network) {
  			continue
  		}
@@ -397,7 +445,7 @@ index 77125cd..e830aed 100644
  		if history == nil {
  			continue
  		}
-@@ -480,6 +531,12 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -480,6 +538,12 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  			if !common.Contains(detour.Network(), network) {
  				continue
  			}
@@ -410,7 +458,7 @@ index 77125cd..e830aed 100644
  			return detour, false
  		}
  		return nil, false
-@@ -552,12 +609,18 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
+@@ -552,12 +616,18 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
  			if err != nil {
  				g.logger.Debug("outbound ", tag, " unavailable: ", err)
  				g.history.DeleteURLTestHistory(realTag)
