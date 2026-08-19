@@ -66,7 +66,7 @@ which file/hunk conflicted.
 
 | Patch | Effect |
 |---|---|
-| `urltest-autoban.patch` | **urltest 自动淘汰（AutoBan）**：`auto_ban` 配置块——每日多个 `check_times` 时段定时探测；单时段失败→暂时禁用（跳过选择，等价临时删除），后续成功自动恢复；连续 `fail_threshold` 个时段全失败→永久淘汰；状态持久化 `autoban.json`（filemanager→SFA 工作目录，与 cache.db 同机制）。本地原创设计（非上游移植） |
+| `urltest-autoban.patch` | **urltest 智能健康淘汰（AutoBan v4.2）**：`auto_ban` 配置块——EWMA 动态健康评分 + 被动单次失败熔断 + 主动指数退避恢复 + 多目标 204 竞速探针 + TUN Protected Dialer + I/O 防抖 + 多 Group Hash 文件隔离。不再依赖固定 `check_times` 裁决生死；状态持久化默认 `autoban_<group>_<hash>.json`（filemanager→SFA 工作目录）。本地原创设计（非上游移植） |
 | `xhttp-wiring.patch` | XHTTP 接入：`transport/v2rayxhttp/`（10 文件）+ `constant/v2ray.go`（+`xhttp` 类型）+ `option/v2ray_transport.go`（XHTTP 选项，含本地 `Range[T]` 替代私有 sing fork 的 `badoption.Range`）+ `option/range.go` + `transport/v2ray/transport.go` 注册 + `transport/v2rayhttp/conn.go`（HWIDContext）。**分支差异**：testing 版适配 sing-quic v0.7 API（`qtls.DialEarly` 签名变化），stable 版用 v0.6；testing 版含 `DescribeSchema` 变体 |
 | `make_log_better_option.patch` | Expose `disable_color` as a JSON log option (per-branch variant: branch layouts differ) |
 
@@ -79,9 +79,23 @@ which file/hunk conflicted.
   "outbounds": ["节点A", "节点B"],
   "auto_ban": {
     "enabled": true,
-    "check_times": ["08:00", "12:30", "21:00"],
-    "fail_threshold": 3,
-    "path": "autoban.json"
+    "fail_threshold": 5,
+    "path": "",
+    "probe_urls": [
+      "http://connect.rom.miui.com/generate_204",
+      "http://connectivitycheck.platform.hicloud.com/generate_204",
+      "http://cp.cloudflare.com/generate_204",
+      "http://www.gstatic.com/generate_204"
+    ],
+    "probe_timeout": "5s",
+    "recovery_interval": "1m",
+    "initial_backoff": "1m",
+    "max_backoff": "30m",
+    "ban_threshold": 25,
+    "recover_threshold": 60,
+    "max_latency": "1000ms",
+    "recover_successes": 2,
+    "flush_delay": "3s"
   }
 }
 ```
