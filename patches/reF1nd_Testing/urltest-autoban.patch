@@ -1,8 +1,8 @@
 diff --git a/option/group.go b/option/group.go
-index dfec153..0bed02c 100644
+index dfec153..787e2a7 100644
 --- a/option/group.go
 +++ b/option/group.go
-@@ -16,6 +16,47 @@ type URLTestOutboundOptions struct {
+@@ -16,6 +16,49 @@ type URLTestOutboundOptions struct {
  	IdleTimeout               badoption.Duration     `json:"idle_timeout,omitempty"`
  	InterruptExistConnections bool                   `json:"interrupt_exist_connections,omitempty"`
  	Fallback                  URLTestFallbackOptions `json:"fallback,omitempty"`
@@ -13,8 +13,8 @@ index dfec153..0bed02c 100644
 +
 +type URLTestAutoBanOptions struct {
 +	Enabled bool `json:"enabled,omitempty"`
-+	// Deprecated: kept for compatibility. v3 uses sliding health score and
-+	// active recovery loop instead of fixed check_times.
++	// Optional daily global sweep times ("big exam"). At these times all nodes
++	// are probed once regardless of backoff state.
 +	CheckTimes []string `json:"check_times,omitempty"`
 +	// Consecutive failures after which a node is forced into banned/low-health
 +	// state (default 5).
@@ -47,15 +47,17 @@ index dfec153..0bed02c 100644
 +	RecoverSuccesses int `json:"recover_successes,omitempty"`
 +	// Debounced state flush interval (default "3s").
 +	FlushDelay badoption.Duration `json:"flush_delay,omitempty"`
++	// Tags that are exempt from AutoBan banning (manual-selection override).
++	PinnedTags []string `json:"pinned_tags,omitempty"`
  }
  
  type GroupCommonOption struct {
 diff --git a/protocol/group/autoban.go b/protocol/group/autoban.go
 new file mode 100644
-index 0000000..6086145
+index 0000000..abfd5f1
 --- /dev/null
 +++ b/protocol/group/autoban.go
-@@ -0,0 +1,1006 @@
+@@ -0,0 +1,1162 @@
 +package group
 +
 +import (
@@ -106,6 +108,8 @@ index 0000000..6086145
 +	nodes     map[string]*nodeState
 +	threshold int // hard consecutive-failure threshold
 +	path      string
++	times     []time.Time
++	pinned    map[string]bool
 +
 +	allTagsFunc func() []string
 +	testFunc    func(ctx context.Context, tag string) (uint16, bool, bool)
@@ -172,7 +176,7 @@ index 0000000..6086145
 +
 +type AutoBanOptions struct {
 +	Threshold         int
-+	Times             []time.Time // deprecated, kept for config compatibility
++	Times             []time.Time // optional daily sweep times ("big exam")
 +	Cooldown          time.Duration // deprecated
 +	Path              string
 +	ProbeURLs         []string
@@ -185,6 +189,7 @@ index 0000000..6086145
 +	MaxLatency        time.Duration
 +	RecoverSuccesses  int
 +	FlushDelay        time.Duration
++	PinnedTags        []string
 +}
 +
 +// AutoBanNodeStatus is a stable snapshot for upper-layer UI / dashboard display.
@@ -203,7 +208,7 @@ index 0000000..6086145
 +
 +const (
 +	defaultAutoBanFailThreshold     = 5
-+	defaultAutoBanProbeTimeout      = 5 * time.Second
++	defaultAutoBanProbeTimeout      = 3 * time.Second
 +	defaultAutoBanProbeInterval     = 30 * time.Second
 +	defaultAutoBanRecoveryInterval  = 1 * time.Minute
 +	defaultAutoBanInitialBackoff    = 1 * time.Minute
@@ -216,7 +221,7 @@ index 0000000..6086145
 +	defaultAutoBanRecoverSuccesses   = 2
 +	defaultAutoBanFlushDelay         = 3 * time.Second
 +	massFailWindow                    = 2 * time.Minute
-+	massFailMinSamples                = 10
++	massFailMinSamplesFloor           = 3
 +	massFailRatio                     = 0.8
 +	defaultAutoBanNeutralScore      = 80.0
 +	defaultAutoBanInitialScore      = 100.0
@@ -225,13 +230,10 @@ index 0000000..6086145
 +)
 +
 +var defaultAutoBanProbeURLs = []string{
-+	// 国内厂商/运营商高可用 204 探针，直连友好
-+	"http://connect.rom.miui.com/generate_204",
-+	"http://connectivitycheck.platform.hicloud.com/generate_204",
-+	// 国际通用 204 探针
-+	"http://cp.cloudflare.com/generate_204",
-+	"http://www.gstatic.com/generate_204",
-+	"http://connectivitycheck.gstatic.com/generate_204",
++	// 国内厂商/运营商高可用 204 探针：全部使用 HTTPS，避免明文 HTTP 被
++	// 商场/小区宽带的运营商劫持、插 JS 或 302 导致误判断网。
++	"https://connect.rom.miui.com/generate_204",
++	"https://connectivitycheck.platform.hicloud.com/generate_204",
 +}
 +
 +func NewAutoBan(ctx context.Context, options AutoBanOptions) *AutoBan {
@@ -280,10 +282,23 @@ index 0000000..6086145
 +	if len(probeURLs) == 0 {
 +		probeURLs = append(probeURLs, defaultAutoBanProbeURLs...)
 +	}
++	sortedTimes := append([]time.Time(nil), options.Times...)
++	sort.Slice(sortedTimes, func(i, j int) bool {
++		if sortedTimes[i].Hour() != sortedTimes[j].Hour() {
++			return sortedTimes[i].Hour() < sortedTimes[j].Hour()
++		}
++		return sortedTimes[i].Minute() < sortedTimes[j].Minute()
++	})
++	pinned := make(map[string]bool, len(options.PinnedTags))
++	for _, tag := range options.PinnedTags {
++		pinned[normalizeTagKey(tag)] = true
++	}
 +	return &AutoBan{
 +		ctx:              ctx,
 +		nodes:            make(map[string]*nodeState),
 +		threshold:        options.Threshold,
++		times:            sortedTimes,
++		pinned:           pinned,
 +		path:             options.Path,
 +		probeURLs:        probeURLs,
 +		probeTimeout:     options.ProbeTimeout,
@@ -341,6 +356,9 @@ index 0000000..6086145
 +			a.logger.Warn("auto_ban: fail_threshold=", a.threshold, " but score-based ban may trigger earlier; consider fail_threshold<=3 or adjust ban_threshold/recover_threshold")
 +		}
 +		go a.recoveryLoop()
++		if len(a.times) > 0 {
++			go a.sweepLoop()
++		}
 +	})
 +}
 +
@@ -407,6 +425,45 @@ index 0000000..6086145
 +	return a.nodes[a.keyOf(tag)]
 +}
 +
++func (a *AutoBan) isPinnedKeyLocked(key string) bool {
++	return a.pinned[key]
++}
++
++// Pinned reports whether the node is user-pinned (manual selection exemption).
++func (a *AutoBan) Pinned(tag string) bool {
++	a.access.RLock()
++	defer a.access.RUnlock()
++	return a.isPinnedKeyLocked(a.keyOf(tag))
++}
++
++// Pin adds a manual-selection exemption. Pinned nodes are never Banned, though
++// they may still be temporarily Striked after an actual failure.
++func (a *AutoBan) Pin(tag string) {
++	key := a.keyOf(tag)
++	a.access.Lock()
++	defer a.access.Unlock()
++	if a.pinned == nil {
++		a.pinned = make(map[string]bool)
++	}
++	if !a.pinned[key] {
++		a.pinned[key] = true
++		a.dirty = true
++		a.saveLocked()
++	}
++}
++
++// Unpin removes a manual-selection exemption.
++func (a *AutoBan) Unpin(tag string) {
++	key := a.keyOf(tag)
++	a.access.Lock()
++	defer a.access.Unlock()
++	if a.pinned[key] {
++		delete(a.pinned, key)
++		a.dirty = true
++		a.saveLocked()
++	}
++}
++
 +func (a *AutoBan) inFailureLocked(n *nodeState) bool {
 +	return n.ConsecutiveFails > 0 || (!n.LastFailAt.IsZero() && !n.LastSuccessAt.After(n.LastFailAt))
 +}
@@ -453,6 +510,9 @@ index 0000000..6086145
 +}
 +
 +func (a *AutoBan) bannedLocked(n *nodeState, now time.Time) bool {
++	if a.isPinnedKeyLocked(n.Key) {
++		return false
++	}
 +	a.decayLocked(n, now)
 +	if n.Banned {
 +		// Already in banned state: require real recovery (score above
@@ -539,6 +599,9 @@ index 0000000..6086145
 +		n.LastProbeAt = now
 +		n.ConsecutiveFails = 0
 +		n.ConsecutiveSuccesses++
++		if n.ConsecutiveSuccesses >= a.recoverSuccesses && n.Score < a.recoverThreshold {
++			n.Score = a.recoverThreshold
++		}
 +		n.Backoff = 0
 +		n.NextProbeAt = time.Time{}
 +	} else if a.massFailureLocked(now) {
@@ -618,6 +681,9 @@ index 0000000..6086145
 +	now := time.Now()
 +	a.access.Lock()
 +	defer a.access.Unlock()
++	if a.isPinnedKeyLocked(a.keyOf(tag)) {
++		return false
++	}
 +	n := a.getLocked(tag)
 +	if n == nil {
 +		return false
@@ -637,10 +703,22 @@ index 0000000..6086145
 +	}
 +}
 +
-+func (a *AutoBan) massFailureLocked(now time.Time) bool {
-+	if len(a.recentResults) < massFailMinSamples {
-+		return false
++func (a *AutoBan) massFailMinSamplesLocked() int {
++	n := len(a.nodes)
++	if a.allTagsFunc != nil {
++		if tags := a.allTagsFunc(); len(tags) > 0 {
++			n = len(tags)
++		}
 +	}
++	minSamples := n / 2
++	if minSamples < massFailMinSamplesFloor {
++		minSamples = massFailMinSamplesFloor
++	}
++	return minSamples
++}
++
++func (a *AutoBan) massFailureLocked(now time.Time) bool {
++	minSamples := a.massFailMinSamplesLocked()
 +	cutoff := now.Add(-massFailWindow)
 +	var total, failed int
 +	for _, sample := range a.recentResults {
@@ -652,7 +730,11 @@ index 0000000..6086145
 +			failed++
 +		}
 +	}
-+	return total >= massFailMinSamples && float64(failed)/float64(total) >= massFailRatio
++	if total < minSamples {
++		// Warm-up window: defer failure accounting until enough evidence exists.
++		return true
++	}
++	return float64(failed)/float64(total) >= massFailRatio
 +}
 +
 +// Snapshot returns a stable, sorted view of tracked node states for UI.
@@ -721,17 +803,9 @@ index 0000000..6086145
 +	}
 +	defer a.checking.Store(false)
 +
-+	if !a.isNetworkHealthy() {
-+		return
-+	}
-+
 +	tags := a.allTagsFunc()
 +	now := time.Now()
-+
-+	type probeTask struct {
-+		tag string
-+	}
-+	var tasks []probeTask
++	var tasks []string
 +
 +	a.access.Lock()
 +	currentKeys := make(map[string]bool, len(tags))
@@ -740,17 +814,12 @@ index 0000000..6086145
 +		currentKeys[key] = true
 +		n := a.getOrCreateLocked(tag)
 +		a.decayLocked(n, now)
-+		// Only actively probe nodes that are blocked or already have a health
-+		// history below the recovery threshold. Brand-new neutral nodes are left
-+		// to the regular URLTest interval to avoid scanning the whole list every
-+		// minute.
 +		if a.blockedLocked(n, now) || (!n.LastProbeAt.IsZero() && n.Score < a.recoverThreshold) {
 +			if n.NextProbeAt.IsZero() || !n.NextProbeAt.After(now) {
-+				tasks = append(tasks, probeTask{tag: tag})
++				tasks = append(tasks, tag)
 +			}
 +		}
 +	}
-+	// GC stale state for removed subscription tags.
 +	staleTTL := a.staleTTL
 +	if staleTTL <= 0 {
 +		staleTTL = defaultAutoBanStaleTTL
@@ -763,6 +832,19 @@ index 0000000..6086145
 +	}
 +	a.access.Unlock()
 +
++	if len(tasks) == 0 {
++		// Idle group: no network preflight, no packets, no wakelock churn.
++		return
++	}
++	if !a.isNetworkHealthy() {
++		return
++	}
++	a.probeTags(tasks)
++}
++
++// probeTags runs the adaptive worker pool over the given tags and batches
++// state persistence into one debounced flush.
++func (a *AutoBan) probeTags(tags []string) {
 +	a.access.Lock()
 +	a.batchMode++
 +	a.access.Unlock()
@@ -775,70 +857,125 @@ index 0000000..6086145
 +		a.access.Unlock()
 +	}()
 +
-+	// Probe with an adaptive worker pool. Serial probing would let a few 5s
-+	// timeouts block the whole recovery round for minutes; a fixed pool of 4 is
-+	// too slow for 200+ node subscriptions. Scale from 4 to 12 workers based on
-+	// the number of unhealthy nodes, while keeping a ceiling to avoid a
-+	// thundering herd / mobile CPU spike.
 +	const (
 +		minRecoveryWorkers = 4
 +		maxRecoveryWorkers = 12
 +	)
 +	workerCount := minRecoveryWorkers
-+	if len(tasks) > 20 {
++	if len(tags) > 20 {
 +		workerCount = 6
 +	}
-+	if len(tasks) > 60 {
++	if len(tags) > 60 {
 +		workerCount = 8
 +	}
-+	if len(tasks) > 120 {
++	if len(tags) > 120 {
 +		workerCount = maxRecoveryWorkers
 +	}
-+	if workerCount > len(tasks) {
-+		workerCount = len(tasks)
++	if workerCount > len(tags) {
++		workerCount = len(tags)
 +	}
 +	if workerCount <= 0 {
 +		return
 +	}
-+	taskCh := make(chan probeTask)
++	taskCh := make(chan string)
 +	var wg sync.WaitGroup
 +	for i := 0; i < workerCount; i++ {
 +		wg.Add(1)
 +		go func() {
 +			defer wg.Done()
-+			for task := range taskCh {
-+				delay, ok, exists := a.testFunc(a.ctx, task.tag)
++			for tag := range taskCh {
++				delay, ok, exists := a.testFunc(a.ctx, tag)
 +				if !exists {
 +					continue
 +				}
 +				var banCb, unbanCb func(string)
 +				a.access.Lock()
-+				banCb, unbanCb = a.recordResultLocked(task.tag, delay, ok, time.Now())
++				banCb, unbanCb = a.recordResultLocked(tag, delay, ok, time.Now())
 +				a.access.Unlock()
 +				if banCb != nil {
-+					banCb(task.tag)
++					banCb(tag)
 +				}
 +				if unbanCb != nil {
-+					unbanCb(task.tag)
++					unbanCb(tag)
 +				}
 +			}
 +		}()
 +	}
 +	go func() {
 +		defer close(taskCh)
-+		for _, task := range tasks {
++		for _, tag := range tags {
 +			select {
 +			case <-a.closed:
 +				return
-+			case taskCh <- task:
++			case taskCh <- tag:
 +			}
 +		}
 +	}()
 +	wg.Wait()
 +}
 +
++// sweepLoop implements the optional daily "big exam" schedule.
++func (a *AutoBan) sweepLoop() {
++	for {
++		next := a.nextCheckTime(time.Now())
++		wait := time.Until(next)
++		if wait > 2*time.Minute {
++			wait += jitterDuration(2 * time.Minute)
++		}
++		if wait < 0 {
++			wait = 0
++		}
++		timer := time.NewTimer(wait)
++		select {
++		case <-a.closed:
++			timer.Stop()
++			return
++		case <-timer.C:
++		}
++		a.runScheduledSweep()
++	}
++}
++
++func (a *AutoBan) nextCheckTime(from time.Time) time.Time {
++	best := time.Time{}
++	for _, daily := range a.times {
++		today := time.Date(from.Year(), from.Month(), from.Day(), daily.Hour(), daily.Minute(), 0, 0, from.Location())
++		if !today.Before(from) && (best.IsZero() || today.Before(best)) {
++			best = today
++		}
++	}
++	if !best.IsZero() {
++		return best
++	}
++	tomorrow := from.AddDate(0, 0, 1)
++	return time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), a.times[0].Hour(), a.times[0].Minute(), 0, 0, tomorrow.Location())
++}
++
++// runScheduledSweep probes ALL current nodes at the configured check_times,
++// bypassing backoff so a good node that was hit by evening congestion can be
++// vindicated in the next morning's global exam.
++func (a *AutoBan) runScheduledSweep() {
++	if a.testFunc == nil || a.allTagsFunc == nil {
++		return
++	}
++	if !a.checking.CompareAndSwap(false, true) {
++		return
++	}
++	defer a.checking.Store(false)
++
++	if !a.isNetworkHealthy() {
++		return
++	}
++	tags := a.allTagsFunc()
++	if len(tags) == 0 {
++		return
++	}
++	a.probeTags(tags)
++}
++
 +type autoBanStateV3 struct {
 +	Nodes     map[string]*nodeState `json:"nodes"`
++	Pinned    []string              `json:"pinned"`
 +	LastCheck time.Time             `json:"last_check"`
 +}
 +
@@ -873,6 +1010,10 @@ index 0000000..6086145
 +		a.nodes = state.Nodes
 +		if a.nodes == nil {
 +			a.nodes = make(map[string]*nodeState)
++		}
++		a.pinned = make(map[string]bool, len(state.Pinned))
++		for _, tag := range state.Pinned {
++			a.pinned[a.keyOf(tag)] = true
 +		}
 +		return nil
 +	}
@@ -957,8 +1098,14 @@ index 0000000..6086145
 +// writeStateLocked performs the actual JSON serialization and file write.
 +// Caller must hold a.access.
 +func (a *AutoBan) writeStateLocked() {
++	pinned := make([]string, 0, len(a.pinned))
++	for key := range a.pinned {
++		pinned = append(pinned, key)
++	}
++	sort.Strings(pinned)
 +	state := autoBanStateV3{
 +		Nodes:     a.nodes,
++		Pinned:    pinned,
 +		LastCheck: time.Now(),
 +	}
 +	content, err := json.MarshalIndent(state, "", "  ")
@@ -971,6 +1118,12 @@ index 0000000..6086145
 +		return
 +	}
 +	_ = os.Rename(tmpPath, path)
++}
++
++// NetworkHealthy reports whether the direct pre-flight probe currently thinks
++// the physical network is usable. Exposed for URLTestGroup.urlTest gating.
++func (a *AutoBan) NetworkHealthy() bool {
++	return a.isNetworkHealthy()
 +}
 +
 +// isNetworkHealthy runs/caches a multi-target direct pre-flight probe.
@@ -998,6 +1151,11 @@ index 0000000..6086145
 +
 +	a.ensureHTTPClient()
 +	ok := a.probeNetwork()
++	if !ok {
++		// Rebuild the protected client on the next attempt so network switches /
++		// VPN recreation pick up the current VpnService protection context.
++		a.httpClient = nil
++	}
 +	changed := a.healthChecked.IsZero() || a.healthOK != ok
 +	a.healthChecked = time.Now()
 +	a.healthOK = ok
@@ -1063,7 +1221,7 @@ index 0000000..6086145
 +	return time.Duration(rand.Int63n(int64(maxJitter)))
 +}
 diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
-index 77125cd..5729d30 100644
+index 77125cd..38f3590 100644
 --- a/protocol/group/urltest.go
 +++ b/protocol/group/urltest.go
 @@ -2,6 +2,8 @@ package group
@@ -1083,13 +1241,19 @@ index 77125cd..5729d30 100644
  
  	provider       adapter.ProviderManager
  	providers      map[string]adapter.Provider
-@@ -94,6 +97,40 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -94,6 +97,47 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
  			maxDelay: uint16(time.Duration(options.Fallback.MaxDelay).Milliseconds()),
  		}
  	}
 +	if ab := options.AutoBan; ab != nil && ab.Enabled {
-+		// check_times is deprecated in v3; kept only for config compatibility.
 +		var checkTimes []time.Time
++		for _, spec := range ab.CheckTimes {
++			t, err := time.ParseInLocation("15:04", spec, time.Local)
++			if err != nil {
++				return nil, E.New("auto_ban.check_times: invalid time spec \"", spec, "\" (expect \"HH:MM\")")
++			}
++			checkTimes = append(checkTimes, t)
++		}
 +		path := ab.Path
 +		if path == "" {
 +			h := fnv.New32a()
@@ -1119,12 +1283,13 @@ index 77125cd..5729d30 100644
 +			MaxLatency:       time.Duration(ab.MaxLatency),
 +			RecoverSuccesses: ab.RecoverSuccesses,
 +			FlushDelay:       time.Duration(ab.FlushDelay),
++			PinnedTags:       ab.PinnedTags,
 +		})
 +	}
  	return outbound, nil
  }
  
-@@ -138,6 +175,41 @@ func (s *URLTest) Start() error {
+@@ -138,6 +182,41 @@ func (s *URLTest) Start() error {
  		return err
  	}
  	s.group = group
@@ -1166,7 +1331,7 @@ index 77125cd..5729d30 100644
  	return nil
  }
  
-@@ -147,6 +219,9 @@ func (s *URLTest) PostStart() error {
+@@ -147,6 +226,9 @@ func (s *URLTest) PostStart() error {
  }
  
  func (s *URLTest) Close() error {
@@ -1176,7 +1341,7 @@ index 77125cd..5729d30 100644
  	return common.Close(
  		common.PtrOrNil(s.group),
  	)
-@@ -162,9 +237,21 @@ func (s *URLTest) Now() string {
+@@ -162,9 +244,36 @@ func (s *URLTest) Now() string {
  }
  
  func (s *URLTest) All() []string {
@@ -1187,6 +1352,21 @@ index 77125cd..5729d30 100644
  	return s.tags
  }
  
++// Pin marks a node as manually selected: it is exempt from AutoBan banning.
++// SFA should call this when the user explicitly selects a node in the UI.
++func (s *URLTest) Pin(tag string) {
++	if s.autoBan != nil {
++		s.autoBan.Pin(tag)
++	}
++}
++
++// Unpin clears a manual-selection exemption.
++func (s *URLTest) Unpin(tag string) {
++	if s.autoBan != nil {
++		s.autoBan.Unpin(tag)
++	}
++}
++
 +// AutoBanSnapshot exposes AutoBan state for upper-layer UI / dashboard support.
 +func (s *URLTest) AutoBanSnapshot() []AutoBanNodeStatus {
 +	if s.group == nil || s.autoBan == nil {
@@ -1198,15 +1378,18 @@ index 77125cd..5729d30 100644
  func (s *URLTest) SelectPreMatchOutbound(metadata *adapter.InboundContext, selectOutbound func(adapter.Outbound) (adapter.Outbound, adapter.PreMatchAction)) (adapter.Outbound, adapter.PreMatchAction) {
  	s.group.Touch()
  	network := metadata.Network
-@@ -347,6 +434,7 @@ type URLTestGroup struct {
+@@ -345,8 +454,10 @@ type URLTestGroup struct {
+ 	close                        chan struct{}
+ 	started                      bool
  	lastActive                   common.TypedValue[time.Time]
++	lastResortCounter            atomic.Uint64
  
  	fallback URLTestFallback
 +	autoBan *AutoBan
  }
  
  func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, fallback URLTestFallback, interruptExternalConnections bool) (*URLTestGroup, error) {
-@@ -427,16 +515,33 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -427,16 +538,33 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  	var minOutbound adapter.Outbound
  	var fallbackIgnoreOutboundDelay uint16
  	var fallbackIgnoreOutbound adapter.Outbound
@@ -1242,7 +1425,7 @@ index 77125cd..5729d30 100644
  			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundUDP)); history != nil {
  				minOutbound = g.selectedOutboundUDP
  				minDelay = history.Delay
-@@ -444,7 +549,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -444,7 +572,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  		}
  	}
  	for _, detour := range g.outbounds {
@@ -1251,7 +1434,7 @@ index 77125cd..5729d30 100644
  			continue
  		}
  		history := g.history.LoadURLTestHistory(RealTag(detour))
-@@ -476,17 +581,73 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -476,17 +604,69 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  		return fallbackIgnoreOutbound, true
  	}
  	if minOutbound == nil {
@@ -1273,9 +1456,10 @@ index 77125cd..5729d30 100644
 +// the best available node; if even that is impossible it returns a blocked node
 +// with the lowest historical latency so the client can still attempt recovery.
 +func (g *URLTestGroup) selectLastResort(network string) (adapter.Outbound, bool) {
-+	var bestAvailable, bestBlocked adapter.Outbound
-+	var bestAvailableDelay, bestBlockedDelay uint16
-+	var hasAvailableDelay, hasBlockedDelay bool
++	var bestAvailable adapter.Outbound
++	var bestAvailableDelay uint16
++	var hasAvailableDelay bool
++	var blockedCandidates []adapter.Outbound
 +
 +	for _, detour := range g.outbounds {
 +		if !common.Contains(detour.Network(), network) {
@@ -1284,33 +1468,28 @@ index 77125cd..5729d30 100644
 +		tag := RealTag(detour)
 +		blocked := g.autoBan != nil && g.autoBan.Blocked(tag)
 +		history := g.history.LoadURLTestHistory(tag)
++		if blocked {
++			blockedCandidates = append(blockedCandidates, detour)
++			continue
++		}
 +		if history != nil {
-+			if !blocked {
-+				if !hasAvailableDelay || history.Delay < bestAvailableDelay {
-+					bestAvailable = detour
-+					bestAvailableDelay = history.Delay
-+					hasAvailableDelay = true
-+				}
-+			} else {
-+				if !hasBlockedDelay || history.Delay < bestBlockedDelay {
-+					bestBlocked = detour
-+					bestBlockedDelay = history.Delay
-+					hasBlockedDelay = true
-+				}
-+			}
-+		} else {
-+			if !blocked && bestAvailable == nil {
++			if !hasAvailableDelay || history.Delay < bestAvailableDelay {
 +				bestAvailable = detour
++				bestAvailableDelay = history.Delay
++				hasAvailableDelay = true
 +			}
-+			if blocked && bestBlocked == nil {
-+				bestBlocked = detour
-+			}
++		} else if bestAvailable == nil {
++			bestAvailable = detour
 +		}
 +	}
 +	if bestAvailable != nil {
 +		return bestAvailable, false
 +	}
-+	if bestBlocked != nil {
++	if len(blockedCandidates) > 0 {
++		// Round-robin across blocked nodes so a single dead last-resort node
++		// cannot permanently black-hole all traffic.
++		idx := int(g.lastResortCounter.Add(1)-1) % len(blockedCandidates)
++		bestBlocked := blockedCandidates[idx]
 +		if g.autoBan != nil {
 +			g.logger.Warn("auto_ban: no available outbound, last-resort fallback to blocked outbound ", bestBlocked.Tag())
 +		}
@@ -1330,7 +1509,19 @@ index 77125cd..5729d30 100644
  func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{}) {
  	if time.Since(g.lastActive.Load()) > g.interval {
  		g.lastActive.Store(time.Now())
-@@ -536,6 +697,11 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
+@@ -527,6 +707,11 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
+ 		return result, nil
+ 	}
+ 	defer g.checking.Store(false)
++	if g.autoBan != nil && !g.autoBan.NetworkHealthy() {
++		// Physical network is down: skip the whole passive round instead of
++		// attributing environmental failures to every node.
++		return result, nil
++	}
+ 	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
+ 	checked := make(map[string]bool)
+ 	var resultAccess sync.Mutex
+@@ -536,6 +721,11 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
  		if checked[realTag] {
  			continue
  		}
@@ -1342,7 +1533,7 @@ index 77125cd..5729d30 100644
  		history := g.history.LoadURLTestHistory(realTag)
  		if !force && history != nil && time.Since(history.Time) < g.interval {
  			continue
-@@ -552,12 +718,18 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
+@@ -552,12 +742,18 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
  			if err != nil {
  				g.logger.Debug("outbound ", tag, " unavailable: ", err)
  				g.history.DeleteURLTestHistory(realTag)
