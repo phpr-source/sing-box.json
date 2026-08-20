@@ -1,7 +1,8 @@
 diff --git a/option/group.go b/option/group.go
+index dfec153..0bed02c 100644
 --- a/option/group.go
 +++ b/option/group.go
-@@ -16,6 +16,47 @@
+@@ -16,6 +16,47 @@ type URLTestOutboundOptions struct {
  	IdleTimeout               badoption.Duration     `json:"idle_timeout,omitempty"`
  	InterruptExistConnections bool                   `json:"interrupt_exist_connections,omitempty"`
  	Fallback                  URLTestFallbackOptions `json:"fallback,omitempty"`
@@ -51,12 +52,14 @@ diff --git a/option/group.go b/option/group.go
  type GroupCommonOption struct {
 diff --git a/protocol/group/autoban.go b/protocol/group/autoban.go
 new file mode 100644
+index 0000000..6086145
 --- /dev/null
 +++ b/protocol/group/autoban.go
-@@ -0,0 +1,928 @@
+@@ -0,0 +1,1006 @@
 +package group
 +
 +import (
++	"bytes"
 +	"context"
 +	"encoding/json"
 +	"io"
@@ -142,6 +145,7 @@ new file mode 100644
 +	dirty             bool
 +	flushTimer        *time.Timer
 +	stopped           bool
++	recentResults     []resultSample
 +}
 +
 +type nodeState struct {
@@ -161,6 +165,11 @@ new file mode 100644
 +}
 +
 +// AutoBanOptions is the constructor input for AutoBan v3.
++type resultSample struct {
++	at time.Time
++	ok bool
++}
++
 +type AutoBanOptions struct {
 +	Threshold         int
 +	Times             []time.Time // deprecated, kept for config compatibility
@@ -206,6 +215,9 @@ new file mode 100644
 +	defaultAutoBanStaleTTL          = 7 * 24 * time.Hour
 +	defaultAutoBanRecoverSuccesses   = 2
 +	defaultAutoBanFlushDelay         = 3 * time.Second
++	massFailWindow                    = 2 * time.Minute
++	massFailMinSamples                = 10
++	massFailRatio                     = 0.8
 +	defaultAutoBanNeutralScore      = 80.0
 +	defaultAutoBanInitialScore      = 100.0
 +	defaultAutoBanSuccessAlpha      = 0.3
@@ -287,7 +299,6 @@ new file mode 100644
 +		closed:            make(chan struct{}),
 +		recoverSuccesses:  recoverSuccesses,
 +		flushDelay:        flushDelay,
-+		httpClient:        newProtectedHTTPClient(ctx, options.ProbeTimeout),
 +	}
 +}
 +
@@ -314,9 +325,21 @@ new file mode 100644
 +	}
 +}
 +
++// ensureHTTPClient lazily creates the protected HTTP client. Construction is
++// deferred until first use because NetworkManager may not be injected into the
++// service context when NewAutoBan is called during early startup.
++func (a *AutoBan) ensureHTTPClient() {
++	if a.httpClient == nil {
++		a.httpClient = newProtectedHTTPClient(a.ctx, a.probeTimeout)
++	}
++}
++
 +// Start launches the active recovery loop. It is idempotent.
 +func (a *AutoBan) Start() {
 +	a.startOnce.Do(func() {
++		if a.logger != nil && a.threshold > 3 {
++			a.logger.Warn("auto_ban: fail_threshold=", a.threshold, " but score-based ban may trigger earlier; consider fail_threshold<=3 or adjust ban_threshold/recover_threshold")
++		}
 +		go a.recoveryLoop()
 +	})
 +}
@@ -354,7 +377,9 @@ new file mode 100644
 +		}
 +		b.WriteRune(r)
 +	}
-+	return strings.Join(strings.Fields(b.String()), " ")
++	// Remove ALL whitespace so "HK-01 | 1.5x" and "HK-01|1.5x" share the same key,
++	// while different multiplier lines still remain distinct.
++	return strings.Join(strings.Fields(b.String()), "")
 +}
 +
 +func (a *AutoBan) keyOf(tag string) string {
@@ -492,6 +517,10 @@ new file mode 100644
 +}
 +
 +func (a *AutoBan) recordResultLocked(tag string, delay uint16, ok bool, now time.Time) (banCb func(string), unbanCb func(string)) {
++	if a.stopped {
++		return nil, nil
++	}
++	a.recordResultSampleLocked(now, ok)
 +	n := a.getOrCreateLocked(tag)
 +	wasBanned := a.bannedLocked(n, now)
 +	wasStriked := a.strikedLocked(n)
@@ -512,6 +541,13 @@ new file mode 100644
 +		n.ConsecutiveSuccesses++
 +		n.Backoff = 0
 +		n.NextProbeAt = time.Time{}
++	} else if a.massFailureLocked(now) {
++		// Mass environment failure (GFW/QoS/network switch): mark the node
++		// temporarily Striked but do NOT advance ban score/backoff. This prevents
++		// a whole subscription from being permanently banned during an outage.
++		n.LastFailAt = now
++		n.LastProbeAt = now
++		n.ConsecutiveSuccesses = 0
 +	} else {
 +		n.ConsecutiveFails++
 +		penalty := defaultAutoBanFailureAlpha * (1 + 0.25*float64(n.ConsecutiveFails-1))
@@ -587,6 +623,36 @@ new file mode 100644
 +		return false
 +	}
 +	return a.blockedLocked(n, now)
++}
++
++func (a *AutoBan) recordResultSampleLocked(now time.Time, ok bool) {
++	a.recentResults = append(a.recentResults, resultSample{at: now, ok: ok})
++	cutoff := now.Add(-massFailWindow)
++	keep := 0
++	for keep < len(a.recentResults) && a.recentResults[keep].at.Before(cutoff) {
++		keep++
++	}
++	if keep > 0 {
++		a.recentResults = append([]resultSample(nil), a.recentResults[keep:]...)
++	}
++}
++
++func (a *AutoBan) massFailureLocked(now time.Time) bool {
++	if len(a.recentResults) < massFailMinSamples {
++		return false
++	}
++	cutoff := now.Add(-massFailWindow)
++	var total, failed int
++	for _, sample := range a.recentResults {
++		if sample.at.Before(cutoff) {
++			continue
++		}
++		total++
++		if !sample.ok {
++			failed++
++		}
++	}
++	return total >= massFailMinSamples && float64(failed)/float64(total) >= massFailRatio
 +}
 +
 +// Snapshot returns a stable, sorted view of tracked node states for UI.
@@ -692,6 +758,7 @@ new file mode 100644
 +	for key, n := range a.nodes {
 +		if !currentKeys[key] && !n.LastUpdate.IsZero() && now.Sub(n.LastUpdate) > staleTTL {
 +			delete(a.nodes, key)
++			a.dirty = true
 +		}
 +	}
 +	a.access.Unlock()
@@ -899,7 +966,11 @@ new file mode 100644
 +		return
 +	}
 +	path := filemanager.BasePath(a.ctx, a.path)
-+	_ = filemanager.WriteFile(a.ctx, path, content, 0o644)
++	tmpPath := path + ".tmp"
++	if err := os.WriteFile(tmpPath, content, 0o644); err != nil {
++		return
++	}
++	_ = os.Rename(tmpPath, path)
 +}
 +
 +// isNetworkHealthy runs/caches a multi-target direct pre-flight probe.
@@ -925,6 +996,7 @@ new file mode 100644
 +		return a.healthOK
 +	}
 +
++	a.ensureHTTPClient()
 +	ok := a.probeNetwork()
 +	changed := a.healthChecked.IsZero() || a.healthOK != ok
 +	a.healthChecked = time.Now()
@@ -968,8 +1040,16 @@ new file mode 100644
 +		return false
 +	}
 +	defer resp.Body.Close()
-+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
-+	return resp.StatusCode >= 200 && resp.StatusCode < 300
++	if resp.StatusCode == http.StatusNoContent {
++		return true
++	}
++	if resp.StatusCode != http.StatusOK {
++		return false
++	}
++	// Some captive portals return HTTP 200 with an HTML login page. A real
++	// generate_204 endpoint should return an empty body.
++	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
++	return len(bytes.TrimSpace(body)) == 0
 +}
 +
 +func jitterDuration(d time.Duration) time.Duration {
@@ -983,9 +1063,10 @@ new file mode 100644
 +	return time.Duration(rand.Int63n(int64(maxJitter)))
 +}
 diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
+index 77125cd..5729d30 100644
 --- a/protocol/group/urltest.go
 +++ b/protocol/group/urltest.go
-@@ -2,6 +2,8 @@
+@@ -2,6 +2,8 @@ package group
  
  import (
  	"context"
@@ -994,7 +1075,7 @@ diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
  	"net"
  	"regexp"
  	"sync"
-@@ -48,6 +50,7 @@
+@@ -48,6 +50,7 @@ type URLTest struct {
  	fallback                     URLTestFallback
  	group                        *URLTestGroup
  	interruptExternalConnections bool
@@ -1002,7 +1083,7 @@ diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
  
  	provider       adapter.ProviderManager
  	providers      map[string]adapter.Provider
-@@ -94,6 +97,40 @@
+@@ -94,6 +97,40 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
  			maxDelay: uint16(time.Duration(options.Fallback.MaxDelay).Milliseconds()),
  		}
  	}
@@ -1043,7 +1124,7 @@ diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
  	return outbound, nil
  }
  
-@@ -138,6 +175,41 @@
+@@ -138,6 +175,41 @@ func (s *URLTest) Start() error {
  		return err
  	}
  	s.group = group
@@ -1085,7 +1166,7 @@ diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
  	return nil
  }
  
-@@ -147,6 +219,9 @@
+@@ -147,6 +219,9 @@ func (s *URLTest) PostStart() error {
  }
  
  func (s *URLTest) Close() error {
@@ -1095,7 +1176,7 @@ diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
  	return common.Close(
  		common.PtrOrNil(s.group),
  	)
-@@ -162,9 +237,21 @@
+@@ -162,9 +237,21 @@ func (s *URLTest) Now() string {
  }
  
  func (s *URLTest) All() []string {
@@ -1117,7 +1198,7 @@ diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
  func (s *URLTest) SelectPreMatchOutbound(metadata *adapter.InboundContext, selectOutbound func(adapter.Outbound) (adapter.Outbound, adapter.PreMatchAction)) (adapter.Outbound, adapter.PreMatchAction) {
  	s.group.Touch()
  	network := metadata.Network
-@@ -347,6 +434,7 @@
+@@ -347,6 +434,7 @@ type URLTestGroup struct {
  	lastActive                   common.TypedValue[time.Time]
  
  	fallback URLTestFallback
@@ -1125,7 +1206,7 @@ diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
  }
  
  func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, fallback URLTestFallback, interruptExternalConnections bool) (*URLTestGroup, error) {
-@@ -427,16 +515,27 @@
+@@ -427,16 +515,33 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  	var minOutbound adapter.Outbound
  	var fallbackIgnoreOutboundDelay uint16
  	var fallbackIgnoreOutbound adapter.Outbound
@@ -1143,6 +1224,9 @@ diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
  	switch network {
  	case N.NetworkTCP:
 -		if g.selectedOutboundTCP != nil {
++		if g.selectedOutboundTCP != nil && g.autoBan != nil && g.autoBan.Blocked(RealTag(g.selectedOutboundTCP)) {
++			g.logger.Warn("auto_ban: selected outbound ", g.selectedOutboundTCP.Tag(), " is blocked; using automatic selection")
++		}
 +		if g.selectedOutboundTCP != nil && usable(g.selectedOutboundTCP) {
  			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundTCP)); history != nil {
  				minOutbound = g.selectedOutboundTCP
@@ -1151,11 +1235,14 @@ diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
  		}
  	case N.NetworkUDP:
 -		if g.selectedOutboundUDP != nil {
++		if g.selectedOutboundUDP != nil && g.autoBan != nil && g.autoBan.Blocked(RealTag(g.selectedOutboundUDP)) {
++			g.logger.Warn("auto_ban: selected outbound ", g.selectedOutboundUDP.Tag(), " is blocked; using automatic selection")
++		}
 +		if g.selectedOutboundUDP != nil && usable(g.selectedOutboundUDP) {
  			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundUDP)); history != nil {
  				minOutbound = g.selectedOutboundUDP
  				minDelay = history.Delay
-@@ -444,7 +543,7 @@
+@@ -444,7 +549,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  		}
  	}
  	for _, detour := range g.outbounds {
@@ -1164,7 +1251,7 @@ diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
  			continue
  		}
  		history := g.history.LoadURLTestHistory(RealTag(detour))
-@@ -476,17 +575,73 @@
+@@ -476,17 +581,73 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  		return fallbackIgnoreOutbound, true
  	}
  	if minOutbound == nil {
@@ -1243,7 +1330,19 @@ diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
  func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{}) {
  	if time.Since(g.lastActive.Load()) > g.interval {
  		g.lastActive.Store(time.Now())
-@@ -552,12 +707,18 @@
+@@ -536,6 +697,11 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
+ 		if checked[realTag] {
+ 			continue
+ 		}
++		if !force && g.autoBan != nil && g.autoBan.Blocked(realTag) {
++			// Passive interval tests should not bypass AutoBan backoff. Blocked
++			// nodes are probed by the active recovery worker pool instead.
++			continue
++		}
+ 		history := g.history.LoadURLTestHistory(realTag)
+ 		if !force && history != nil && time.Since(history.Time) < g.interval {
+ 			continue
+@@ -552,12 +718,18 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
  			if err != nil {
  				g.logger.Debug("outbound ", tag, " unavailable: ", err)
  				g.history.DeleteURLTestHistory(realTag)
