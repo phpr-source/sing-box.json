@@ -100,7 +100,7 @@ which file/hunk conflicted.
 }
 ```
 
-> All patches verified against `reF1nd-stable` / `reF1nd-testing` (2026-08-12),
+> All patches verified against `reF1nd-stable` / `reF1nd-testing` (2026-08-21),
 > source: [yagh779/sing-box-releases](https://github.com/yagh779/sing-box-releases) (patches branch),
 > regenerated against current upstream. `null_ip_reject.patch` from the same source
 > was **not** adopted (DNS reply semantics, upstream itself leaves it unapplied).
