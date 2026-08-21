@@ -2,10 +2,10 @@
 
 > 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的 Stable 和 Testing 分支。
 
-## 📦 最新版本狀態 (2026-08-21)
+## 📦 最新版本狀態 (2026-08-21 23:35 UTC+8)
 
-- ✅ **reF1nd_Stable** `1.13.19-reF1nd` ([Release](https://github.com/phpr-source/sing-box.json/releases/tag/sing-box-stable))
-- 🧪 **reF1nd_Testing** `1.14.0-beta.17-reF1nd` ([Release](https://github.com/phpr-source/sing-box.json/releases/tag/sing-box-testing))
+- ✨ 更新 **[reF1nd_Stable](https://github.com/reF1nd/sing-box/tree/reF1nd-stable)** 至 `v1.13.19-reF1nd`，發佈於 2026-08-18 [reF1nd_Stable v1.13.19-reF1nd]
+- ✨ 更新 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** 至 `v1.14.0-beta.17-reF1nd`，發佈於 2026-08-18 [reF1nd_Testing v1.14.0-beta.17-reF1nd]
 
 ---
 
@@ -20,23 +20,6 @@ bash <(curl -sSL https://github.com/phpr-source/sing-box.json/releases/download/
 ```bash
 bash <(curl -sSL https://github.com/phpr-source/sing-box.json/releases/download/sing-box-testing/install-linux.sh) testing
 ```
-
-## 📱 Android SFA 下載
-
-SFA APK 已附在 Release Assets 中，請直接前往：
-
-- Stable：[sing-box-stable Release](https://github.com/phpr-source/sing-box.json/releases/tag/sing-box-stable)
-- Testing：[sing-box-testing Release](https://github.com/phpr-source/sing-box.json/releases/tag/sing-box-testing)
-
-在 Assets 區塊中選擇符合你裝置架構的 APK：
-
-| 架構 | 建議 |
-|---|---|
-| `arm64-v8a` | 近五年主流 Android 手機 |
-| `armeabi-v7a` | 較舊 32-bit 手機 |
-| `x86_64` / `x86` | 模擬器或 Intel Android 裝置 |
-| `universal` | 全架構通用包，體積最大 |
-| `legacy-android-5-*` | Android 5.x 舊系統專用 |
 
 ## 📦 文件命名規則
 
