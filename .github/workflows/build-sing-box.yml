@@ -1966,6 +1966,33 @@ jobs:
             done
           done
 
+      - name: Add SFA section to release body
+        if: always()
+        run: |
+          set -euo pipefail
+          TAG_MAP=$(cat ./tmp/build-info/tag_map.json 2>/dev/null || echo '{}')
+          for apk_dir in ./tmp/apk-*; do
+            [ -d "$apk_dir" ] || continue
+            target_id=$(basename "$apk_dir" | sed 's/apk-//')
+            tag=$(echo "$TAG_MAP" | jq -r --arg tid "$target_id" '.[$tid] // empty')
+            [ -n "$tag" ] || continue
+            body=$(gh release view "$tag" --json body -q .body 2>/dev/null || true)
+            {
+              echo "$body"
+              echo ""
+              echo "## 📱 SFA (Android) 下載"
+              echo ""
+              echo '| 檔案 | 架構 |'
+              echo '|---|---|'
+              for f in "$apk_dir"/*.apk; do
+                [ -f "$f" ] || continue
+                name=$(basename "$f")
+                echo "| [$name](https://github.com/${{ github.repository }}/releases/download/$tag/$name) | APK |"
+              done
+            } > /tmp/sfa_body_${target_id}.md
+            gh release edit "$tag" --notes-file "/tmp/sfa_body_${target_id}.md" --repo ${{ github.repository }} 2>&1 || echo "::warning::Failed to update release body for $tag"
+          done
+
   publish_apple:
     runs-on: ubuntu-latest
     needs: [check, build_apple, publish_core]
