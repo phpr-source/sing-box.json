@@ -18,7 +18,7 @@ patches/
 
 ## How to Add a Patch
 
-1. Make your change inside a lokal checkout of
+1. Make your change inside a local checkout of
    [`reF1nd/sing-box`](https://github.com/reF1nd/sing-box).
 2. Generate the patch:
    ```bash
