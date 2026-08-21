@@ -54,10 +54,10 @@ index dfec153..787e2a7 100644
  type GroupCommonOption struct {
 diff --git a/protocol/group/autoban.go b/protocol/group/autoban.go
 new file mode 100644
-index 0000000..23dba46
+index 0000000..f950a78
 --- /dev/null
 +++ b/protocol/group/autoban.go
-@@ -0,0 +1,1220 @@
+@@ -0,0 +1,1244 @@
 +package group
 +
 +import (
@@ -151,6 +151,7 @@ index 0000000..23dba46
 +	stopped           bool
 +	recentResults     []resultSample
 +	lastSweepAt       time.Time
++	cooldown          time.Duration
 +}
 +
 +type nodeState struct {
@@ -210,6 +211,7 @@ index 0000000..23dba46
 +const (
 +	defaultAutoBanFailThreshold     = 5
 +	defaultAutoBanProbeTimeout      = 3 * time.Second
++	defaultAutoBanStrikeCooldown    = 5 * time.Minute
 +	defaultAutoBanProbeInterval     = 30 * time.Second
 +	defaultAutoBanRecoveryInterval  = 1 * time.Minute
 +	defaultAutoBanInitialBackoff    = 1 * time.Minute
@@ -271,6 +273,10 @@ index 0000000..23dba46
 +	if recoverSuccesses <= 0 {
 +		recoverSuccesses = defaultAutoBanRecoverSuccesses
 +	}
++	cooldown := options.Cooldown
++	if cooldown <= 0 {
++		cooldown = defaultAutoBanStrikeCooldown
++	}
 +	flushDelay := options.FlushDelay
 +	if flushDelay <= 0 {
 +		flushDelay = defaultAutoBanFlushDelay
@@ -315,6 +321,7 @@ index 0000000..23dba46
 +		closed:            make(chan struct{}),
 +		recoverSuccesses:  recoverSuccesses,
 +		flushDelay:        flushDelay,
++		cooldown:          cooldown,
 +	}
 +}
 +
@@ -544,15 +551,23 @@ index 0000000..23dba46
 +}
 +
 +func (a *AutoBan) strikedLocked(n *nodeState) bool {
-+	if n.ConsecutiveFails > 0 {
-+		return true
++	if n.LastFailAt.IsZero() {
++		return false
 +	}
-+	if !n.LastFailAt.IsZero() && !n.LastSuccessAt.After(n.LastFailAt) {
++	// Temporary strike cooldown: an old single failure should not permanently
++	// block a node across restarts or long idle periods.
++	if a.cooldown > 0 && time.Since(n.LastFailAt) > a.cooldown {
++		return false
++	}
++	if !n.LastSuccessAt.IsZero() && n.LastSuccessAt.After(n.LastFailAt) {
++		return false
++	}
++	if n.ConsecutiveFails > 0 {
 +		return true
 +	}
 +	// Hysteresis: a single lucky success after a failure is not enough to
 +	// immediately route traffic back. Require a few consecutive successes.
-+	if !n.LastFailAt.IsZero() && n.ConsecutiveSuccesses < a.recoverSuccesses {
++	if n.ConsecutiveSuccesses < a.recoverSuccesses {
 +		return true
 +	}
 +	return false
@@ -859,6 +874,11 @@ index 0000000..23dba46
 +			a.dirty = true
 +		}
 +	}
++	if len(tasks) == 0 && a.dirty {
++		// Persist GC even when there is nothing to probe; otherwise removed
++		// subscription nodes would resurrect on restart.
++		a.saveLocked()
++	}
 +	a.access.Unlock()
 +
 +	if len(tasks) == 0 {
@@ -956,6 +976,10 @@ index 0000000..23dba46
 +		wait := time.Until(next)
 +		if wait > 2*time.Minute {
 +			wait += jitterDuration(2 * time.Minute)
++		}
++		const maxSweepStep = 10 * time.Minute
++		if wait > maxSweepStep {
++			wait = maxSweepStep
 +		}
 +		if wait < 0 {
 +			wait = 0
@@ -1279,7 +1303,7 @@ index 0000000..23dba46
 +	return time.Duration(rand.Int63n(int64(maxJitter)))
 +}
 diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
-index 77125cd..0767f34 100644
+index 77125cd..42b2cbb 100644
 --- a/protocol/group/urltest.go
 +++ b/protocol/group/urltest.go
 @@ -2,6 +2,8 @@ package group
@@ -1399,7 +1423,7 @@ index 77125cd..0767f34 100644
  	return common.Close(
  		common.PtrOrNil(s.group),
  	)
-@@ -162,9 +244,71 @@ func (s *URLTest) Now() string {
+@@ -162,9 +244,82 @@ func (s *URLTest) Now() string {
  }
  
  func (s *URLTest) All() []string {
@@ -1433,12 +1457,23 @@ index 77125cd..0767f34 100644
 +	}
 +	if s.group != nil {
 +		for _, detour := range s.group.outbounds {
-+			if RealTag(detour) == tag {
-+				if p, loaded := s.outbound.Outbound(detour.Tag()); loaded {
-+					if _, isGroup := p.(adapter.OutboundGroup); !isGroup {
-+						return p
-+					}
++			if RealTag(detour) != tag {
++				continue
++			}
++			// Selector groups expose the actual selected outbound directly.
++			if selector, ok := detour.(adapter.SelectorGroup); ok {
++				if selected := selector.Selected(); selected != nil {
++					return selected
 +				}
++			}
++			// Fallback: return whatever the manager has for this member tag. It
++			// may be a nested group; probing the group lets the group itself
++			// resolve to its current node rather than returning nil.
++			if p, loaded := s.outbound.Outbound(detour.Tag()); loaded {
++				return p
++			}
++			if _, isGroup := detour.(adapter.OutboundGroup); !isGroup {
++				return detour
 +			}
 +		}
 +	}
@@ -1451,7 +1486,7 @@ index 77125cd..0767f34 100644
 +	if s.group == nil {
 +		return E.New("urltest group not started")
 +	}
-+	s.group.manualTag = tag
++	s.group.manualTag.Store(tag)
 +	return nil
 +}
 +
@@ -1471,7 +1506,7 @@ index 77125cd..0767f34 100644
  func (s *URLTest) SelectPreMatchOutbound(metadata *adapter.InboundContext, selectOutbound func(adapter.Outbound) (adapter.Outbound, adapter.PreMatchAction)) (adapter.Outbound, adapter.PreMatchAction) {
  	s.group.Touch()
  	network := metadata.Network
-@@ -345,8 +489,11 @@ type URLTestGroup struct {
+@@ -345,8 +500,11 @@ type URLTestGroup struct {
  	close                        chan struct{}
  	started                      bool
  	lastActive                   common.TypedValue[time.Time]
@@ -1483,7 +1518,7 @@ index 77125cd..0767f34 100644
  }
  
  func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, fallback URLTestFallback, interruptExternalConnections bool) (*URLTestGroup, error) {
-@@ -427,16 +574,41 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -427,16 +585,41 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  	var minOutbound adapter.Outbound
  	var fallbackIgnoreOutboundDelay uint16
  	var fallbackIgnoreOutbound adapter.Outbound
@@ -1527,7 +1562,7 @@ index 77125cd..0767f34 100644
  			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundUDP)); history != nil {
  				minOutbound = g.selectedOutboundUDP
  				minDelay = history.Delay
-@@ -444,7 +616,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -444,7 +627,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  		}
  	}
  	for _, detour := range g.outbounds {
@@ -1536,7 +1571,7 @@ index 77125cd..0767f34 100644
  			continue
  		}
  		history := g.history.LoadURLTestHistory(RealTag(detour))
-@@ -476,17 +648,69 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -476,17 +659,69 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  		return fallbackIgnoreOutbound, true
  	}
  	if minOutbound == nil {
@@ -1611,7 +1646,7 @@ index 77125cd..0767f34 100644
  func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{}) {
  	if time.Since(g.lastActive.Load()) > g.interval {
  		g.lastActive.Store(time.Now())
-@@ -527,6 +751,11 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
+@@ -527,6 +762,11 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
  		return result, nil
  	}
  	defer g.checking.Store(false)
@@ -1623,7 +1658,7 @@ index 77125cd..0767f34 100644
  	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
  	checked := make(map[string]bool)
  	var resultAccess sync.Mutex
-@@ -536,6 +765,11 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
+@@ -536,6 +776,11 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
  		if checked[realTag] {
  			continue
  		}
@@ -1635,7 +1670,7 @@ index 77125cd..0767f34 100644
  		history := g.history.LoadURLTestHistory(realTag)
  		if !force && history != nil && time.Since(history.Time) < g.interval {
  			continue
-@@ -552,12 +786,18 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
+@@ -552,12 +797,18 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
  			if err != nil {
  				g.logger.Debug("outbound ", tag, " unavailable: ", err)
  				g.history.DeleteURLTestHistory(realTag)

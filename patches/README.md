@@ -66,7 +66,7 @@ which file/hunk conflicted.
 
 | Patch | Effect |
 |---|---|
-| `urltest-autoban.patch` | **urltest 智能健康淘汰（AutoBan v4.5）**：`auto_ban` 配置块——EWMA 动态健康评分 + 被动单次失败熔断 + 主动指数退避恢复 + 每日固定时段全局大考（`check_times`）+ 群体故障防误杀 + 多目标 HTTPS 204 竞速探针 + TUN Protected Dialer + I/O 防抖 + 多 Group Hash 文件隔离 + `pinned_tags` 手动选择豁免。状态持久化默认 `autoban_<group>_<hash>.json`。本地原创设计（非上游移植） |
+| `urltest-autoban.patch` | **urltest 智能健康淘汰（AutoBan v4.6）**：`auto_ban` 配置块——EWMA 动态健康评分 + 被动单次失败熔断 + 主动指数退避恢复 + 每日固定时段全局大考（`check_times`）+ 群体故障防误杀 + 多目标 HTTPS 204 竞速探针 + TUN Protected Dialer + I/O 防抖 + 多 Group Hash 文件隔离 + `pinned_tags` 手动选择豁免。状态持久化默认 `autoban_<group>_<hash>.json`。本地原创设计（非上游移植） |
 | `xhttp-wiring.patch` | XHTTP 接入：`transport/v2rayxhttp/`（10 文件）+ `constant/v2ray.go`（+`xhttp` 类型）+ `option/v2ray_transport.go`（XHTTP 选项，含本地 `Range[T]` 替代私有 sing fork 的 `badoption.Range`）+ `option/range.go` + `transport/v2ray/transport.go` 注册 + `transport/v2rayhttp/conn.go`（HWIDContext）。**分支差异**：testing 版适配 sing-quic v0.7 API（`qtls.DialEarly` 签名变化），stable 版用 v0.6；testing 版含 `DescribeSchema` 变体 |
 | `make_log_better_option.patch` | Expose `disable_color` as a JSON log option (per-branch variant: branch layouts differ) |
 
