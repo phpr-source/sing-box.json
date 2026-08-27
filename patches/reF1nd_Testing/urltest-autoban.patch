@@ -1303,7 +1303,7 @@ index 0000000..f950a78
 +	return time.Duration(rand.Int63n(int64(maxJitter)))
 +}
 diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
-index 77125cd..42b2cbb 100644
+index ea54ca9..6919084 100644
 --- a/protocol/group/urltest.go
 +++ b/protocol/group/urltest.go
 @@ -2,6 +2,8 @@ package group
@@ -1315,15 +1315,15 @@ index 77125cd..42b2cbb 100644
  	"net"
  	"regexp"
  	"sync"
-@@ -48,6 +50,7 @@ type URLTest struct {
- 	fallback                     URLTestFallback
+@@ -49,6 +51,7 @@ type URLTest struct {
  	group                        *URLTestGroup
+ 	checkAccess                  sync.Mutex
  	interruptExternalConnections bool
 +	autoBan                      *AutoBan
  
  	provider       adapter.ProviderManager
  	providers      map[string]adapter.Provider
-@@ -94,6 +97,47 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -95,6 +98,47 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
  			maxDelay: uint16(time.Duration(options.Fallback.MaxDelay).Milliseconds()),
  		}
  	}
@@ -1371,7 +1371,7 @@ index 77125cd..42b2cbb 100644
  	return outbound, nil
  }
  
-@@ -138,6 +182,41 @@ func (s *URLTest) Start() error {
+@@ -139,6 +183,41 @@ func (s *URLTest) Start() error {
  		return err
  	}
  	s.group = group
@@ -1413,7 +1413,7 @@ index 77125cd..42b2cbb 100644
  	return nil
  }
  
-@@ -147,6 +226,9 @@ func (s *URLTest) PostStart() error {
+@@ -148,6 +227,9 @@ func (s *URLTest) PostStart() error {
  }
  
  func (s *URLTest) Close() error {
@@ -1423,7 +1423,7 @@ index 77125cd..42b2cbb 100644
  	return common.Close(
  		common.PtrOrNil(s.group),
  	)
-@@ -162,9 +244,82 @@ func (s *URLTest) Now() string {
+@@ -163,9 +245,70 @@ func (s *URLTest) Now() string {
  }
  
  func (s *URLTest) All() []string {
@@ -1450,9 +1450,7 @@ index 77125cd..42b2cbb 100644
 +}
 +
 +// resolveOutbound tries the global outbound manager first, then falls back to
-+// the immediate group member that matches the real tag. For nested groups the
-+// group outbound itself is returned as a last resort; URLTest can delegate to
-+// the group's current selected node through its normal dial path.
++// scanning immediate group members for nested-group configurations.
 +func (s *URLTest) resolveOutbound(tag string) adapter.Outbound {
 +	if p, loaded := s.outbound.Outbound(tag); loaded {
 +		return p
@@ -1496,7 +1494,7 @@ index 77125cd..42b2cbb 100644
  func (s *URLTest) SelectPreMatchOutbound(metadata *adapter.InboundContext, selectOutbound func(adapter.Outbound) (adapter.Outbound, adapter.PreMatchAction)) (adapter.Outbound, adapter.PreMatchAction) {
  	s.group.Touch()
  	network := metadata.Network
-@@ -345,8 +500,11 @@ type URLTestGroup struct {
+@@ -358,8 +501,11 @@ type URLTestGroup struct {
  	close                        chan struct{}
  	started                      bool
  	lastActive                   common.TypedValue[time.Time]
@@ -1508,7 +1506,7 @@ index 77125cd..42b2cbb 100644
  }
  
  func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, fallback URLTestFallback, interruptExternalConnections bool) (*URLTestGroup, error) {
-@@ -427,16 +585,41 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -440,16 +586,41 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  	var minOutbound adapter.Outbound
  	var fallbackIgnoreOutboundDelay uint16
  	var fallbackIgnoreOutbound adapter.Outbound
@@ -1552,7 +1550,7 @@ index 77125cd..42b2cbb 100644
  			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundUDP)); history != nil {
  				minOutbound = g.selectedOutboundUDP
  				minDelay = history.Delay
-@@ -444,7 +627,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -457,7 +628,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  		}
  	}
  	for _, detour := range g.outbounds {
@@ -1561,7 +1559,7 @@ index 77125cd..42b2cbb 100644
  			continue
  		}
  		history := g.history.LoadURLTestHistory(RealTag(detour))
-@@ -476,17 +659,69 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -489,17 +660,69 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  		return fallbackIgnoreOutbound, true
  	}
  	if minOutbound == nil {
@@ -1636,7 +1634,7 @@ index 77125cd..42b2cbb 100644
  func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{}) {
  	if time.Since(g.lastActive.Load()) > g.interval {
  		g.lastActive.Store(time.Now())
-@@ -527,6 +762,11 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
+@@ -545,6 +768,11 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
  		return result, nil
  	}
  	defer g.checking.Store(false)
@@ -1648,7 +1646,7 @@ index 77125cd..42b2cbb 100644
  	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
  	checked := make(map[string]bool)
  	var resultAccess sync.Mutex
-@@ -536,6 +776,11 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
+@@ -554,6 +782,11 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
  		if checked[realTag] {
  			continue
  		}
@@ -1660,22 +1658,22 @@ index 77125cd..42b2cbb 100644
  		history := g.history.LoadURLTestHistory(realTag)
  		if !force && history != nil && time.Since(history.Time) < g.interval {
  			continue
-@@ -552,12 +797,18 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
- 			if err != nil {
- 				g.logger.Debug("outbound ", tag, " unavailable: ", err)
+@@ -580,12 +813,18 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
+ 			if testResult.err != nil {
+ 				g.logger.Debug("outbound ", tag, " unavailable: ", testResult.err)
  				g.history.DeleteURLTestHistory(realTag)
 +				if g.autoBan != nil {
 +					g.autoBan.RecordResult(realTag, 0, false)
 +				}
  			} else {
- 				g.logger.Debug("outbound ", tag, " available: ", t, "ms")
+ 				g.logger.Debug("outbound ", tag, " available: ", testResult.delay, "ms")
  				g.history.StoreURLTestHistory(realTag, &adapter.URLTestHistory{
  					Time:  time.Now(),
- 					Delay: t,
+ 					Delay: testResult.delay,
  				})
 +				if g.autoBan != nil {
-+					g.autoBan.RecordResult(realTag, t, true)
++					g.autoBan.RecordResult(realTag, testResult.delay, true)
 +				}
  				resultAccess.Lock()
- 				result[tag] = t
+ 				result[tag] = testResult.delay
  				resultAccess.Unlock()
