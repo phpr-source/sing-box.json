@@ -1450,29 +1450,19 @@ index e9bb898..573efde 100644
 +}
 +
 +// resolveOutbound tries the global outbound manager first, then falls back to
-+// scanning immediate group members for nested-group configurations.
++// the immediate group member that matches the real tag. For nested groups the
++// group outbound itself is returned as a last resort; URLTest can delegate to
++// the group's current selected node through its normal dial path.
 +func (s *URLTest) resolveOutbound(tag string) adapter.Outbound {
 +	if p, loaded := s.outbound.Outbound(tag); loaded {
 +		return p
 +	}
 +	if s.group != nil {
 +		for _, detour := range s.group.outbounds {
-+			if RealTag(detour) != tag {
-+				continue
-+			}
-+			// Selector groups expose the actual selected outbound directly.
-+			if selector, ok := detour.(adapter.SelectorGroup); ok {
-+				if selected := selector.Selected(); selected != nil {
-+					return selected
++			if RealTag(detour) == tag {
++				if p, loaded := s.outbound.Outbound(detour.Tag()); loaded {
++					return p
 +				}
-+			}
-+			// Fallback: return whatever the manager has for this member tag. It
-+			// may be a nested group; probing the group lets the group itself
-+			// resolve to its current node rather than returning nil.
-+			if p, loaded := s.outbound.Outbound(detour.Tag()); loaded {
-+				return p
-+			}
-+			if _, isGroup := detour.(adapter.OutboundGroup); !isGroup {
 +				return detour
 +			}
 +		}
