@@ -2655,7 +2655,11 @@ jobs:
     # needs 必須與 create_issue_on_failure 完全一致（含 finalize、telegram_notify），
     # 否則兩者的 success()/failure() 判據不對稱，會出現「部分流程仍失敗卻關閉 issue」。
     needs: [build_core, build_android, build_apple, publish_core, publish_android, publish_apple, finalize, telegram_notify]
-    if: success() && (github.event_name == 'schedule' || github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # 必須用 always()：上游作業在「無新版可編」時會被 skip，而 needs 中有任一 job 被 skip
+    # 時，下游作業預設一併 skip（即使 success() 成立也不會執行），實測本 job 因此從未執行。
+    # 改為 always() + !failure() + !cancelled()：上游任一失敗 -> 不關單；
+    # 全部 skip 或全部成功 -> 正常執行（對齊 finalize 的 always() && !cancelled() 寫法）。
+    if: always() && !failure() && !cancelled() && (github.event_name == 'schedule' || github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
