@@ -17,7 +17,9 @@ jobs:
 
       - name: Verify patches against upstream branches
         run: |
-          set -e
+          # 對齊 build-sing-box.yml 構建步驟的 set -euo pipefail 慣例，
+          # 避免未定義變數被靜默當作空字串。
+          set -euo pipefail
           FAILED=0
           FAILED_MSG=""
           for branch in reF1nd-stable reF1nd-testing; do
@@ -32,7 +34,21 @@ jobs:
               for p in "patches/$dir"/*.patch; do
                 [ -f "$p" ] || continue
                 if git -C /tmp/sing-box apply --check "$PWD/$p" 2>/tmp/patch_err.txt; then
-                  echo "OK: $branch / $dir / $(basename "$p")"
+                  # 檢查通過後需真正套用：構建流程（build-sing-box.yml Apply Patches）
+                  # 是 common → target 順序「累積套用」，若此處只對乾淨樹逐一 --check，
+                  # 檢查結果與實際構建不等價，會產生漏報或誤報。
+                  if git -C /tmp/sing-box apply "$PWD/$p" 2>>/tmp/patch_err.txt; then
+                    echo "OK: $branch / $dir / $(basename "$p")"
+                  else
+                    echo "::error::PATCH APPLY FAILED（--check 通過但實際套用失敗）: $branch / $dir / $(basename "$p")"
+                    cat /tmp/patch_err.txt
+                    FAILED=1
+                    FAILED_MSG="${FAILED_MSG}- $branch / $dir / $(basename "$p") (apply failed)"$'\n'
+                    # 累積上下文已不可靠，重置工作樹並跳出本分支剩餘 patch
+                    # （下一個 branch 開頭會重新 clone，無需在此清理）
+                    git -C /tmp/sing-box checkout -- .
+                    break
+                  fi
                 else
                   echo "::error::PATCH BROKEN: $branch / $dir / $(basename "$p")"
                   cat /tmp/patch_err.txt
@@ -44,7 +60,15 @@ jobs:
             rm -rf /tmp/sing-box
           done
           if [ "$FAILED" -eq 1 ]; then
-            echo "failed_msg=$FAILED_MSG" >> "$GITHUB_ENV"
+            # 變數名必須與後續 github-script 中的 process.env.FAILED_MSG 大小寫完全一致，
+            # 大小寫不符會讓值靜默丟失、退回 "Unknown patches failed" 兜底文案。
+            # 多行值必須用 heredoc 分隔符寫入，否則 $GITHUB_ENV 會被寫壞。
+            {
+              echo "FAILED_MSG<<PATCH_EOF_MARKER"
+              printf '%s' "$FAILED_MSG"
+              echo
+              echo "PATCH_EOF_MARKER"
+            } >> "$GITHUB_ENV"
             exit 1
           fi
           echo "All patches apply cleanly against reF1nd-stable and reF1nd-testing."
