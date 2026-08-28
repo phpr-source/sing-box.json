@@ -456,7 +456,21 @@ jobs:
             for p in "$dir"/*.patch; do
               [ -f "$p" ] || continue
               echo "::notice::Applying patch $(basename "$p")"
-              git apply -v "$p"
+              # 直線套用失敗時改以 --3way 重試，上游小幅漂移可自動吸收。
+              # 限制：--3way 需要補丁 index 行引用的 blob 存在於物件庫，而 Checkout Core
+              # 使用 fetch-depth: 1，淺克隆通常不含這些 blob，此時回退不生效並照常報錯
+              # （不會比現狀更糟，但也無法保證有效）。
+              # 無論如何都要明確指出是哪個 dir 的哪個 patch 失敗，避免重演過去
+              # 「只知道 Apply Patches 紅了、不知道是哪個補丁」的狀況。
+              if ! git apply -v "$p" 2>/tmp/patch_err.txt; then
+                echo "::warning::直接套用失敗，嘗試 --3way：$(basename "$p")"
+                cat /tmp/patch_err.txt
+                git apply -v --3way "$p" || {
+                  echo "::error::PATCH FAILED: $(basename "$p") (dir=$dir, target=${{ matrix.target.id }})"
+                  cat /tmp/patch_err.txt
+                  exit 1
+                }
+              fi
               applied=$((applied+1))
             done
           done
@@ -765,6 +779,23 @@ jobs:
             export CXX="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/${NDK_TRIPLE}-clang++"
           fi
 
+          # proxy.golang.org 偶發 HTTP/2 INTERNAL_ERROR（見 run 33086946550）會讓
+          # 30+ 個 matrix job 集體假性失敗。這裡只重試「模組下載」這個真正的失敗點，
+          # 而不是重試整條 go build——後者會讓真實編譯錯誤付出 3 倍全量編譯成本。
+          dl_ok=0
+          for i in 1 2 3; do
+            if go mod download; then
+              dl_ok=1
+              break
+            fi
+            echo "::warning::go mod download 失敗（第 $i 次），10s 後重試…"
+            sleep 10
+          done
+          if [ "$dl_ok" -ne 1 ]; then
+            echo "::error::go mod download 連續 3 次失敗"
+            exit 1
+          fi
+
           go build -v -trimpath -ldflags "$LDFLAGS" -tags "$TAGS_STR" -o "dist/$BIN_NAME" ./cmd/sing-box
 
           echo "{\"target_id\": \"${{ matrix.target.id }}\", \"platform\": \"${{ matrix.platform.name }}\", \"suffix\": \"${{ steps.env.outputs.suffix }}\", \"version_name\": \"${{ matrix.target.ver }}\", \"tags\": \"$TAGS_STR\"}" > dist/artifact-meta.json
@@ -1001,7 +1032,21 @@ jobs:
             for p in "$dir"/*.patch; do
               [ -f "$p" ] || continue
               echo "::notice::Applying patch $(basename "$p")"
-              git apply -v "$p"
+              # 直線套用失敗時改以 --3way 重試，上游小幅漂移可自動吸收。
+              # 限制：--3way 需要補丁 index 行引用的 blob 存在於物件庫，而 Checkout Core
+              # 使用 fetch-depth: 1，淺克隆通常不含這些 blob，此時回退不生效並照常報錯
+              # （不會比現狀更糟，但也無法保證有效）。
+              # 無論如何都要明確指出是哪個 dir 的哪個 patch 失敗，避免重演過去
+              # 「只知道 Apply Patches 紅了、不知道是哪個補丁」的狀況。
+              if ! git apply -v "$p" 2>/tmp/patch_err.txt; then
+                echo "::warning::直接套用失敗，嘗試 --3way：$(basename "$p")"
+                cat /tmp/patch_err.txt
+                git apply -v --3way "$p" || {
+                  echo "::error::PATCH FAILED: $(basename "$p") (dir=$dir, target=${{ matrix.target.id }})"
+                  cat /tmp/patch_err.txt
+                  exit 1
+                }
+              fi
               applied=$((applied+1))
             done
           done
@@ -1372,7 +1417,21 @@ jobs:
             for p in "$dir"/*.patch; do
               [ -f "$p" ] || continue
               echo "::notice::Applying patch $(basename "$p")"
-              git apply -v "$p"
+              # 直線套用失敗時改以 --3way 重試，上游小幅漂移可自動吸收。
+              # 限制：--3way 需要補丁 index 行引用的 blob 存在於物件庫，而 Checkout Core
+              # 使用 fetch-depth: 1，淺克隆通常不含這些 blob，此時回退不生效並照常報錯
+              # （不會比現狀更糟，但也無法保證有效）。
+              # 無論如何都要明確指出是哪個 dir 的哪個 patch 失敗，避免重演過去
+              # 「只知道 Apply Patches 紅了、不知道是哪個補丁」的狀況。
+              if ! git apply -v "$p" 2>/tmp/patch_err.txt; then
+                echo "::warning::直接套用失敗，嘗試 --3way：$(basename "$p")"
+                cat /tmp/patch_err.txt
+                git apply -v --3way "$p" || {
+                  echo "::error::PATCH FAILED: $(basename "$p") (dir=$dir, target=${{ matrix.target.id }})"
+                  cat /tmp/patch_err.txt
+                  exit 1
+                }
+              fi
               applied=$((applied+1))
             done
           done
@@ -2130,51 +2189,49 @@ jobs:
             echo "| N/A | N/A |" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Generate README
+      - name: Update README version block
         run: |
-          cat > README.md <<EOF
-          # 🚀 sing-box 自動編譯系統
+          set -euo pipefail
+          # 過去本步驟以硬編碼 heredoc 全量覆蓋 README.md，凡是模板中沒有的段落都會被
+          # 靜默抹掉（cf78584d 加入的 Android SFA 下載段落就是這樣丟失的）。
+          # 改為只替換「最新版本狀態」區塊，其餘手工維護的內容原樣保留。
+          NOTES="$(cat ./metadata/release_notes.txt 2>/dev/null || echo '暫無更新記錄')"
+          HEADING="## 📦 最新版本狀態 ($(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M UTC+8'))"
 
-          > 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的 Stable 和 Testing 分支。
+          # 定位方式刻意採「純 ASCII 模式 + LC_ALL=C」：
+          # 1) 標題含多位元組 emoji/CJK，若把這些字元寫進 pattern，會讓 pattern 本身
+          #    依賴檔案與執行環境的編碼一致；改用「## 開頭且含 YYYY-MM-DD 日期」這個
+          #    ASCII 特徵（README 中只有版本狀態標題帶日期）即可避開。
+          # 2) LC_ALL=C 強制 grep 以位元組模式比對，結果不受 runner locale 影響
+          #    （在 UTF-8 locale 下 grep 對多位元組輸入的比對行為會因實作而異）。
+          BEG=$(LC_ALL=C grep -n -m1 -E '^## .*\(20[0-9]{2}-[0-9]{2}-[0-9]{2}\)' README.md | cut -d: -f1)
+          if [ -z "$BEG" ]; then
+            echo "::error::README.md 找不到版本狀態標題，略過更新以免覆蓋整個檔案。"
+            exit 1
+          fi
+          # 版本狀態區塊到下一個水平分隔線為止
+          REL=$(tail -n +"$((BEG + 1))" README.md | LC_ALL=C grep -n -m1 '^---[[:space:]]*$' | cut -d: -f1)
+          if [ -z "$REL" ]; then
+            echo "::error::README.md 找不到版本狀態區塊後的 --- 分隔線，略過更新以免覆蓋整個檔案。"
+            exit 1
+          fi
+          FIN=$((BEG + REL))
 
-          ## 📦 最新版本狀態 ($(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M UTC+8'))
+          # 內容一律經 ENVIRON 傳入：awk -v 會解釋反斜線跳脫序列，
+          # 會把 release_notes 裡的字面 \n 之類內容改寫掉。
+          # 行號用 +0 轉成數值，否則 awk 會拿 NR（數值）與環境變數（字串）做字串比較。
+          NOTES="$NOTES" HEADING="$HEADING" BEG="$BEG" FIN="$FIN" \
+          awk '
+            BEGIN { beg = ENVIRON["BEG"] + 0; fin = ENVIRON["FIN"] + 0 }
+            NR < beg  { print; next }
+            NR == beg { print ENVIRON["HEADING"]; print ""; print ENVIRON["NOTES"]; next }
+            NR < fin  { next }
+                      { print }
+          ' README.md > README.md.new
 
-          $(cat ./metadata/release_notes.txt 2>/dev/null || echo "暫無更新記錄")
-
-          ---
-
-          ## 📥 快速安裝 (Linux)
-
-          使用動態路由自動安裝最新版對應架構：
-          \`\`\`bash
-          bash <(curl -sSL https://github.com/${{ github.repository }}/releases/download/sing-box-stable/install-linux.sh)
-          \`\`\`
-
-          若要安裝 Testing 版本，請指定參數：
-          \`\`\`bash
-          bash <(curl -sSL https://github.com/${{ github.repository }}/releases/download/sing-box-testing/install-linux.sh) testing
-          \`\`\`
-
-          ## 📦 文件命名規則
-
-          - **打包版本** (\`xxx.tar.gz\` / \`xxx.zip\`): 包含 LICENSE 的標準發行版
-          - **UPX 壓縮版** (\`xxx-upx.tar.gz\`): 經 UPX 壓縮的精簡版，適合小閃存設備
-
-          ## 🛠️ 支持的版本與特性
-
-          | 版本 | 分支 | 平台支持 | Release 標籤 |
-          |------|------|---------|-------------|
-          | reF1nd Stable | reF1nd-stable | Linux/Windows/macOS/Android | \`sing-box-stable\` (Latest) |
-          | reF1nd Testing | reF1nd-testing | Linux/Windows/macOS/Android | \`sing-box-testing\` (Pre-release) |
-
-          ## 🔔 Telegram 通知配置
-          若需啟用 Telegram 推送，請在倉庫 Secrets 中配置：
-          - \`TELEGRAM_BOT_TOKEN\`, \`CHAT_ID\`, \`API_ID\`, \`API_HASH\`
-
-          [🔗 前往 Releases 下載](https://github.com/${{ github.repository }}/releases)
-
-          ![Build Status](https://img.shields.io/github/actions/workflow/status/${{ github.repository }}/build-sing-box.yml?branch=${{ github.ref_name }})
-          EOF
+          mv README.md.new README.md
+          echo "----- 更新後的版本狀態區塊 -----"
+          sed -n "${BEG},$((FIN))p" README.md
 
       - name: Commit and Push README
         uses: actions/github-script@v7
@@ -2528,25 +2585,100 @@ jobs:
     timeout-minutes: 5
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ISSUE_TITLE: "🔴 定時構建失敗: sing-box"
     steps:
-      - name: Create Issue with logs
+      - name: Collect failed jobs and steps
         run: |
-          echo "Fetching failed logs..."
-          gh run view ${{ github.run_id }} --repo "${{ github.repository }}" --log-failed 2>/tmp/gh_err.log | tail -n 100 > /tmp/error.log || echo "Failed to fetch logs: $(cat /tmp/gh_err.log)" > /tmp/error.log
+          set -euo pipefail
+          # 本 job 屬於當前 run，而 run 的日誌歸檔要等整個 run 結束後才產生，
+          # 因此此前 `gh run view --log-failed` 在此必然取不到內容——這是歷史上
+          # 7 個構建失敗 issue 錯誤日誌全空的根因。
+          # 改用 Jobs API：它對 in-progress 的 run 同樣可用，可立即定位失敗作業與步驟。
+          {
+            echo "### 失敗作業 / 步驟（來源：Jobs API）"
+            gh api --paginate \
+              "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+              --jq '.jobs[]
+                    | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped")
+                    | "JOB: \(.name) -> \(.conclusion)",
+                      ((.steps // [])
+                       | map(select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped")
+                             | "  STEP: \(.name) -> \(.conclusion)")
+                       | .[])'
+          } > /tmp/error.log 2>/tmp/gh_err.log || {
+            echo "無法取得作業資訊（gh api 退出碼 $?）：" > /tmp/error.log
+            head -n 20 /tmp/gh_err.log >> /tmp/error.log
+          }
+          # 過濾條件中的 `!= null` 是必要的：本 job 執行時其他 job 仍在排隊或運行中，
+          # 其 conclusion 為 null，不過濾會把「尚未執行」誤報成「失敗」。
+          # run 被取消、或失敗發生在 job 之外時 Jobs API 查無失敗作業，
+          # 補一行說明避免重演「錯誤日誌區塊為空」。
+          [ -s /tmp/error.log ] || echo "Jobs API 未回傳失敗作業（run 可能被取消，或失敗發生在 job 之外），請直接查看 Actions 日誌。" > /tmp/error.log
+          echo "----- 診斷輸出 -----"
+          cat /tmp/error.log
 
+      - name: Create or update issue
+        run: |
+          set -euo pipefail
           cat > issue_body.md <<EOF
           構建在工作流 \`${{ github.workflow }}\` 中失敗。
 
           [查看完整的 Actions 日誌](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
-          ### 🔍 錯誤日誌摘要 (Tail 100 lines)
+          ### 🔍 失敗作業 / 步驟
           \`\`\`log
           EOF
-          cat /tmp/error.log >> issue_body.md
+          tail -n 100 /tmp/error.log >> issue_body.md
           echo '```' >> issue_body.md
 
-          gh issue create \
-            --repo "${{ github.repository }}" \
-            --title "🔴 定時構建失敗: sing-box" \
-            --body-file issue_body.md \
-            --label "bug" || true
+          # 以 list + 精確標題比對去重（對齊 check-patches.yml 既有範式）。
+          # 不可用 --search "…in:title"：標題含 ASCII 冒號，會被搜尋語法誤解析為限定符分隔符。
+          # 用 env.ISSUE_TITLE 取值，避免把標題字面量內嵌進 jq 過濾器。
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open \
+                     --label "bug" --limit 100 --json number,title \
+                     --jq '[.[] | select(.title == env.ISSUE_TITLE) | .number] | first // empty')
+
+          if [ -n "$EXISTING" ]; then
+            echo "已有開啟中的 issue #$EXISTING，改為追加評論（不再開重複單）。"
+            gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body-file issue_body.md
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "$ISSUE_TITLE" --body-file issue_body.md --label "bug"
+          fi
+
+  close_issue_on_success:
+    # needs 必須與 create_issue_on_failure 完全一致（含 finalize、telegram_notify），
+    # 否則兩者的 success()/failure() 判據不對稱，會出現「部分流程仍失敗卻關閉 issue」。
+    needs: [build_core, build_android, build_apple, publish_core, publish_android, publish_apple, finalize, telegram_notify]
+    if: success() && (github.event_name == 'schedule' || github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Close stale build-failure issues
+        uses: actions/github-script@v7
+        env:
+          ISSUE_TITLE: "🔴 定時構建失敗: sing-box"
+        with:
+          script: |
+            const title = process.env.ISSUE_TITLE;
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'bug', per_page: 100
+            });
+            const stale = issues.filter(i => i.title === title);
+            if (stale.length === 0) {
+              console.log('No stale build-failure issue to close.');
+              return;
+            }
+            for (const i of stale) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: i.number,
+                body: `✅ 構建已恢復正常（run ${{ github.run_id }}），自動關閉此問題。`
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: i.number, state: 'closed'
+              });
+              console.log(`Closed #${i.number}`);
+            }
