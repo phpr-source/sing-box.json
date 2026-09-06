@@ -2,7 +2,7 @@
 
 > 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的 Stable 和 Testing 分支。
 
-## 📦 最新版本狀態 (2026-09-05 10:28 UTC+8)
+## 📦 最新版本狀態 (2026-09-06 10:24 UTC+8)
 
 
 ---
