@@ -99,7 +99,7 @@ jobs:
           set -euo pipefail
           # 補丁「能套上」不等於「能編譯」：上游依賴 API 漂移（例如 sing-quic
           # v0.7.0 移除 congestion_bbr1/bbr2）時，套用檢查全綠、每日構建仍會
-          # 在編譯階段炸掉。此處對兩個分支各做一次 go build ./... 冒煙。
+          # 在編譯階段炸掉。此處對兩個分支各做一次 go build 冒煙；-checklinkname=0 必須與真實構建一致（上游 libbox 的 oomprofile 依賴 pull linkname，裸 go build 在 linux 連接時假陽性失敗）。
           FAILED=0
           FAILED_MSG="${FAILED_MSG:-}"
           for branch in reF1nd-stable reF1nd-testing; do
@@ -116,10 +116,10 @@ jobs:
                 git -C /tmp/sing-box apply "$PWD/$p"
               done
             done
-            if ! (cd /tmp/sing-box && go build ./...); then
+            if ! (cd /tmp/sing-box && go build -ldflags "-checklinkname=0" ./...); then
               echo "::error::COMPILE FAILED after patches: $branch"
               FAILED=1
-              FAILED_MSG="${FAILED_MSG}- $branch (patched tree fails 'go build ./...')"$'\n'
+              FAILED_MSG="${FAILED_MSG}- $branch (patched tree fails (go build -checklinkname=0))"$'\n'
             fi
             rm -rf /tmp/sing-box
           done
