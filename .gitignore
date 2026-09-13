@@ -1,0 +1,11 @@
+# 本地会话与工具状态
+.zcode/
+.workbuddy/
+.claude/
+
+# 本地运行产物（已跟踪的 .cache/rule_merger/**/source_cache.ldb 不受影响，
+# gitignore 只对未跟踪文件生效）
+.cache/
+
+# 开发脚本 merge_test.py 的状态文件（CI 从不读写，体积 16MB）
+.lineage_state.sqlite
