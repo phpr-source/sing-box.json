@@ -88,36 +88,44 @@ jobs:
 
       - name: Download & Process
         run: |
-          mkdir -p temp rules/geosite-srs rules/geosite-json rules/geoip-srs rules/geoip-json
+          set -euo pipefail
+          mkdir -p temp/json rules/geosite-srs rules/geosite-json rules/geoip-srs rules/geoip-json
           rm -f rules/geosite-srs/* rules/geosite-json/*
           rm -f rules/geoip-srs/* rules/geoip-json/*
+          export FORMAT_VER
+
+          # geosite 類別已增長到數千個，串行 decompile→jq→compile 穩定超過
+          # 60 分鐘作業超時（連續多日被取消）。改為 4 核並行流水線。
+          convert_geosite() {
+            f="$1"
+            rule="$(basename "$f" .srs)"
+            ./sb-core rule-set decompile --output "temp/json/$rule.json" "$f" || exit 1
+            jq --argjson v "$FORMAT_VER" '.version=$v' "temp/json/$rule.json" > "rules/geosite-json/$rule.json" || exit 1
+            ./sb-core rule-set compile --output "rules/geosite-srs/$rule.srs" "rules/geosite-json/$rule.json" || exit 1
+          }
+          export -f convert_geosite
+
+          convert_geoip() {
+            rule="$1"
+            ./sb-core rule-set decompile --output "temp/json/$rule.json" "temp_ip/$rule.srs" || exit 1
+            jq --argjson v "$FORMAT_VER" '.version=$v' "temp/json/$rule.json" > "rules/geoip-json/$rule.json" || exit 1
+            ./sb-core rule-set compile --output "rules/geoip-srs/$rule.srs" "rules/geoip-json/$rule.json" || exit 1
+          }
+          export -f convert_geoip
 
           wget -q --timeout=30 -O temp/geosite.dat https://github.com/elysias123/geosite/releases/latest/download/geosite.dat
           wget -q --timeout=30 -O temp/geoip.dat https://github.com/elysias123/geosite/releases/latest/download/geoip.dat
 
-          WANTED_IP="cn cloudflare cloudfront facebook fastly google netflix telegram twitter"
-
           ./geodat2srs geosite -i temp/geosite.dat -o temp_site --prefix ""
-          for f in temp_site/*.srs; do
-            rule=$(basename "$f" .srs)
-            echo "[$rule] decompile..."
-            ./sb-core rule-set decompile --output temp.json "$f"
-            jq --argjson v "$FORMAT_VER" '.version=$v' temp.json > "rules/geosite-json/$rule.json"
-            echo "[$rule] compile..."
-            ./sb-core rule-set compile --output "rules/geosite-srs/$rule.srs" "rules/geosite-json/$rule.json"
-          done
+          find temp_site -name '*.srs' | sort | xargs -P 8 -I {} bash -ec 'convert_geosite "$@"' _ {}
 
           ./geodat2srs geoip -i temp/geoip.dat -o temp_ip --prefix ""
-          for rule in $WANTED_IP; do
-            if [ -f "temp_ip/$rule.srs" ]; then
-              echo "[$rule] decompile..."
-              ./sb-core rule-set decompile --output temp.json "temp_ip/$rule.srs"
-              jq --argjson v "$FORMAT_VER" '.version=$v' temp.json > "rules/geoip-json/$rule.json"
-              echo "[$rule] compile..."
-              ./sb-core rule-set compile --output "rules/geoip-srs/$rule.srs" "rules/geoip-json/$rule.json"
-            fi
-          done
-          rm -rf temp temp_site temp_ip temp.json
+          WANTED_IP="cn cloudflare cloudfront facebook fastly google netflix telegram twitter"
+          echo "$WANTED_IP" | tr ' ' '\n' | xargs -P 8 -I {} bash -ec 'convert_geoip "$@"' _ {}
+
+          rm -rf temp temp_site temp_ip
+          total=$(find rules -name '*.srs' | wc -l)
+          echo "Converted $total rule sets."
 
       - name: Commit and Push
         run: |
