@@ -74,6 +74,7 @@ jobs:
           echo "All patches apply cleanly against reF1nd-stable and reF1nd-testing."
 
       - name: Resolve Go toolchain version
+        id: resolve
         run: |
           set -euo pipefail
           # 兩個上游分支的 go.mod 此前一致；以 testing 為準，漂移時取較新值。
