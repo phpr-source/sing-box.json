@@ -1,9 +1,9 @@
 diff --git a/option/options.go b/option/options.go
-index fcca94c..222a418 100644
+index 8533c680..7f4524a4 100644
 --- a/option/options.go
 +++ b/option/options.go
-@@ -43,7 +43,7 @@ type LogOptions struct {
- 	Level        string `json:"level,omitempty"`
+@@ -72,7 +72,7 @@ type LogOptions struct {
+ 	Level        string `json:"level,omitempty" enum:"trace,debug,info,warn,warning,error,fatal,panic"`
  	Output       string `json:"output,omitempty"`
  	Timestamp    bool   `json:"timestamp,omitempty"`
 -	DisableColor bool   `json:"-"`

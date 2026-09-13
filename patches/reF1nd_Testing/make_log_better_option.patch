@@ -1,5 +1,5 @@
 diff --git a/option/options.go b/option/options.go
-index ac6b64a..4fe8cad 100644
+index 8533c680..7f4524a4 100644
 --- a/option/options.go
 +++ b/option/options.go
 @@ -72,7 +72,7 @@ type LogOptions struct {

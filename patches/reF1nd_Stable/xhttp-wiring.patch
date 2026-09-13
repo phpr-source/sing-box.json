@@ -1,5 +1,5 @@
 diff --git a/constant/v2ray.go b/constant/v2ray.go
-index c3089a6..1811df5 100644
+index c3089a6c..1811df5f 100644
 --- a/constant/v2ray.go
 +++ b/constant/v2ray.go
 @@ -6,4 +6,5 @@ const (
@@ -10,7 +10,7 @@ index c3089a6..1811df5 100644
  )
 diff --git a/option/range.go b/option/range.go
 new file mode 100644
-index 0000000..e060a53
+index 00000000..e060a53b
 --- /dev/null
 +++ b/option/range.go
 @@ -0,0 +1,93 @@
@@ -108,21 +108,29 @@ index 0000000..e060a53
 +	return c.From + T(bigInt.Int64())
 +}
 diff --git a/option/v2ray_transport.go b/option/v2ray_transport.go
-index 68c2385..6c12cda 100644
+index 8788151e..b733cf70 100644
 --- a/option/v2ray_transport.go
 +++ b/option/v2ray_transport.go
-@@ -1,6 +1,10 @@
+@@ -1,8 +1,11 @@
  package option
  
  import (
 +	"net/http"
+ 	"reflect"
 +	"strings"
-+
+ 
 +	"github.com/sagernet/sing-box/common/xray/utils"
  	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/schema"
  	E "github.com/sagernet/sing/common/exceptions"
- 	"github.com/sagernet/sing/common/json"
-@@ -15,6 +19,7 @@ type _V2RayTransportOptions struct {
+@@ -12,12 +15,13 @@ import (
+ )
+ 
+ type _V2RayTransportOptions struct {
+-	Type               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade"`
++	Type               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade,xhttp"`
+ 	HTTPOptions        V2RayHTTPOptions        `json:"-"`
+ 	WebsocketOptions   V2RayWebsocketOptions   `json:"-"`
  	QUICOptions        V2RayQUICOptions        `json:"-"`
  	GRPCOptions        V2RayGRPCOptions        `json:"-"`
  	HTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
@@ -130,7 +138,7 @@ index 68c2385..6c12cda 100644
  }
  
  type V2RayTransportOptions _V2RayTransportOptions
-@@ -32,12 +37,14 @@ func (o V2RayTransportOptions) MarshalJSON() ([]byte, error) {
+@@ -35,6 +39,8 @@ func (o V2RayTransportOptions) MarshalJSON() ([]byte, error) {
  		v = o.GRPCOptions
  	case C.V2RayTransportTypeHTTPUpgrade:
  		v = o.HTTPUpgradeOptions
@@ -139,14 +147,7 @@ index 68c2385..6c12cda 100644
  	case "":
  		return nil, E.New("missing transport type")
  	default:
- 		return nil, E.New("unknown transport type: " + o.Type)
- 	}
--	return badjson.MarshallObjects((_V2RayTransportOptions)(o), v)
-+	return badjson.MarshallObjects(_V2RayTransportOptions(o), v)
- }
- 
- func (o *V2RayTransportOptions) UnmarshalJSON(bytes []byte) error {
-@@ -57,6 +64,8 @@ func (o *V2RayTransportOptions) UnmarshalJSON(bytes []byte) error {
+@@ -60,6 +66,8 @@ func (o *V2RayTransportOptions) UnmarshalJSON(bytes []byte) error {
  		v = &o.GRPCOptions
  	case C.V2RayTransportTypeHTTPUpgrade:
  		v = &o.HTTPUpgradeOptions
@@ -155,7 +156,7 @@ index 68c2385..6c12cda 100644
  	default:
  		return E.New("unknown transport type: " + o.Type)
  	}
-@@ -98,3 +107,410 @@ type V2RayHTTPUpgradeOptions struct {
+@@ -113,3 +121,410 @@ type V2RayHTTPUpgradeOptions struct {
  	Path    string               `json:"path,omitempty"`
  	Headers badoption.HTTPHeader `json:"headers,omitempty"`
  }
@@ -165,13 +166,13 @@ index 68c2385..6c12cda 100644
 +	Path                 string                     `json:"path,omitempty"`
 +	Headers              map[string]string          `json:"headers,omitempty"`
 +	DomainStrategy       DomainStrategy             `json:"domain_strategy,omitempty"`
-+	XPaddingBytes        Range[int]       `json:"x_padding_bytes"`
++	XPaddingBytes        Range[int]                 `json:"x_padding_bytes"`
 +	NoGRPCHeader         bool                       `json:"no_grpc_header,omitempty"`
 +	NoSSEHeader          bool                       `json:"no_sse_header,omitempty"`
-+	ScMaxEachPostBytes   *Range[int]      `json:"sc_max_each_post_bytes"`
-+	ScMinPostsIntervalMs *Range[int]      `json:"sc_min_posts_interval_ms"`
++	ScMaxEachPostBytes   *Range[int]                `json:"sc_max_each_post_bytes"`
++	ScMinPostsIntervalMs *Range[int]                `json:"sc_min_posts_interval_ms"`
 +	ScMaxBufferedPosts   int64                      `json:"sc_max_buffered_posts,omitempty"`
-+	ScStreamUpServerSecs *Range[int]      `json:"sc_stream_up_server_secs"`
++	ScStreamUpServerSecs *Range[int]                `json:"sc_stream_up_server_secs"`
 +	ServerMaxHeaderBytes int                        `json:"server_max_header_bytes"`
 +	TrustedXForwardedFor badoption.Listable[string] `json:"trusted_x_forwarded_for,omitempty"`
 +	Xmux                 *V2RayXHTTPXmuxOptions     `json:"xmux"`
@@ -187,9 +188,9 @@ index 68c2385..6c12cda 100644
 +	SeqKey               string                     `json:"seq_key,omitempty"`
 +	UplinkDataPlacement  string                     `json:"uplink_data_placement,omitempty"`
 +	UplinkDataKey        string                     `json:"uplink_data_key,omitempty"`
-+	UplinkChunkSize      *Range[int]      `json:"uplink_chunk_size,omitempty"`
++	UplinkChunkSize      *Range[int]                `json:"uplink_chunk_size,omitempty"`
 +	SessionIDTable       string                     `json:"session_id_table,omitempty"`
-+	SessionIDLength      Range[int]       `json:"session_id_length,omitempty"`
++	SessionIDLength      Range[int]                 `json:"session_id_length,omitempty"`
 +	CongestionController string                     `json:"congestion_controller,omitempty"`
 +	CWND                 int                        `json:"cwnd,omitempty"`
 +}
@@ -544,7 +545,7 @@ index 68c2385..6c12cda 100644
 +	CMaxReuseTimes   Range[int] `json:"c_max_reuse_times"`
 +	HMaxRequestTimes Range[int] `json:"h_max_request_times"`
 +	HMaxReusableSecs Range[int] `json:"h_max_reusable_secs"`
-+	HKeepAlivePeriod int64                `json:"h_keep_alive_period"`
++	HKeepAlivePeriod int64      `json:"h_keep_alive_period"`
 +}
 +
 +func (m *V2RayXHTTPXmuxOptions) GetNormalizedMaxConcurrency() Range[int] {
@@ -567,7 +568,7 @@ index 68c2385..6c12cda 100644
 +	return m.HMaxReusableSecs
 +}
 diff --git a/transport/v2ray/transport.go b/transport/v2ray/transport.go
-index ab52f55..0180464 100644
+index ab52f55e..0180464c 100644
 --- a/transport/v2ray/transport.go
 +++ b/transport/v2ray/transport.go
 @@ -10,6 +10,7 @@ import (
@@ -597,7 +598,7 @@ index ab52f55..0180464 100644
  		return nil, E.New("unknown transport type: " + options.Type)
  	}
 diff --git a/transport/v2rayhttp/conn.go b/transport/v2rayhttp/conn.go
-index b339a75..be36089 100644
+index b339a753..be360897 100644
 --- a/transport/v2rayhttp/conn.go
 +++ b/transport/v2rayhttp/conn.go
 @@ -265,3 +265,14 @@ func DupContext(ctx context.Context) context.Context {
@@ -617,10 +618,10 @@ index b339a75..be36089 100644
 +}
 diff --git a/transport/v2rayxhttp/client.go b/transport/v2rayxhttp/client.go
 new file mode 100644
-index 0000000..6c57c9e
+index 00000000..0ea9c920
 --- /dev/null
 +++ b/transport/v2rayxhttp/client.go
-@@ -0,0 +1,397 @@
+@@ -0,0 +1,396 @@
 +package xhttp
 +
 +import (
@@ -649,7 +650,6 @@ index 0000000..6c57c9e
 +	"github.com/sagernet/sing-box/option"
 +	qtls "github.com/sagernet/sing-quic"
 +	"github.com/sagernet/sing/common"
-+	"github.com/sagernet/sing/common/bufio"
 +	E "github.com/sagernet/sing/common/exceptions"
 +	M "github.com/sagernet/sing/common/metadata"
 +	N "github.com/sagernet/sing/common/network"
@@ -969,7 +969,7 @@ index 0000000..6c57c9e
 +				if dErr != nil {
 +					return nil, dErr
 +				}
-+				conn, dErr := qtls.DialEarly(ctx, bufio.NewUnbindPacketConn(udpConn), udpConn.RemoteAddr(), tlsConfig, cfg)
++				conn, dErr := qtls.DialEarly(ctx, udpConn, tlsConfig, cfg)
 +				if dErr != nil {
 +					_ = udpConn.Close()
 +					return nil, dErr
@@ -1020,7 +1020,7 @@ index 0000000..6c57c9e
 +}
 diff --git a/transport/v2rayxhttp/conn.go b/transport/v2rayxhttp/conn.go
 new file mode 100644
-index 0000000..f8ac0b5
+index 00000000..f8ac0b5d
 --- /dev/null
 +++ b/transport/v2rayxhttp/conn.go
 @@ -0,0 +1,108 @@
@@ -1134,7 +1134,7 @@ index 0000000..f8ac0b5
 +}
 diff --git a/transport/v2rayxhttp/dialer.go b/transport/v2rayxhttp/dialer.go
 new file mode 100644
-index 0000000..96e54af
+index 00000000..96e54af7
 --- /dev/null
 +++ b/transport/v2rayxhttp/dialer.go
 @@ -0,0 +1,297 @@
@@ -1437,7 +1437,7 @@ index 0000000..96e54af
 +}
 diff --git a/transport/v2rayxhttp/http.go b/transport/v2rayxhttp/http.go
 new file mode 100644
-index 0000000..03a47da
+index 00000000..03a47da7
 --- /dev/null
 +++ b/transport/v2rayxhttp/http.go
 @@ -0,0 +1,41 @@
@@ -1484,7 +1484,7 @@ index 0000000..03a47da
 +}
 diff --git a/transport/v2rayxhttp/mux.go b/transport/v2rayxhttp/mux.go
 new file mode 100644
-index 0000000..f83a3eb
+index 00000000..f83a3ebf
 --- /dev/null
 +++ b/transport/v2rayxhttp/mux.go
 @@ -0,0 +1,146 @@
@@ -1636,7 +1636,7 @@ index 0000000..f83a3eb
 +}
 diff --git a/transport/v2rayxhttp/server.go b/transport/v2rayxhttp/server.go
 new file mode 100644
-index 0000000..52b1308
+index 00000000..52b1308c
 --- /dev/null
 +++ b/transport/v2rayxhttp/server.go
 @@ -0,0 +1,520 @@
@@ -2162,7 +2162,7 @@ index 0000000..52b1308
 +}
 diff --git a/transport/v2rayxhttp/upload_queue.go b/transport/v2rayxhttp/upload_queue.go
 new file mode 100644
-index 0000000..da0b2f3
+index 00000000..da0b2f3c
 --- /dev/null
 +++ b/transport/v2rayxhttp/upload_queue.go
 @@ -0,0 +1,183 @@
@@ -2351,7 +2351,7 @@ index 0000000..da0b2f3
 +}
 diff --git a/transport/v2rayxhttp/utils.go b/transport/v2rayxhttp/utils.go
 new file mode 100644
-index 0000000..408343f
+index 00000000..408343f3
 --- /dev/null
 +++ b/transport/v2rayxhttp/utils.go
 @@ -0,0 +1,183 @@
@@ -2540,7 +2540,7 @@ index 0000000..408343f
 +}
 diff --git a/transport/v2rayxhttp/writer.go b/transport/v2rayxhttp/writer.go
 new file mode 100644
-index 0000000..3e4dcd6
+index 00000000..3e4dcd6b
 --- /dev/null
 +++ b/transport/v2rayxhttp/writer.go
 @@ -0,0 +1,42 @@
@@ -2588,7 +2588,7 @@ index 0000000..3e4dcd6
 +}
 diff --git a/transport/v2rayxhttp/xpadding.go b/transport/v2rayxhttp/xpadding.go
 new file mode 100644
-index 0000000..1d6cf26
+index 00000000..1d6cf26b
 --- /dev/null
 +++ b/transport/v2rayxhttp/xpadding.go
 @@ -0,0 +1,292 @@

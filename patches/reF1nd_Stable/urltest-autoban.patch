@@ -1,5 +1,31 @@
+diff --git a/daemon/started_service.go b/daemon/started_service.go
+index b5306564..20eb4ecb 100644
+--- a/daemon/started_service.go
++++ b/daemon/started_service.go
+@@ -735,7 +735,7 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
+ 			itOutbound, _ := boxService.outboundManager.Outbound(it)
+ 			return itOutbound
+ 		}))
+-		go group.URLTestOutbounds(boxService.ctx, boxService.outboundManager, historyStorage, boxService.logFactory.Logger(), outbounds, "", 0, true)
++		go group.URLTestOutbounds(boxService.ctx, boxService.outboundManager, historyStorage, boxService.logFactory.Logger(), outbounds, "", 0, true, nil)
+ 	} else {
+ 		go func() {
+ 			t, err := urltest.URLTest(boxService.ctx, "", outbound)
+diff --git a/experimental/clashapi/api_meta_group.go b/experimental/clashapi/api_meta_group.go
+index 2da2c783..51f726de 100644
+--- a/experimental/clashapi/api_meta_group.go
++++ b/experimental/clashapi/api_meta_group.go
+@@ -88,7 +88,7 @@ func getGroupDelay(server *Server) func(w http.ResponseWriter, r *http.Request)
+ 				itOutbound, _ := server.outbound.Outbound(it)
+ 				return itOutbound
+ 			}))
+-			result = group.URLTestOutbounds(ctx, server.outbound, server.urlTestHistory, server.logger, outbounds, url, 0, true)
++			result = group.URLTestOutbounds(ctx, server.outbound, server.urlTestHistory, server.logger, outbounds, url, 0, true, nil)
+ 		}
+ 
+ 		if err != nil {
 diff --git a/option/group.go b/option/group.go
-index dd47168..c4cd4f3 100644
+index 4ee11d9f..bef9795c 100644
 --- a/option/group.go
 +++ b/option/group.go
 @@ -16,6 +16,52 @@ type URLTestOutboundOptions struct {
@@ -57,7 +83,7 @@ index dd47168..c4cd4f3 100644
  type GroupCommonOption struct {
 diff --git a/protocol/group/autoban.go b/protocol/group/autoban.go
 new file mode 100644
-index 0000000..f095908
+index 00000000..052232b9
 --- /dev/null
 +++ b/protocol/group/autoban.go
 @@ -0,0 +1,1340 @@
@@ -127,13 +153,13 @@ index 0000000..f095908
 +	closeOnce sync.Once
 +
 +	// Direct network pre-flight probe
-+	probeURLs      []string
-+	probeTimeout   time.Duration
-+	probeInterval  time.Duration
-+	httpClient     *http.Client
-+	healthMu       sync.Mutex
-+	healthOK       bool
-+	healthChecked  time.Time
++	probeURLs     []string
++	probeTimeout  time.Duration
++	probeInterval time.Duration
++	httpClient    *http.Client
++	healthMu      sync.Mutex
++	healthOK      bool
++	healthChecked time.Time
 +
 +	// Active recovery loop
 +	recoveryInterval time.Duration
@@ -146,33 +172,33 @@ index 0000000..f095908
 +	maxLatencyMs     float64
 +	decayHalfLife    time.Duration
 +	staleTTL         time.Duration
-+	batchMode         int
-+	recoverSuccesses  int
-+	flushDelay        time.Duration
-+	dirty             bool
-+	flushTimer        *time.Timer
-+	stopped           bool
-+	recentResults     []resultSample
-+	lastSweepAt       time.Time
-+	cooldown          time.Duration
-+	summaryMu         sync.Mutex
-+	lastSummaryAt     time.Time
++	batchMode        int
++	recoverSuccesses int
++	flushDelay       time.Duration
++	dirty            bool
++	flushTimer       *time.Timer
++	stopped          bool
++	recentResults    []resultSample
++	lastSweepAt      time.Time
++	cooldown         time.Duration
++	summaryMu        sync.Mutex
++	lastSummaryAt    time.Time
 +}
 +
 +type nodeState struct {
-+	Key                 string    `json:"key"`
-+	Tag                 string    `json:"tag,omitempty"`
-+	Score               float64   `json:"score"`
-+	Banned              bool      `json:"banned"`
-+	LastFailAt          time.Time `json:"last_fail_at,omitempty"`
-+	LastSuccessAt       time.Time `json:"last_success_at,omitempty"`
-+	LastUpdate          time.Time `json:"last_update,omitempty"`
-+	LastDecay           time.Time `json:"last_decay,omitempty"`
-+	LastProbeAt         time.Time `json:"last_probe_at,omitempty"`
-+	NextProbeAt         time.Time `json:"next_probe_at,omitempty"`
-+	ConsecutiveFails    int       `json:"consecutive_fails"`
-+	ConsecutiveSuccesses int      `json:"consecutive_successes"`
-+	Backoff             time.Duration `json:"backoff,omitempty"`
++	Key                  string        `json:"key"`
++	Tag                  string        `json:"tag,omitempty"`
++	Score                float64       `json:"score"`
++	Banned               bool          `json:"banned"`
++	LastFailAt           time.Time     `json:"last_fail_at,omitempty"`
++	LastSuccessAt        time.Time     `json:"last_success_at,omitempty"`
++	LastUpdate           time.Time     `json:"last_update,omitempty"`
++	LastDecay            time.Time     `json:"last_decay,omitempty"`
++	LastProbeAt          time.Time     `json:"last_probe_at,omitempty"`
++	NextProbeAt          time.Time     `json:"next_probe_at,omitempty"`
++	ConsecutiveFails     int           `json:"consecutive_fails"`
++	ConsecutiveSuccesses int           `json:"consecutive_successes"`
++	Backoff              time.Duration `json:"backoff,omitempty"`
 +}
 +
 +// AutoBanOptions is the constructor input for AutoBan v3.
@@ -182,61 +208,61 @@ index 0000000..f095908
 +}
 +
 +type AutoBanOptions struct {
-+	Threshold         int
-+	Times             []time.Time // optional daily sweep times ("big exam")
-+	Cooldown          time.Duration // deprecated
-+	Path              string
-+	ProbeURLs         []string
-+	ProbeTimeout      time.Duration
-+	RecoveryInterval  time.Duration
-+	ProbeInterval     time.Duration // network pre-flight cache TTL; 0 = default
-+	InitialBackoff    time.Duration
-+	MaxBackoff        time.Duration
-+	BanThreshold      int
-+	RecoverThreshold  int
-+	MaxLatency        time.Duration
-+	RecoverSuccesses  int
-+	FlushDelay        time.Duration
-+	PinnedTags        []string
++	Threshold        int
++	Times            []time.Time   // optional daily sweep times ("big exam")
++	Cooldown         time.Duration // deprecated
++	Path             string
++	ProbeURLs        []string
++	ProbeTimeout     time.Duration
++	RecoveryInterval time.Duration
++	ProbeInterval    time.Duration // network pre-flight cache TTL; 0 = default
++	InitialBackoff   time.Duration
++	MaxBackoff       time.Duration
++	BanThreshold     int
++	RecoverThreshold int
++	MaxLatency       time.Duration
++	RecoverSuccesses int
++	FlushDelay       time.Duration
++	PinnedTags       []string
 +}
 +
 +// AutoBanNodeStatus is a stable snapshot for upper-layer UI / dashboard display.
 +type AutoBanNodeStatus struct {
-+	Tag                 string    `json:"tag"`
-+	Key                 string    `json:"key"`
-+	Banned              bool      `json:"banned"`
-+	Striked             bool      `json:"striked"`
-+	Score               float64   `json:"score"`
-+	ConsecutiveFails    int       `json:"consecutive_fails"`
-+	ConsecutiveSuccesses int      `json:"consecutive_successes"`
-+	LastFail            time.Time `json:"last_fail,omitempty"`
-+	LastSuccess         time.Time `json:"last_success,omitempty"`
-+	NextProbe           time.Time `json:"next_probe,omitempty"`
++	Tag                  string    `json:"tag"`
++	Key                  string    `json:"key"`
++	Banned               bool      `json:"banned"`
++	Striked              bool      `json:"striked"`
++	Score                float64   `json:"score"`
++	ConsecutiveFails     int       `json:"consecutive_fails"`
++	ConsecutiveSuccesses int       `json:"consecutive_successes"`
++	LastFail             time.Time `json:"last_fail,omitempty"`
++	LastSuccess          time.Time `json:"last_success,omitempty"`
++	NextProbe            time.Time `json:"next_probe,omitempty"`
 +}
 +
 +const (
-+	defaultAutoBanFailThreshold     = 5
-+	defaultAutoBanProbeTimeout      = 3 * time.Second
-+	defaultAutoBanStrikeCooldown    = 5 * time.Minute
-+	defaultAutoBanProbeInterval     = 30 * time.Second
-+	defaultAutoBanSummaryInterval   = 30 * time.Minute
-+	defaultAutoBanRecoveryInterval  = 1 * time.Minute
-+	defaultAutoBanInitialBackoff    = 1 * time.Minute
-+	defaultAutoBanMaxBackoff        = 30 * time.Minute
-+	defaultAutoBanBanThreshold      = 25.0
-+	defaultAutoBanRecoverThreshold  = 60.0
-+	defaultAutoBanMaxLatency        = 1000 * time.Millisecond
-+	defaultAutoBanDecayHalfLife     = 24 * time.Hour
-+	defaultAutoBanStaleTTL          = 7 * 24 * time.Hour
-+	defaultAutoBanRecoverSuccesses   = 2
-+	defaultAutoBanFlushDelay         = 3 * time.Second
-+	massFailWindow                    = 2 * time.Minute
-+	massFailMinSamplesFloor           = 3
-+	massFailRatio                     = 0.8
-+	defaultAutoBanNeutralScore      = 80.0
-+	defaultAutoBanInitialScore      = 100.0
-+	defaultAutoBanSuccessAlpha      = 0.3
-+	defaultAutoBanFailureAlpha      = 0.4
++	defaultAutoBanFailThreshold    = 5
++	defaultAutoBanProbeTimeout     = 3 * time.Second
++	defaultAutoBanStrikeCooldown   = 5 * time.Minute
++	defaultAutoBanProbeInterval    = 30 * time.Second
++	defaultAutoBanSummaryInterval  = 30 * time.Minute
++	defaultAutoBanRecoveryInterval = 1 * time.Minute
++	defaultAutoBanInitialBackoff   = 1 * time.Minute
++	defaultAutoBanMaxBackoff       = 30 * time.Minute
++	defaultAutoBanBanThreshold     = 25.0
++	defaultAutoBanRecoverThreshold = 60.0
++	defaultAutoBanMaxLatency       = 1000 * time.Millisecond
++	defaultAutoBanDecayHalfLife    = 24 * time.Hour
++	defaultAutoBanStaleTTL         = 7 * 24 * time.Hour
++	defaultAutoBanRecoverSuccesses = 2
++	defaultAutoBanFlushDelay       = 3 * time.Second
++	massFailWindow                 = 2 * time.Minute
++	massFailMinSamplesFloor        = 3
++	massFailRatio                  = 0.8
++	defaultAutoBanNeutralScore     = 80.0
++	defaultAutoBanInitialScore     = 100.0
++	defaultAutoBanSuccessAlpha     = 0.3
++	defaultAutoBanFailureAlpha     = 0.4
 +)
 +
 +var defaultAutoBanProbeURLs = []string{
@@ -329,10 +355,10 @@ index 0000000..f095908
 +		maxLatencyMs:     float64(maxLatency.Milliseconds()),
 +		decayHalfLife:    defaultAutoBanDecayHalfLife,
 +		staleTTL:         defaultAutoBanStaleTTL,
-+		closed:            make(chan struct{}),
-+		recoverSuccesses:  recoverSuccesses,
-+		flushDelay:        flushDelay,
-+		cooldown:          cooldown,
++		closed:           make(chan struct{}),
++		recoverSuccesses: recoverSuccesses,
++		flushDelay:       flushDelay,
++		cooldown:         cooldown,
 +	}
 +}
 +
@@ -1401,8 +1427,21 @@ index 0000000..f095908
 +	}
 +	return time.Duration(rand.Int63n(int64(maxJitter)))
 +}
+diff --git a/protocol/group/loadbalance.go b/protocol/group/loadbalance.go
+index dbe9da66..bcc9548b 100644
+--- a/protocol/group/loadbalance.go
++++ b/protocol/group/loadbalance.go
+@@ -462,7 +462,7 @@ func (g *LoadBalanceGroup) urlTestWait(ctx context.Context, force bool) (map[str
+ 
+ func (g *LoadBalanceGroup) urlTestLocked(ctx context.Context, force bool) (map[string]uint16, error) {
+ 	outbounds := g.loadOutbounds()
+-	result := URLTestOutbounds(ctx, g.outbound, g.history, g.logger, outbounds, g.link, g.interval, force)
++	result := URLTestOutbounds(ctx, g.outbound, g.history, g.logger, outbounds, g.link, g.interval, force, nil)
+ 	if g.tag != "" {
+ 		updateLoadBalanceURLTestHistory(g.outbound, g.history, g.tag, outbounds)
+ 	}
 diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
-index e9bb898..ba09c48 100644
+index 0631608c..5b1a5416 100644
 --- a/protocol/group/urltest.go
 +++ b/protocol/group/urltest.go
 @@ -2,6 +2,8 @@ package group
@@ -1411,18 +1450,18 @@ index e9bb898..ba09c48 100644
  	"context"
 +	"fmt"
 +	"hash/fnv"
+ 	"maps"
  	"net"
  	"regexp"
- 	"sync"
-@@ -46,6 +48,7 @@ type URLTest struct {
- 	fallback                     URLTestFallback
+@@ -50,6 +52,7 @@ type URLTest struct {
  	group                        *URLTestGroup
+ 	checkAccess                  sync.Mutex
  	interruptExternalConnections bool
 +	autoBan                      *AutoBan
+ 	providerAccess               sync.Mutex
+ 	providerUpdateCheck          providerUpdateCheckScheduler
  
- 	provider       adapter.ProviderManager
- 	providers      map[string]adapter.Provider
-@@ -92,6 +95,48 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -97,6 +100,48 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
  			maxDelay: uint16(time.Duration(options.Fallback.MaxDelay).Milliseconds()),
  		}
  	}
@@ -1471,7 +1510,7 @@ index e9bb898..ba09c48 100644
  	return outbound, nil
  }
  
-@@ -136,6 +181,41 @@ func (s *URLTest) Start() error {
+@@ -141,6 +186,41 @@ func (s *URLTest) Start() error {
  		return err
  	}
  	s.group = group
@@ -1479,9 +1518,9 @@ index e9bb898..ba09c48 100644
 +		group.autoBan = s.autoBan
 +		s.autoBan.logger = s.logger
 +		s.autoBan.allTagsFunc = func() []string {
-+			tags := make([]string, 0, len(group.outbounds))
-+			for _, detour := range group.outbounds {
-+				tags = append(tags, RealTag(detour))
++			tags := make([]string, 0, len(group.loadOutbounds()))
++			for _, detour := range group.loadOutbounds() {
++				tags = append(tags, RealTag(s.outbound, detour))
 +			}
 +			return tags
 +		}
@@ -1510,10 +1549,10 @@ index e9bb898..ba09c48 100644
 +		}
 +		s.autoBan.Start()
 +	}
- 	return nil
- }
- 
-@@ -145,6 +225,9 @@ func (s *URLTest) PostStart() error {
+ 	for _, providerTag := range s.providerTags {
+ 		s.providers[providerTag].RegisterCallback(s.onProviderUpdated)
+ 	}
+@@ -153,6 +233,9 @@ func (s *URLTest) PostStart() error {
  }
  
  func (s *URLTest) Close() error {
@@ -1523,7 +1562,7 @@ index e9bb898..ba09c48 100644
  	return common.Close(
  		common.PtrOrNil(s.group),
  	)
-@@ -160,9 +243,70 @@ func (s *URLTest) Now() string {
+@@ -171,6 +254,10 @@ func (s *URLTest) Now() string {
  }
  
  func (s *URLTest) All() []string {
@@ -1531,7 +1570,11 @@ index e9bb898..ba09c48 100644
 +	// The UI needs the full list to render nodes; use AutoBanSnapshot() to
 +	// display their health/ban state instead of hiding them (which would also
 +	// hide the background recovery probe from the user).
- 	return s.tags
+ 	outbounds := s.group.loadOutbounds()
+ 	tags := make([]string, 0, len(outbounds))
+ 	for _, detour := range outbounds {
+@@ -179,6 +266,63 @@ func (s *URLTest) All() []string {
+ 	return tags
  }
  
 +// Pin marks a node as manually selected: it is exempt from AutoBan banning.
@@ -1556,8 +1599,8 @@ index e9bb898..ba09c48 100644
 +		return p
 +	}
 +	if s.group != nil {
-+		for _, detour := range s.group.outbounds {
-+			if RealTag(detour) == tag {
++		for _, detour := range s.group.loadOutbounds() {
++			if RealTag(s.outbound, detour) == tag {
 +				if p, loaded := s.outbound.Outbound(detour.Tag()); loaded {
 +					return p
 +				}
@@ -1591,29 +1634,29 @@ index e9bb898..ba09c48 100644
 +	return s.autoBan.Snapshot()
 +}
 +
- func (s *URLTest) URLTest(ctx context.Context) (map[string]uint16, error) {
- 	return s.group.URLTest(ctx)
- }
-@@ -328,8 +472,11 @@ type URLTestGroup struct {
+ func (s *URLTest) SelectPreMatchOutbound(metadata *adapter.InboundContext, selectOutbound func(adapter.Outbound) (adapter.Outbound, adapter.PreMatchAction)) (adapter.Outbound, adapter.PreMatchAction) {
+ 	s.group.Touch()
+ 	network := metadata.Network
+@@ -349,8 +493,11 @@ type URLTestGroup struct {
  	close                        chan struct{}
- 	started                      bool
+ 	started                      atomic.Bool
  	lastActive                   common.TypedValue[time.Time]
 +	lastResortCounter            atomic.Uint64
 +	manualTag                    atomic.Value // string
  
  	fallback URLTestFallback
-+	autoBan *AutoBan
++	autoBan  *AutoBan
  }
  
  func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, fallback URLTestFallback, interruptExternalConnections bool) (*URLTestGroup, error) {
-@@ -414,16 +561,41 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -432,10 +579,32 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  	var minOutbound adapter.Outbound
  	var fallbackIgnoreOutboundDelay uint16
  	var fallbackIgnoreOutbound adapter.Outbound
 +
 +	if manualTag, ok := g.manualTag.Load().(string); ok && manualTag != "" {
-+		for _, detour := range g.outbounds {
-+			if detour.Tag() == manualTag || RealTag(detour) == manualTag {
++		for _, detour := range g.loadOutbounds() {
++			if detour.Tag() == manualTag || RealTag(g.outbound, detour) == manualTag {
 +				return detour, false
 +			}
 +		}
@@ -1623,7 +1666,7 @@ index e9bb898..ba09c48 100644
 +		if !common.Contains(detour.Network(), network) {
 +			return false
 +		}
-+		if g.autoBan != nil && g.autoBan.Blocked(RealTag(detour)) {
++		if g.autoBan != nil && g.autoBan.Blocked(RealTag(g.outbound, detour)) {
 +			return false
 +		}
 +		return true
@@ -1631,39 +1674,41 @@ index e9bb898..ba09c48 100644
 +
  	switch network {
  	case N.NetworkTCP:
--		if g.selectedOutboundTCP != nil {
-+		if g.selectedOutboundTCP != nil && g.autoBan != nil && g.autoBan.Blocked(RealTag(g.selectedOutboundTCP)) {
-+			g.logger.Warn("auto_ban: selected outbound ", g.selectedOutboundTCP.Tag(), " is blocked; using automatic selection")
+ 		selectedOutbound := g.selectedOutboundTCP.Load()
+-		if selectedOutbound != nil {
++		if selectedOutbound != nil && g.autoBan != nil && g.autoBan.Blocked(RealTag(g.outbound, selectedOutbound)) {
++			g.logger.Warn("auto_ban: selected outbound ", selectedOutbound.Tag(), " is blocked; using automatic selection")
 +		}
-+		if g.selectedOutboundTCP != nil && usable(g.selectedOutboundTCP) {
- 			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundTCP)); history != nil {
- 				minOutbound = g.selectedOutboundTCP
++		if selectedOutbound != nil && usable(selectedOutbound) {
+ 			if history := g.history.LoadURLTestHistory(RealTag(g.outbound, selectedOutbound)); history != nil {
+ 				minOutbound = selectedOutbound
  				minDelay = history.Delay
- 			}
+@@ -443,7 +612,10 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  		}
  	case N.NetworkUDP:
--		if g.selectedOutboundUDP != nil {
-+		if g.selectedOutboundUDP != nil && g.autoBan != nil && g.autoBan.Blocked(RealTag(g.selectedOutboundUDP)) {
-+			g.logger.Warn("auto_ban: selected outbound ", g.selectedOutboundUDP.Tag(), " is blocked; using automatic selection")
+ 		selectedOutbound := g.selectedOutboundUDP.Load()
+-		if selectedOutbound != nil {
++		if selectedOutbound != nil && g.autoBan != nil && g.autoBan.Blocked(RealTag(g.outbound, selectedOutbound)) {
++			g.logger.Warn("auto_ban: selected outbound ", selectedOutbound.Tag(), " is blocked; using automatic selection")
 +		}
-+		if g.selectedOutboundUDP != nil && usable(g.selectedOutboundUDP) {
- 			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundUDP)); history != nil {
- 				minOutbound = g.selectedOutboundUDP
++		if selectedOutbound != nil && usable(selectedOutbound) {
+ 			if history := g.history.LoadURLTestHistory(RealTag(g.outbound, selectedOutbound)); history != nil {
+ 				minOutbound = selectedOutbound
  				minDelay = history.Delay
-@@ -431,7 +603,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
- 		}
+@@ -452,7 +624,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  	}
- 	for _, detour := range g.outbounds {
+ 	outbounds := g.loadOutbounds()
+ 	for _, detour := range outbounds {
 -		if !common.Contains(detour.Network(), network) {
 +		if !usable(detour) {
  			continue
  		}
- 		history := g.history.LoadURLTestHistory(RealTag(detour))
-@@ -463,17 +635,69 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+ 		history := g.history.LoadURLTestHistory(RealTag(g.outbound, detour))
+@@ -484,17 +656,69 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  		return fallbackIgnoreOutbound, true
  	}
  	if minOutbound == nil {
--		for _, detour := range g.outbounds {
+-		for _, detour := range outbounds {
 -			if !common.Contains(detour.Network(), network) {
 -				continue
 -			}
@@ -1686,11 +1731,11 @@ index e9bb898..ba09c48 100644
 +	var hasAvailableDelay bool
 +	var blockedCandidates []adapter.Outbound
 +
-+	for _, detour := range g.outbounds {
++	for _, detour := range g.loadOutbounds() {
 +		if !common.Contains(detour.Network(), network) {
 +			continue
 +		}
-+		tag := RealTag(detour)
++		tag := RealTag(g.outbound, detour)
 +		blocked := g.autoBan != nil && g.autoBan.Blocked(tag)
 +		history := g.history.LoadURLTestHistory(tag)
 +		if blocked {
@@ -1734,46 +1779,103 @@ index e9bb898..ba09c48 100644
  func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{}) {
  	if time.Since(g.lastActive.Load()) > g.interval {
  		g.lastActive.Store(time.Now())
-@@ -514,6 +738,11 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
- 		return result, nil
- 	}
- 	defer g.checking.Store(false)
+@@ -544,7 +768,25 @@ func (g *URLTestGroup) urlTestWait(ctx context.Context, force bool) (map[string]
+ }
+ 
+ func (g *URLTestGroup) urlTestLocked(ctx context.Context, force bool) (map[string]uint16, error) {
+-	result := URLTestOutbounds(ctx, g.outbound, g.history, g.logger, g.loadOutbounds(), g.link, g.interval, force)
 +	if g.autoBan != nil && !g.autoBan.NetworkHealthy() {
 +		// Physical network is down: skip the whole passive round instead of
 +		// attributing environmental failures to every node.
-+		return result, nil
++		return make(map[string]uint16), nil
 +	}
- 	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
- 	checked := make(map[string]bool)
- 	var resultAccess sync.Mutex
-@@ -523,6 +752,11 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
- 		if checked[realTag] {
- 			continue
- 		}
-+		if !force && g.autoBan != nil && g.autoBan.Blocked(realTag) {
-+			// Passive interval tests should not bypass AutoBan backoff. Blocked
-+			// nodes are probed by the active recovery worker pool instead.
-+			continue
++	outbounds := g.loadOutbounds()
++	if !force && g.autoBan != nil {
++		outbounds = common.FilterNotNil(common.Map(outbounds, func(detour adapter.Outbound) adapter.Outbound {
++			if g.autoBan.Blocked(RealTag(g.outbound, detour)) {
++				return nil
++			}
++			return detour
++		}))
++	}
++	result := URLTestOutbounds(ctx, g.outbound, g.history, g.logger, outbounds, g.link, g.interval, force, func(tag string, delay uint16, success bool) {
++		if g.autoBan != nil {
++			g.autoBan.RecordResult(tag, delay, success)
 +		}
- 		history := g.history.LoadURLTestHistory(realTag)
- 		if !force && history != nil && time.Since(history.Time) < g.interval {
- 			continue
-@@ -539,12 +773,18 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
- 			if err != nil {
- 				g.logger.Debug("outbound ", tag, " unavailable: ", err)
- 				g.history.DeleteURLTestHistory(realTag)
-+				if g.autoBan != nil {
-+					g.autoBan.RecordResult(realTag, 0, false)
-+				}
- 			} else {
- 				g.logger.Debug("outbound ", tag, " available: ", t, "ms")
- 				g.history.StoreURLTestHistory(realTag, &adapter.URLTestHistory{
- 					Time:  time.Now(),
- 					Delay: t,
- 				})
-+				if g.autoBan != nil {
-+					g.autoBan.RecordResult(realTag, t, true)
-+				}
- 				resultAccess.Lock()
- 				result[tag] = t
- 				resultAccess.Unlock()
++	})
+ 	select {
+ 	case <-ctx.Done():
+ 	default:
+@@ -612,30 +854,32 @@ func (s *urlTestSession) test(ctx context.Context, key urlTestSessionKey, test f
+ }
+ 
+ type urlTestBatch struct {
+-	ctx      context.Context
+-	outbound adapter.OutboundManager
+-	history  *urltest.HistoryStorage
+-	logger   log.Logger
+-	session  *urlTestSession
+-	batch    *batch.Batch[any]
+-	checked  map[string]bool
+-	groups   []adapter.OutboundGroup
+-	access   sync.Mutex
+-	result   map[string]uint16
+-}
+-
+-func URLTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, force bool) map[string]uint16 {
++	ctx           context.Context
++	outbound      adapter.OutboundManager
++	history       *urltest.HistoryStorage
++	logger        log.Logger
++	onProbeResult func(tag string, delay uint16, success bool)
++	session       *urlTestSession
++	batch         *batch.Batch[any]
++	checked       map[string]bool
++	groups        []adapter.OutboundGroup
++	access        sync.Mutex
++	result        map[string]uint16
++}
++
++func URLTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, force bool, onProbeResult func(tag string, delay uint16, success bool)) map[string]uint16 {
+ 	ctx, session := urlTestSessionFromContext(ctx)
+ 	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
+ 	testBatch := &urlTestBatch{
+-		ctx:      ctx,
+-		outbound: outboundManager,
+-		history:  history,
+-		logger:   logger,
+-		session:  session,
+-		batch:    b,
+-		checked:  make(map[string]bool),
+-		result:   make(map[string]uint16),
++		ctx:           ctx,
++		outbound:      outboundManager,
++		history:       history,
++		logger:        logger,
++		onProbeResult: onProbeResult,
++		session:       session,
++		batch:         b,
++		checked:       make(map[string]bool),
++		result:        make(map[string]uint16),
+ 	}
+ 	testBatch.test(outbounds, link, interval, force)
+ 	b.Wait()
+@@ -697,12 +941,18 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval
+ 				if testResult.err != nil {
+ 					b.logger.Debug("outbound ", tag, " unavailable: ", testResult.err)
+ 					b.history.DeleteURLTestHistory(tag)
++					if b.onProbeResult != nil {
++						b.onProbeResult(tag, 0, false)
++					}
+ 				} else {
+ 					b.logger.Debug("outbound ", tag, " available: ", testResult.delay, "ms")
+ 					b.history.StoreURLTestHistory(tag, &adapter.URLTestHistory{
+ 						Time:  time.Now(),
+ 						Delay: testResult.delay,
+ 					})
++					if b.onProbeResult != nil {
++						b.onProbeResult(tag, testResult.delay, true)
++					}
+ 					b.access.Lock()
+ 					b.result[tag] = testResult.delay
+ 					b.access.Unlock()

@@ -1,9 +1,9 @@
 diff --git a/common/congestion/congestion.go b/common/congestion/congestion.go
 new file mode 100644
-index 0000000..672b458
+index 00000000..885dffaf
 --- /dev/null
 +++ b/common/congestion/congestion.go
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,54 @@
 +package congestion
 +
 +import (
@@ -11,8 +11,6 @@ index 0000000..672b458
 +
 +	"github.com/sagernet/quic-go"
 +	"github.com/sagernet/quic-go/congestion"
-+	"github.com/sagernet/sing-quic/congestion_bbr1"
-+	"github.com/sagernet/sing-quic/congestion_bbr2"
 +	congestion_meta1 "github.com/sagernet/sing-quic/congestion_meta1"
 +	congestion_meta2 "github.com/sagernet/sing-quic/congestion_meta2"
 +	E "github.com/sagernet/sing/common/exceptions"
@@ -22,43 +20,22 @@ index 0000000..672b458
 +	if timeFunc == nil {
 +		timeFunc = time.Now
 +	}
-+	if cwnd == 0 {
-+		cwnd = 32
-+	}
++	_ = cwnd // legacy per-config initial window: dropped by the sing-quic v0.7 API
 +	switch name {
-+	case "", "bbr":
++	case "", "bbr", "bbr_standard", "bbr2":
++		// sing-quic v0.7.0 removed congestion_bbr1/bbr2; all BBR variants map
++		// onto the single meta2 BBR implementation now.
 +		return func(conn *quic.Conn) congestion.CongestionControl {
-+			return congestion_meta2.NewBbrSender(
-+				congestion_meta2.DefaultClock{TimeFunc: timeFunc},
++			return congestion_meta2.NewBbrSenderWithProfile(
 +				congestion.ByteCount(conn.Config().InitialPacketSize),
-+				congestion.ByteCount(cwnd)*congestion.ByteCount(conn.Config().InitialPacketSize),
-+			)
-+		}, nil
-+	case "bbr_standard":
-+		return func(conn *quic.Conn) congestion.CongestionControl {
-+			return congestion_bbr1.NewBbrSender(
-+				congestion_bbr1.DefaultClock{TimeFunc: timeFunc},
-+				congestion.ByteCount(conn.Config().InitialPacketSize),
-+				congestion_bbr1.InitialCongestionWindowPackets,
-+				congestion_bbr1.MaxCongestionWindowPackets,
-+			)
-+		}, nil
-+	case "bbr2":
-+		return func(conn *quic.Conn) congestion.CongestionControl {
-+			return congestion_bbr2.NewBBR2Sender(
-+				congestion_bbr2.DefaultClock{TimeFunc: timeFunc},
-+				congestion.ByteCount(conn.Config().InitialPacketSize),
-+				0,
-+				false,
++				congestion_meta2.ProfileStandard,
 +			)
 +		}, nil
 +	case "bbr2_variant":
 +		return func(conn *quic.Conn) congestion.CongestionControl {
-+			return congestion_bbr2.NewBBR2Sender(
-+				congestion_bbr2.DefaultClock{TimeFunc: timeFunc},
++			return congestion_meta2.NewBbrSenderWithProfile(
 +				congestion.ByteCount(conn.Config().InitialPacketSize),
-+				32*congestion.ByteCount(conn.Config().InitialPacketSize),
-+				true,
++				congestion_meta2.ProfileAggressive,
 +			)
 +		}, nil
 +	case "cubic":
@@ -83,7 +60,7 @@ index 0000000..672b458
 +}
 diff --git a/common/kmutex/mutex.go b/common/kmutex/mutex.go
 new file mode 100644
-index 0000000..6e2e4ec
+index 00000000..6e2e4ec7
 --- /dev/null
 +++ b/common/kmutex/mutex.go
 @@ -0,0 +1,54 @@
@@ -143,7 +120,7 @@ index 0000000..6e2e4ec
 +}
 diff --git a/common/kmutex/mutex_test.go b/common/kmutex/mutex_test.go
 new file mode 100644
-index 0000000..6648442
+index 00000000..6648442b
 --- /dev/null
 +++ b/common/kmutex/mutex_test.go
 @@ -0,0 +1,96 @@
@@ -243,9 +220,22 @@ index 0000000..6648442
 +	}
 +	wg.Wait()
 +}
+diff --git a/common/urltest/urltest.go b/common/urltest/urltest.go
+index a4e3d953..24effa93 100644
+--- a/common/urltest/urltest.go
++++ b/common/urltest/urltest.go
+@@ -91,7 +91,7 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (uint16, error)
+ 
+ func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err error) {
+ 	if link == "" {
+-		link = "https://www.gstatic.com/generate_204"
++		link = "https://cp.cloudflare.com/generate_204"
+ 	}
+ 	linkURL, err := url.Parse(link)
+ 	if err != nil {
 diff --git a/common/xray/buf/buffer.go b/common/xray/buf/buffer.go
 new file mode 100644
-index 0000000..38bbc9c
+index 00000000..38bbc9c4
 --- /dev/null
 +++ b/common/xray/buf/buffer.go
 @@ -0,0 +1,348 @@
@@ -599,7 +589,7 @@ index 0000000..38bbc9c
 +}
 diff --git a/common/xray/buf/copy.go b/common/xray/buf/copy.go
 new file mode 100644
-index 0000000..efab0e1
+index 00000000..efab0e17
 --- /dev/null
 +++ b/common/xray/buf/copy.go
 @@ -0,0 +1,124 @@
@@ -729,7 +719,7 @@ index 0000000..efab0e1
 +}
 diff --git a/common/xray/buf/io.go b/common/xray/buf/io.go
 new file mode 100644
-index 0000000..5b7826e
+index 00000000..5b7826e0
 --- /dev/null
 +++ b/common/xray/buf/io.go
 @@ -0,0 +1,127 @@
@@ -862,7 +852,7 @@ index 0000000..5b7826e
 +}
 diff --git a/common/xray/buf/multi_buffer.go b/common/xray/buf/multi_buffer.go
 new file mode 100644
-index 0000000..8fe09c8
+index 00000000..8fe09c81
 --- /dev/null
 +++ b/common/xray/buf/multi_buffer.go
 @@ -0,0 +1,310 @@
@@ -1178,7 +1168,7 @@ index 0000000..8fe09c8
 +}
 diff --git a/common/xray/buf/override.go b/common/xray/buf/override.go
 new file mode 100644
-index 0000000..2032854
+index 00000000..2032854f
 --- /dev/null
 +++ b/common/xray/buf/override.go
 @@ -0,0 +1,38 @@
@@ -1222,7 +1212,7 @@ index 0000000..2032854
 +}
 diff --git a/common/xray/buf/reader.go b/common/xray/buf/reader.go
 new file mode 100644
-index 0000000..17b2e49
+index 00000000..17b2e491
 --- /dev/null
 +++ b/common/xray/buf/reader.go
 @@ -0,0 +1,175 @@
@@ -1403,7 +1393,7 @@ index 0000000..17b2e49
 +}
 diff --git a/common/xray/buf/writer.go b/common/xray/buf/writer.go
 new file mode 100644
-index 0000000..c76316c
+index 00000000..c76316c5
 --- /dev/null
 +++ b/common/xray/buf/writer.go
 @@ -0,0 +1,284 @@
@@ -1693,7 +1683,7 @@ index 0000000..c76316c
 +)
 diff --git a/common/xray/bytespool/pool.go b/common/xray/bytespool/pool.go
 new file mode 100644
-index 0000000..6f632d5
+index 00000000..6f632d52
 --- /dev/null
 +++ b/common/xray/bytespool/pool.go
 @@ -0,0 +1,72 @@
@@ -1771,7 +1761,7 @@ index 0000000..6f632d5
 +}
 diff --git a/common/xray/common.go b/common/xray/common.go
 new file mode 100644
-index 0000000..266f57e
+index 00000000..266f57ef
 --- /dev/null
 +++ b/common/xray/common.go
 @@ -0,0 +1,32 @@
@@ -1809,7 +1799,7 @@ index 0000000..266f57e
 +}
 diff --git a/common/xray/cpuid/cpuid.go b/common/xray/cpuid/cpuid.go
 new file mode 100644
-index 0000000..60938fe
+index 00000000..60938fe3
 --- /dev/null
 +++ b/common/xray/cpuid/cpuid.go
 @@ -0,0 +1,18 @@
@@ -1833,7 +1823,7 @@ index 0000000..60938fe
 +)
 diff --git a/common/xray/crypto/crypto.go b/common/xray/crypto/crypto.go
 new file mode 100644
-index 0000000..4356d41
+index 00000000..4356d412
 --- /dev/null
 +++ b/common/xray/crypto/crypto.go
 @@ -0,0 +1,17 @@
@@ -1856,7 +1846,7 @@ index 0000000..4356d41
 +}
 diff --git a/common/xray/errors/errors.go b/common/xray/errors/errors.go
 new file mode 100644
-index 0000000..54af7cb
+index 00000000..54af7cbe
 --- /dev/null
 +++ b/common/xray/errors/errors.go
 @@ -0,0 +1,25 @@
@@ -1887,7 +1877,7 @@ index 0000000..54af7cb
 +}
 diff --git a/common/xray/interfaces.go b/common/xray/interfaces.go
 new file mode 100644
-index 0000000..428c338
+index 00000000..428c3388
 --- /dev/null
 +++ b/common/xray/interfaces.go
 @@ -0,0 +1,52 @@
@@ -1945,7 +1935,7 @@ index 0000000..428c338
 +}
 diff --git a/common/xray/net/address.go b/common/xray/net/address.go
 new file mode 100644
-index 0000000..7a99c8a
+index 00000000..7a99c8ad
 --- /dev/null
 +++ b/common/xray/net/address.go
 @@ -0,0 +1,181 @@
@@ -2132,7 +2122,7 @@ index 0000000..7a99c8a
 +}
 diff --git a/common/xray/net/destination.go b/common/xray/net/destination.go
 new file mode 100644
-index 0000000..561c772
+index 00000000..561c7726
 --- /dev/null
 +++ b/common/xray/net/destination.go
 @@ -0,0 +1,146 @@
@@ -2284,7 +2274,7 @@ index 0000000..561c772
 +}
 diff --git a/common/xray/net/net.go b/common/xray/net/net.go
 new file mode 100644
-index 0000000..9bc049d
+index 00000000..9bc049d9
 --- /dev/null
 +++ b/common/xray/net/net.go
 @@ -0,0 +1,13 @@
@@ -2303,7 +2293,7 @@ index 0000000..9bc049d
 +const ChromeH2KeepAlivePeriod = 45 * time.Second
 diff --git a/common/xray/net/network.go b/common/xray/net/network.go
 new file mode 100644
-index 0000000..356d7fd
+index 00000000..356d7fda
 --- /dev/null
 +++ b/common/xray/net/network.go
 @@ -0,0 +1,33 @@
@@ -2342,7 +2332,7 @@ index 0000000..356d7fd
 +}
 diff --git a/common/xray/net/port.go b/common/xray/net/port.go
 new file mode 100644
-index 0000000..6d42c40
+index 00000000..6d42c40b
 --- /dev/null
 +++ b/common/xray/net/port.go
 @@ -0,0 +1,55 @@
@@ -2403,7 +2393,7 @@ index 0000000..6d42c40
 +}
 diff --git a/common/xray/net/system.go b/common/xray/net/system.go
 new file mode 100644
-index 0000000..7e1c4b0
+index 00000000..7e1c4b01
 --- /dev/null
 +++ b/common/xray/net/system.go
 @@ -0,0 +1,84 @@
@@ -2493,7 +2483,7 @@ index 0000000..7e1c4b0
 +type Resolver = net.Resolver
 diff --git a/common/xray/pipe/impl.go b/common/xray/pipe/impl.go
 new file mode 100644
-index 0000000..7b2a97a
+index 00000000..7b2a97a8
 --- /dev/null
 +++ b/common/xray/pipe/impl.go
 @@ -0,0 +1,209 @@
@@ -2708,7 +2698,7 @@ index 0000000..7b2a97a
 +}
 diff --git a/common/xray/pipe/pipe.go b/common/xray/pipe/pipe.go
 new file mode 100644
-index 0000000..06f949f
+index 00000000..06f949fa
 --- /dev/null
 +++ b/common/xray/pipe/pipe.go
 @@ -0,0 +1,53 @@
@@ -2767,7 +2757,7 @@ index 0000000..06f949f
 +}
 diff --git a/common/xray/pipe/reader.go b/common/xray/pipe/reader.go
 new file mode 100644
-index 0000000..cafe444
+index 00000000..cafe444a
 --- /dev/null
 +++ b/common/xray/pipe/reader.go
 @@ -0,0 +1,41 @@
@@ -2814,7 +2804,7 @@ index 0000000..cafe444
 +}
 diff --git a/common/xray/pipe/writer.go b/common/xray/pipe/writer.go
 new file mode 100644
-index 0000000..1531263
+index 00000000..15312635
 --- /dev/null
 +++ b/common/xray/pipe/writer.go
 @@ -0,0 +1,29 @@
@@ -2849,7 +2839,7 @@ index 0000000..1531263
 +}
 diff --git a/common/xray/serial/serial.go b/common/xray/serial/serial.go
 new file mode 100644
-index 0000000..9d8cb4c
+index 00000000..9d8cb4ca
 --- /dev/null
 +++ b/common/xray/serial/serial.go
 @@ -0,0 +1,29 @@
@@ -2884,7 +2874,7 @@ index 0000000..9d8cb4c
 +}
 diff --git a/common/xray/serial/string.go b/common/xray/serial/string.go
 new file mode 100644
-index 0000000..8fdcd7f
+index 00000000..8fdcd7f6
 --- /dev/null
 +++ b/common/xray/serial/string.go
 @@ -0,0 +1,35 @@
@@ -2925,7 +2915,7 @@ index 0000000..8fdcd7f
 +}
 diff --git a/common/xray/signal/done/done.go b/common/xray/signal/done/done.go
 new file mode 100644
-index 0000000..189a8cf
+index 00000000..189a8cf3
 --- /dev/null
 +++ b/common/xray/signal/done/done.go
 @@ -0,0 +1,49 @@
@@ -2980,7 +2970,7 @@ index 0000000..189a8cf
 +}
 diff --git a/common/xray/signal/notifier.go b/common/xray/signal/notifier.go
 new file mode 100644
-index 0000000..19836e5
+index 00000000..19836e54
 --- /dev/null
 +++ b/common/xray/signal/notifier.go
 @@ -0,0 +1,26 @@
@@ -3012,7 +3002,7 @@ index 0000000..19836e5
 +}
 diff --git a/common/xray/signal/pubsub/pubsub.go b/common/xray/signal/pubsub/pubsub.go
 new file mode 100644
-index 0000000..6de453e
+index 00000000..6de453e8
 --- /dev/null
 +++ b/common/xray/signal/pubsub/pubsub.go
 @@ -0,0 +1,105 @@
@@ -3123,7 +3113,7 @@ index 0000000..6de453e
 +}
 diff --git a/common/xray/signal/semaphore/semaphore.go b/common/xray/signal/semaphore/semaphore.go
 new file mode 100644
-index 0000000..8696b14
+index 00000000..8696b148
 --- /dev/null
 +++ b/common/xray/signal/semaphore/semaphore.go
 @@ -0,0 +1,27 @@
@@ -3156,7 +3146,7 @@ index 0000000..8696b14
 +}
 diff --git a/common/xray/signal/timer.go b/common/xray/signal/timer.go
 new file mode 100644
-index 0000000..52961bf
+index 00000000..52961bf5
 --- /dev/null
 +++ b/common/xray/signal/timer.go
 @@ -0,0 +1,85 @@
@@ -3247,7 +3237,7 @@ index 0000000..52961bf
 +}
 diff --git a/common/xray/stat/connection.go b/common/xray/stat/connection.go
 new file mode 100644
-index 0000000..463db62
+index 00000000..463db62d
 --- /dev/null
 +++ b/common/xray/stat/connection.go
 @@ -0,0 +1,34 @@
@@ -3287,7 +3277,7 @@ index 0000000..463db62
 +}
 diff --git a/common/xray/stats/stats.go b/common/xray/stats/stats.go
 new file mode 100644
-index 0000000..70bbd02
+index 00000000..70bbd026
 --- /dev/null
 +++ b/common/xray/stats/stats.go
 @@ -0,0 +1,13 @@
@@ -3306,7 +3296,7 @@ index 0000000..70bbd02
 +}
 diff --git a/common/xray/task/common.go b/common/xray/task/common.go
 new file mode 100644
-index 0000000..11078fb
+index 00000000..11078fb9
 --- /dev/null
 +++ b/common/xray/task/common.go
 @@ -0,0 +1,10 @@
@@ -3322,7 +3312,7 @@ index 0000000..11078fb
 +}
 diff --git a/common/xray/task/periodic.go b/common/xray/task/periodic.go
 new file mode 100644
-index 0000000..6abe41a
+index 00000000..6abe41ae
 --- /dev/null
 +++ b/common/xray/task/periodic.go
 @@ -0,0 +1,85 @@
@@ -3413,7 +3403,7 @@ index 0000000..6abe41a
 +}
 diff --git a/common/xray/task/task.go b/common/xray/task/task.go
 new file mode 100644
-index 0000000..a153839
+index 00000000..a1538392
 --- /dev/null
 +++ b/common/xray/task/task.go
 @@ -0,0 +1,64 @@
@@ -3483,7 +3473,7 @@ index 0000000..a153839
 +}
 diff --git a/common/xray/utils/browser.go b/common/xray/utils/browser.go
 new file mode 100644
-index 0000000..944c5cd
+index 00000000..944c5cdd
 --- /dev/null
 +++ b/common/xray/utils/browser.go
 @@ -0,0 +1,290 @@
@@ -3779,7 +3769,7 @@ index 0000000..944c5cd
 +}
 diff --git a/common/xray/utils/padding.go b/common/xray/utils/padding.go
 new file mode 100644
-index 0000000..fe95ba9
+index 00000000..fe95ba9a
 --- /dev/null
 +++ b/common/xray/utils/padding.go
 @@ -0,0 +1,24 @@
@@ -3809,7 +3799,7 @@ index 0000000..fe95ba9
 +}
 diff --git a/common/xray/uuid/uuid.go b/common/xray/uuid/uuid.go
 new file mode 100644
-index 0000000..31c7b53
+index 00000000..31c7b531
 --- /dev/null
 +++ b/common/xray/uuid/uuid.go
 @@ -0,0 +1,105 @@
