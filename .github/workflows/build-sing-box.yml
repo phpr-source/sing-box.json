@@ -1064,6 +1064,72 @@ jobs:
           # Gradle 9.3.1+ hard-fails configuring a project whose dir is missing.
           submodules: true
 
+      - name: Restore missing Kotlin imports
+        # The upstream reF1nd-stable branch of sing-box-for-android references
+        # symbols whose import statements are absent, so Kotlin compilation
+        # fails with "Unresolved reference" during :app:compileOtherReleaseKotlin.
+        # The branch was force-pushed on 2026-08-28 and still ships without them.
+        #
+        # This re-adds the imports instead of suppressing or deleting anything.
+        # Each one is only inserted when the usage pattern is actually present
+        # and the import is genuinely missing, so the step is a no-op on branches
+        # that are correct (e.g. reF1nd-testing) and stops touching the files as
+        # soon as upstream restores its own imports.
+        if: matrix.target.sfa_repo != 'none'
+        run: |
+          set -euo pipefail
+          cd ./sing-box-for-android
+
+          add_import_if_used() {
+            local file="$1" import_line="$2" usage_re="$3"
+            if [ ! -f "$file" ]; then
+              echo "  skip (file absent): $file"
+              return 0
+            fi
+            if grep -qF -- "$import_line" "$file"; then
+              echo "  ok (already imported): $import_line"
+              return 0
+            fi
+            # Match the usage outside the import block only.
+            if ! grep -v '^import ' "$file" | grep -qE -- "$usage_re"; then
+              echo "  skip (usage not found): $usage_re"
+              return 0
+            fi
+            if [ "$(grep -c '^import ' "$file")" -eq 0 ]; then
+              echo "::warning::No import block in $file; cannot insert $import_line"
+              return 0
+            fi
+            # Insert in ASCII-sorted position rather than appending: the project
+            # runs spotless + ktlint, whose import-ordering rule is NOT disabled
+            # in app/build.gradle.kts. LC_ALL=C keeps the comparison byte-wise.
+            LC_ALL=C awk -v imp="$import_line" '
+              /^import / {
+                if (!done && imp < $0) { print imp; done = 1 }
+                print
+                next
+              }
+              { print }
+              END { if (!done) { print imp } }
+            ' "$file" > "$file.imports.tmp"
+            mv "$file.imports.tmp" "$file"
+            echo "  added: $import_line"
+          }
+
+          # Log.w("MainActivity", ...) is called but android.util.Log is not imported.
+          # The leading-character class excludes Screen.Log.route / LogViewModel.
+          add_import_if_used \
+            "app/src/main/java/io/nekohasekai/sfa/compose/MainActivity.kt" \
+            "import android.util.Log" \
+            '(^|[^.[:alnum:]_])Log\.[a-zA-Z]'
+
+          # Icons.Default.VisibilityOff is used but the filled variant is not
+          # imported. This file already imports filled.ContentCopy, so the
+          # material-icons-extended dependency is present.
+          add_import_if_used \
+            "app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/AppSettingsScreen.kt" \
+            "import androidx.compose.material.icons.filled.VisibilityOff" \
+            '\.VisibilityOff([^[:alnum:]_]|$)'
+
       - name: Setup Go
         if: matrix.target.sfa_repo != 'none'
         uses: actions/setup-go@v6
