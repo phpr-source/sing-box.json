@@ -24,10 +24,35 @@ jobs:
           python-version: '3.10'
 
       - name: Install Dependencies
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           pip install requests urllib3 orjson msgpack blake3 z3-solver
-          wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
-          chmod +x sb-core
+          # 直接取 sing-box-testing release 的標準 linux-amd64 包。
+          # 歷史缺陷：此處曾 wget 一個獨立的 singbox helper release，該 release
+          # 被 cleanup.yml 的 cleanup-releases 當作普通 stable release 刪除後，
+          # wget 404（退出碼 8），且無人察覺——上游規則轉換連續超時把它掩蓋了 14 天。
+          RELEASE_TAG="sing-box-testing"
+          ASSET_URL=$(curl -sL -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
+            | jq -r '.assets[] | select(.name | test("linux-amd64\\.tar\\.gz$")) | .browser_download_url' \
+            | head -n 1)
+          if [ -z "$ASSET_URL" ]; then
+            echo "::error::No linux-amd64 asset found in $RELEASE_TAG"
+            exit 1
+          fi
+          curl -L --fail --retry 3 -o sb-core.tar.gz "$ASSET_URL"
+          tar -xzf sb-core.tar.gz
+          rm -f sb-core.tar.gz
+          FOUND=$(find . -maxdepth 2 -name "sing-box" -type f 2>/dev/null | head -n 1)
+          if [ -z "$FOUND" ]; then
+            echo "::error::sing-box binary not found after extraction"
+            exit 1
+          fi
+          mv "$FOUND" ./sb-core
+          chmod +x ./sb-core
 
       - name: Clean Old Merged Rules
         run: |
