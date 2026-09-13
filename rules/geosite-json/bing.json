@@ -4,7 +4,6 @@
     {
       "domain": [
         "bj1.api.bing.com",
-        "emoi-cncdn.bing.com",
         "location.microsoft.com"
       ],
       "domain_suffix": [
@@ -25,6 +24,9 @@
         "cn.bing.com",
         "cn.bing.net",
         "cn.mm.bing.net",
+        "copilot-stg.com",
+        "copilot.cloud.microsoft",
+        "copilot.com",
         "copilot.microsoft.com",
         "dictate.ms",
         "ditu.live.com",

@@ -3,6 +3,10 @@
   "rules": [
     {
       "domain_suffix": [
+        ".anquan",
+        ".shouji",
+        ".xihuan",
+        ".yun",
         "360-api.cn",
         "360-g.cn",
         "360-g.net",
@@ -23,6 +27,7 @@
         "360pay.cn",
         "360qhcdn.com",
         "360safe.com",
+        "360scdn.com",
         "360shouji.com",
         "360sjyh.cn",
         "360so.com",
@@ -99,6 +104,7 @@
         "wotgame.cn",
         "wowsgame.cn",
         "woxihuan.com",
+        "wukongsafe.cn",
         "wztsy.cn",
         "wztsy.com",
         "xiaoluyouxuan.com",

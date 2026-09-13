@@ -2,13 +2,17 @@
   "version": 5,
   "rules": [
     {
-      "domain": "mozilla-ohttp.fastly-edge.com",
+      "domain": [
+        "mozilla-ohttp.fastly-edge.com",
+        "mozilla.map.fastly.net"
+      ],
       "domain_suffix": [
         ".chrome",
         "basilisk-browser.org",
         "brave.com",
         "bromite.org",
         "browser.kagi.com",
+        "ceno.app",
         "censorship.no",
         "chrome.com",
         "chromium.org",
