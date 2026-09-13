@@ -73,6 +73,67 @@ jobs:
           fi
           echo "All patches apply cleanly against reF1nd-stable and reF1nd-testing."
 
+      - name: Resolve Go toolchain version
+        run: |
+          set -euo pipefail
+          # 兩個上游分支的 go.mod 此前一致；以 testing 為準，漂移時取較新值。
+          rm -rf /tmp/sing-box-go
+          git clone --quiet --depth 1 --branch reF1nd-testing \
+            https://github.com/reF1nd/sing-box.git /tmp/sing-box-go
+          go_version="$(sed -n 's/^go \([0-9.]*\)$/\1/p' /tmp/sing-box-go/go.mod | head -1)"
+          if [ -z "$go_version" ]; then
+            echo "::error::Cannot resolve Go version from testing go.mod"
+            exit 1
+          fi
+          echo "go_version=$go_version" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '${{ steps.resolve.outputs.go_version }}'
+          cache: true
+
+      - name: Compile smoke test
+        run: |
+          set -euo pipefail
+          # 補丁「能套上」不等於「能編譯」：上游依賴 API 漂移（例如 sing-quic
+          # v0.7.0 移除 congestion_bbr1/bbr2）時，套用檢查全綠、每日構建仍會
+          # 在編譯階段炸掉。此處對兩個分支各做一次 go build ./... 冒煙。
+          FAILED=0
+          FAILED_MSG="${FAILED_MSG:-}"
+          for branch in reF1nd-stable reF1nd-testing; do
+            echo "=== Compiling $branch (patched) ==="
+            rm -rf /tmp/sing-box
+            git clone --quiet --depth 1 --branch "$branch" https://github.com/reF1nd/sing-box.git /tmp/sing-box
+            for dir in common reF1nd_Stable reF1nd_Testing; do
+              case "$branch:$dir" in
+                reF1nd-stable:reF1nd_Stable | reF1nd-testing:reF1nd_Testing | *:common) ;;
+                *) continue ;;
+              esac
+              for p in "patches/$dir"/*.patch; do
+                [ -f "$p" ] || continue
+                git -C /tmp/sing-box apply "$PWD/$p"
+              done
+            done
+            if ! (cd /tmp/sing-box && go build ./...); then
+              echo "::error::COMPILE FAILED after patches: $branch"
+              FAILED=1
+              FAILED_MSG="${FAILED_MSG}- $branch (patched tree fails 'go build ./...')"$'\n'
+            fi
+            rm -rf /tmp/sing-box
+          done
+          rm -rf /tmp/sing-box-go
+          if [ "$FAILED" -eq 1 ]; then
+            {
+              echo "FAILED_MSG<<PATCH_EOF_MARKER"
+              printf '%s' "$FAILED_MSG"
+              echo
+              echo "PATCH_EOF_MARKER"
+            } >> "$GITHUB_ENV"
+            exit 1
+          fi
+          echo "Patched trees compile on both branches."
+
       - name: Open issue on patch breakage
         if: failure()
         uses: actions/github-script@v7
