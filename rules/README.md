@@ -1,6 +1,6 @@
 # 📦 Sing-box Rule Set Collection
 
-> **Core**: `1.15.0-alpha.4-reF1nd` | **Format**: `5` | **Updated**: `2026-09-17 23:07`
+> **Core**: `1.15.0-alpha.4-reF1nd` | **Format**: `5` | **Updated**: `2026-09-18 22:31`
 
 | Rule Name | SRS (Binary) | Source (JSON) | Size |
 | :--- | :--- | :--- | :--- |
