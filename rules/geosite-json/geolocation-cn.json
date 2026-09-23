@@ -4069,6 +4069,7 @@
         "sinopecnews.com.cn",
         "sinopecsales.com",
         "sipeed.com",
+        "sjfls6.com",
         "sjwyx.com",
         "skillhub.cn",
         "skimit.net",
@@ -5390,9 +5391,9 @@
         "zzzmap.com"
       ],
       "domain_regex": [
+        "^.+-mihayo\\.akamaized\\.net$",
         ".+\\.awsdns-cn-[0-9][0-9]\\.(biz|com|net|top)$",
-        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$",
-        "^.+-mihayo\\.akamaized\\.net$"
+        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$"
       ]
     }
   ]
