@@ -1698,12 +1698,21 @@ jobs:
       - name: Verify Build Checksums
         run: |
           set -e
+          # 歷史缺陷：find 無匹配時 while 循環體一次都不執行，FAILED 恆為 0，
+          # 「零產物」被當成「全部校驗通過」放行，隨後 Process 步驟照樣刪舊建新，
+          # 最終兩個 rolling release 全部丟失（2026-09-26 起連日故障的根因之一）。
+          # 零產物 = 構建全掛 = 在碰任何 release 之前就硬失敗。
+          SUMFILES=$(find ./tmp -path "*/pkg-*" -name SHA256SUMS.txt)
+          if [ -z "$SUMFILES" ]; then
+            echo "::error::No package artifacts (SHA256SUMS.txt) found — build produced nothing. Aborting before any release mutation."
+            exit 1
+          fi
           FAILED=0
           while IFS= read -r sumfile; do
             echo "::group::Verify $(basename "$(dirname "$sumfile")")"
             (cd "$(dirname "$sumfile")" && sha256sum -c SHA256SUMS.txt) || FAILED=1
             echo "::endgroup::"
-          done < <(find ./tmp -path "*/pkg-*" -name SHA256SUMS.txt)
+          done <<< "$SUMFILES"
           if [ "$FAILED" -ne 0 ]; then
             echo "::error::Package artifact checksum verification failed, aborting release"
             exit 1
@@ -1986,6 +1995,24 @@ jobs:
             echo '</table>' >> release_body.txt
 
             echo "Checking if release/tag $tag_name exists..."
+
+            # —— 產物閘門：先確認本 target 有真實歸檔產物，才允許刪舊建新。——
+            # 歷史缺陷（2026-09-26 起連日兩個 rolling release 全部消失的根因）：
+            # 構建全掛時 FILES 憑 install-linux.sh + 空 SHA256SUMS.txt 仍非空，
+            # 先 gh release delete 毀掉舊 release，gh release create 又因上傳空
+            # 校驗單 HTTP 400 失敗 → 舊已刪、新未成。必須先驗後刪，零歸檔即跳過。
+            shopt -s nullglob globstar
+            ARCHIVES=(
+              release_files/${target_id}/**/*.tar.gz
+              release_files/${target_id}/**/*.zip
+            )
+            shopt -u nullglob globstar
+            if [ ${#ARCHIVES[@]} -eq 0 ]; then
+              echo "::warning::No archive artifacts for $target_id (build failed for this target); keeping existing release $tag_name untouched and skipping publish."
+              tag_map=$(echo "$tag_map" | jq --arg tid "$target_id" 'del(.[$tid])')
+              continue
+            fi
+
             if gh release view "$tag_name" --json id -q '.id' 2>/dev/null; then
               echo "Deleting existing release $tag_name..."
               gh release delete "$tag_name" --yes --cleanup-tag
@@ -1995,27 +2022,17 @@ jobs:
               git push origin ":refs/tags/$tag_name"
             fi
 
-            shopt -s nullglob globstar
-            FILES=(
-              release_files/${target_id}/**/*.tar.gz
-              release_files/${target_id}/**/*.zip
-            )
-            shopt -u nullglob globstar
+            FILES=("${ARCHIVES[@]}")
             [ -f "release_files/${target_id}/linux/install-linux.sh" ] && FILES+=("release_files/${target_id}/linux/install-linux.sh")
             [ -f "release_files/${target_id}/SHA256SUMS.txt" ] && FILES+=("release_files/${target_id}/SHA256SUMS.txt")
 
-            if [ ${#FILES[@]} -gt 0 ]; then
-              echo "Publishing $tag_name..."
-              gh release create "$tag_name" \
-                --title "$release_title" \
-                --notes-file release_body.txt \
-                --prerelease="$prerelease" \
-                --latest="$make_latest" \
-                "${FILES[@]}"
-            else
-              echo "::error::No artifacts found for $tag_name"
-              exit 1
-            fi
+            echo "Publishing $tag_name..."
+            gh release create "$tag_name" \
+              --title "$release_title" \
+              --notes-file release_body.txt \
+              --prerelease="$prerelease" \
+              --latest="$make_latest" \
+              "${FILES[@]}"
 
             tar -czf /tmp/tg-payload-${target_id}.tar.gz -C "release_files/${target_id}" .
           done <<< "$MATRIX_LINES"
