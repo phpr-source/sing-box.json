@@ -1551,6 +1551,35 @@ jobs:
           go run ./cmd/internal/build_libbox -target apple
           mv Libbox.xcframework clients/apple
 
+      - name: Resolve SwiftPM packages
+        if: steps.era.outputs.skip != 'true'
+        working-directory: sing-box/clients/apple
+        run: |
+          set -euo pipefail
+          rm -rf ~/Library/Caches/org.swift.swiftpm
+          # Apple 官方 CI 指引：先顯式解析依賴，構建階段再以
+          # -disableAutomaticPackageResolution 只按 Package.resolved 取用。
+          # 背景：上游 client pin 9f828a2 的包圖比此前多了一個依賴（26 個），
+          # 恰好踩中 Xcode 26.5 IDE 層的競態 bug（IDEGroup insertGroupSubitems
+          # "count of array (26) differs from count of index set (25)"，exit 134），
+          # 在 xcodebuild build 的包圖同步路徑上 100% 復現
+          # （run 36864837989 / 36864881159 的 build_apple 連續崩潰）。
+          # 解析挪到獨立步驟後，構建不再觸發該路徑；解析本身冪等且可重試。
+          RP_OK=0
+          for attempt in 1 2 3; do
+            rm -rf DerivedData
+            if xcodebuild \
+              -project sing-box.xcodeproj \
+              -scheme SFI \
+              -resolvePackageDependencies
+            then
+              RP_OK=1
+              break
+            fi
+            echo "::warning::resolvePackageDependencies failed (attempt $attempt/3), retrying"
+          done
+          [ "$RP_OK" -eq 1 ] || { echo "::error::package resolution failed after 3 attempts"; exit 1; }
+
       - name: Build SFI (iOS, unsigned + ldid)
         if: steps.era.outputs.skip != 'true'
         working-directory: sing-box/clients/apple
@@ -1573,6 +1602,7 @@ jobs:
               -sdk iphoneos \
               -derivedDataPath DerivedData \
               build \
+              -disableAutomaticPackageResolution \
               STRIP_INSTALLED_PRODUCT=NO \
               ARCHS=arm64 \
               ONLY_ACTIVE_ARCH=YES \
@@ -1628,6 +1658,7 @@ jobs:
               -derivedDataPath DerivedData \
               build \
               -skipPackagePluginValidation \
+              -disableAutomaticPackageResolution \
               CODE_SIGNING_ALLOWED=NO \
               CODE_SIGNING_REQUIRED=NO \
               COMPILER_INDEX_STORE_ENABLE=NO \
@@ -2704,7 +2735,9 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
   create_issue_on_failure:
-    needs: [build_core, build_android, build_apple, publish_core, publish_android, publish_apple, finalize, telegram_notify]
+    # check 必須在 needs 裡：若 check 失敗，其下游全部 skip，缺了它 failure() 恆為
+    # false，整個 run 紅了卻不會開單（與 close_issue_on_success 的 needs 保持對稱）。
+    needs: [check, build_core, build_android, build_apple, publish_core, publish_android, publish_apple, finalize, telegram_notify]
     if: failure() && (github.event_name == 'schedule' || github.event_name == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -2774,12 +2807,21 @@ jobs:
   close_issue_on_success:
     # needs 必須與 create_issue_on_failure 完全一致（含 finalize、telegram_notify），
     # 否則兩者的 success()/failure() 判據不對稱，會出現「部分流程仍失敗卻關閉 issue」。
-    needs: [build_core, build_android, build_apple, publish_core, publish_android, publish_apple, finalize, telegram_notify]
+    needs: [check, build_core, build_android, build_apple, publish_core, publish_android, publish_apple, finalize, telegram_notify]
     # 必須用 always()：上游作業在「無新版可編」時會被 skip，而 needs 中有任一 job 被 skip
     # 時，下游作業預設一併 skip（即使 success() 成立也不會執行），實測本 job 因此從未執行。
     # 改為 always() + !failure() + !cancelled()：上游任一失敗 -> 不關單；
     # 全部 skip 或全部成功 -> 正常執行（對齊 finalize 的 always() && !cancelled() 寫法）。
-    if: always() && !failure() && !cancelled() && (github.event_name == 'schedule' || github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # 再加 has_update 閘門：has_update=false 時所有構建作業都會 skip，「零失敗」只是
+    # 沒跑任何東西，並不證明構建已恢復——曾據此把仍在失敗的 issue 提前關閉
+    # （2026-10-01 #110 在 apple 仍紅時被全 skip run 關閉）。只有真的構建過
+    # （has_update=true）且零失敗，才允許關單。
+    if: >-
+      always() &&
+      !failure() &&
+      !cancelled() &&
+      needs.check.outputs.has_update == 'true' &&
+      (github.event_name == 'schedule' || github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
