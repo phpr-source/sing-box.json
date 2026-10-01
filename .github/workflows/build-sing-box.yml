@@ -78,12 +78,14 @@ permissions:
   attestations: write
 
 env:
-  # Go 版本不在此配置：由各 build job 的 setup-go 从 sing-box/go.mod 的 go directive 读取
+  # Go 版本不在此配置：由 check job 從上游官方 build.yml 動態解析（當前 1.26.8，
+  # 高於 go.mod 下限 1.25.5——上游官方產物即用該工具鏈編譯），三個 build job 統一取用。
   TAGS_COMMON: "badlinkname,tfogo_checklinkname0,with_gvisor,with_quic,with_utls,with_clash_api,with_wireguard,with_tailscale"
   TAGS_CLI_EXTRA: "with_dhcp,with_acme,with_ccm,with_ocm,with_cloudflared,with_usbip"
-  TAGS_SFA_EXTRA: "ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird"
-  # Applied to SFA AAR (gui) only. Android CLI (Termux) gets it via tags_extra in build_core matrix.
-  TAGS_ANDROID_EXTRA: "with_conntrack"
+  # 2026-10-02 對齊上游：SFA 的 libbox 構建已整體切換為上游自有 build_libbox
+  # 工具，其 tags/API/LDFLAGS 全部來自上游源碼（sharedTags 已含 ts_omit 瘦身
+  # 清單），故原 TAGS_SFA_EXTRA/TAGS_ANDROID_EXTRA（含已移除的 with_conntrack）
+  # 不再被引用而刪除。
   CURL_TIMEOUT_API: 60
 
 jobs:
@@ -300,6 +302,37 @@ jobs:
             echo "has_update=false" >> $GITHUB_OUTPUT
           fi
 
+      - name: Resolve Go toolchain version
+        id: gover
+        run: |
+          set -euo pipefail
+          # 對齊上游官方產物的真實工具鏈：reF1nd build.yml 硬編碼的 go-version
+          # （當前 1.26.8）才是官方二進制的編譯工具鏈，go.mod 的 go directive
+          # 只是下限（1.25.5）。此前本地按 go.mod 編譯，與上游官方產物存在
+          # stdlib 級差異。此處動態讀取上游 build.yml 自動跟隨，失敗逐級回退。
+          GO_VER=""
+          for i in 1 2 3; do
+            WF="$(curl -sfL -m ${CURL_TIMEOUT_API} \
+              "https://raw.githubusercontent.com/reF1nd/sing-box/reF1nd-testing/.github/workflows/build.yml" || true)"
+            if [ -n "$WF" ]; then
+              GO_VER="$(echo "$WF" | grep -m1 -oE 'go-version:[[:space:]]*"?[0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+              [ -n "$GO_VER" ] && break
+            fi
+            sleep 5
+          done
+          if [ -z "$GO_VER" ]; then
+            GO_VER="$(curl -sfL -m ${CURL_TIMEOUT_API} \
+              "https://raw.githubusercontent.com/reF1nd/sing-box/reF1nd-testing/go.mod" \
+              | sed -n 's/^go \([0-9.]*\)$/\1/p' | head -n1 || true)"
+          fi
+          if [ -z "$GO_VER" ]; then
+            # 兜底：上次人工確認的上游值（2026-10-02）
+            GO_VER="1.26.8"
+            echo "::warning::Could not resolve upstream Go version; using last known value ${GO_VER}"
+          fi
+          echo "go_version=${GO_VER}" >> "$GITHUB_OUTPUT"
+          echo "Resolved Go toolchain: ${GO_VER}"
+
       - name: Upload Metadata
         if: steps.check.outputs.has_update == 'true'
         uses: actions/upload-artifact@v7
@@ -354,10 +387,10 @@ jobs:
           - { name: linux-riscv64-glibc,  goos: linux, goarch: riscv64, variant: glibc,  cgo: 1, upx: false }
 
           # --- Android CLI (Termux/ADB 用户) ---
-          - { name: android-arm64,  goos: android, goarch: arm64,           ndk_triple: "aarch64-linux-android23", cgo: "1", upx: false, tags_extra: with_conntrack }
-          - { name: android-arm,    goos: android, goarch: arm,    goarm: 7, ndk_triple: "armv7a-linux-androideabi23", cgo: "1", upx: false, tags_extra: with_conntrack }
-          - { name: android-amd64,  goos: android, goarch: amd64,  goamd64: v1, ndk_triple: "x86_64-linux-android23",    cgo: "1", upx: false, tags_extra: with_conntrack }
-          - { name: android-386,    goos: android, goarch: 386,             ndk_triple: "i686-linux-android23",         cgo: "1", upx: false, tags_extra: with_conntrack }
+          - { name: android-arm64,  goos: android, goarch: arm64,           ndk_triple: "aarch64-linux-android23", cgo: "1", upx: false }
+          - { name: android-arm,    goos: android, goarch: arm,    goarm: 7, ndk_triple: "armv7a-linux-androideabi23", cgo: "1", upx: false }
+          - { name: android-amd64,  goos: android, goarch: amd64,  goamd64: v1, ndk_triple: "x86_64-linux-android23",    cgo: "1", upx: false }
+          - { name: android-386,    goos: android, goarch: 386,             ndk_triple: "i686-linux-android23",         cgo: "1", upx: false }
     runs-on: ${{ matrix.platform.goos == 'darwin' && 'macos-latest' || 'ubuntu-latest' }}
     env:
       GOOS: ${{ matrix.platform.goos }}
@@ -480,7 +513,9 @@ jobs:
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
         uses: actions/setup-go@v6
         with:
-          go-version-file: sing-box/go.mod
+          # 上游官方產物的真實工具鏈（由 check job 動態解析，當前 1.26.8），
+          # 非再沿用 go.mod 下限 1.25.5——與官方二進制的 stdlib 級差異已對齊
+          go-version: '${{ needs.check.outputs.go_version }}'
           cache: true
           cache-dependency-path: sing-box/go.sum
 
@@ -530,6 +565,14 @@ jobs:
           elif [ "$NAIVE_ELIGIBLE" = "false" ]; then
             # 上游 DEFAULT_BUILD_TAGS 默认含 naive，合并进来的需剔除
             TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^with_naive_outbound$' | grep -v '^$' | paste -sd, -)
+          fi
+
+          # 上游 Android CLI 使用 DEFAULT_BUILD_TAGS_OTHERS：不含 with_gvisor
+          # （僅 system 棧）。本地 TAGS_COMMON 合併會把 gvisor 帶進 Android 產物，
+          # 與上游 Android 功能集不一致——剔除對齊（linux/windows 兩文件均含
+          # gvisor，不受此影響）。
+          if [ "${{ matrix.platform.goos }}" = "android" ]; then
+            TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^with_gvisor$' | grep -v '^$' | paste -sd, -)
           fi
 
           case "${{ matrix.platform.variant }}" in
@@ -758,7 +801,14 @@ jobs:
           cp LICENSE dist/ 2>/dev/null || true
 
           TAGS_STR="${{ steps.env.outputs.tags }}"
-          LDFLAGS="-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid="
+          # 規範 LDFLAGS 跟隨上游源碼 release/LDFLAGS 文件（與上游 build.yml 的
+          # LDFLAGS_SHARED=$(cat release/LDFLAGS) 同源），含
+          # -X runtime.godebugDefault=multipathtcp=0,tlssha1=1（舊 TLS SHA1 簽名
+          # 兼容 + 關閉 MPTCP 默認）。歷史缺陷：此前硬編碼的
+          # -X internal/godebug.defaultGODEBUG=multipathtcp=0 所指包在現行源碼中
+          # 已不存在，屬靜默無效注入，導致產物缺失上述兩個 runtime 默認值。
+          LDFLAGS_SHARED="$(cat release/LDFLAGS 2>/dev/null || echo '-X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0')"
+          LDFLAGS="${LDFLAGS_SHARED} -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -s -w -buildid="
 
           if [ "${{ matrix.platform.goos }}" = "linux" ] && [ "$CGO_ENABLED" = "1" ]; then
             if [ "${{ matrix.platform.variant }}" = "musl" ]; then
@@ -1052,12 +1102,32 @@ jobs:
           done
           echo "Applied $applied patch(es)."
 
+      - name: Resolve Android client ref from core pin
+        # 上游官方 SFA 由 core 的 clients/android 子模塊 pin 構建（上游 build.yml
+        # publish_android: git submodule update --init clients/android）。本地此前
+        # 直接拉 sing-box-for-android 分支 HEAD，客戶端源碼狀態與上游官方發佈
+        # 不一致（結果差異實錘：alpha.9 官方 SFA = pin fc21909d/09-24，分支 HEAD
+        # 已多出 5 天共 ~3300 行客戶端改動——libxposed 102、啟動生命周期修復等）。
+        # 改為跟隨 core 檢出點的子模塊 gitlink，與上游完全對齊；pin 缺失時回退分支。
+        if: matrix.target.sfa_repo != 'none'
+        id: sfa_pin
+        run: |
+          set -euo pipefail
+          PIN="$(git -C sing-box ls-tree HEAD clients/android | awk '{print $3}' | head -n1)"
+          if [ -n "$PIN" ]; then
+            echo "sfa_ref=${PIN}" >> "$GITHUB_OUTPUT"
+            echo "::notice::Using core clients/android pin ${PIN} (upstream-official SFA source state)"
+          else
+            echo "sfa_ref=${{ matrix.target.sfa_branch }}" >> "$GITHUB_OUTPUT"
+            echo "::warning::core has no clients/android pin; falling back to branch ${{ matrix.target.sfa_branch }}"
+          fi
+
       - name: Checkout Android Client
         if: matrix.target.sfa_repo != 'none'
         uses: actions/checkout@v6
         with:
           repository: ${{ matrix.target.sfa_repo }}
-          ref: ${{ matrix.target.sfa_branch }}
+          ref: ${{ steps.sfa_pin.outputs.sfa_ref }}
           path: sing-box-for-android
           # termux-app submodule is required: settings.gradle.kts includes
           # :terminal-view/:terminal-emulator under third_party/termux-app.
@@ -1134,7 +1204,8 @@ jobs:
         if: matrix.target.sfa_repo != 'none'
         uses: actions/setup-go@v6
         with:
-          go-version-file: sing-box/go.mod
+          # 與 build_core 同源：check job 動態解析的上游官方工具鏈（當前 1.26.8）
+          go-version: '${{ needs.check.outputs.go_version }}'
           cache: true
           cache-dependency-path: 'sing-box/go.sum'
 
@@ -1169,11 +1240,21 @@ jobs:
           echo "Core Ref:      ${{ matrix.target.core_ref }}"
           echo "SFA Branch:    ${{ matrix.target.sfa_branch }}"
           echo "Tags Common:   ${{ env.TAGS_COMMON }}"
-          echo "Tags SFA Extra:${{ env.TAGS_SFA_EXTRA }}"
-          echo "Tags Android:  ${{ env.TAGS_ANDROID_EXTRA }}"
+          echo "Tags Source:   build_libbox sharedTags (upstream cmd/internal/build_libbox)"
           echo "NDK Version:   r28"
           echo "Java:          $(java -version 2>&1 | head -n 1)"
           echo "=============================================="
+
+      - name: Stamp core version tag for libbox
+        # 上游流程在構建前打 git tag（Set tag 步驟），build_libbox 經 build_shared
+        # ReadTag（git describe --tags）讀取 tag 作為 constant.Version 注入。
+        # 本地以 detached SHA 檢出，須補打 tag 才能獲得與上游一致的版本注入。
+        if: matrix.target.sfa_repo != 'none'
+        working-directory: sing-box
+        run: |
+          set -euo pipefail
+          git tag "v${{ matrix.target.ver }}" -f
+          git describe --tags
 
       - name: Build Library (libbox.aar)
         if: matrix.target.sfa_repo != 'none'
@@ -1204,48 +1285,26 @@ jobs:
           export PATH="$PATH:$(go env GOPATH)/bin"
           gomobile init || { echo "::error::gomobile init failed"; exit 1; }
 
-          TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_SFA_EXTRA }},${{ env.TAGS_ANDROID_EXTRA }}"
-          TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
-
-          if [ "${{ github.event.inputs.enable_naive }}" = "true" ]; then
-            TAGS="${TAGS},with_naive_outbound"
-          fi
-
-          gomobile bind -v \
-            -o libbox.aar \
-            -target android \
-            -androidapi 23 \
-            -javapkg=io.nekohasekai \
-            -libname=box \
-            -trimpath \
-            -buildvcs=false \
-            -tags="${TAGS}" \
-            -ldflags="-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid=" \
-            ./experimental/libbox/
-
-          # Legacy AAR for Android 5.x (api21), without naive support for smaller footprint
-          TAGS_LEGACY="${{ env.TAGS_COMMON }},${{ env.TAGS_SFA_EXTRA }},${{ env.TAGS_ANDROID_EXTRA }}"
-          TAGS_LEGACY=$(echo "${TAGS_LEGACY}" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
-
-          # Capture exit code so set -e does not swallow the error check below
-          gomobile_exit=0
-          gomobile bind -v \
-            -o libbox-legacy.aar \
-            -target android \
-            -androidapi 21 \
-            -javapkg=io.nekohasekai \
-            -libname=box \
-            -trimpath \
-            -buildvcs=false \
-            -tags="${TAGS_LEGACY}" \
-            -ldflags="-checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ matrix.target.ver }}' -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid=" \
-            ./experimental/libbox/ || gomobile_exit=$?
+          # 2026-10-02 對齊上游：改用上游自有 build_libbox 工具構建 AAR（上游
+          # publish_android 同款），參數全部來自上游源碼並自動跟隨：
+          # - tags = build_libbox sharedTags（naive/openvpn/openconnect/usbip +
+          #   ts_omit 瘦身清單；無 gvisor/dhcp/acme/conntrack——與此前手寫 env
+          #   存在多處結果差異），legacy 變體自動剔除 naive；
+          # - AndroidAPI main=24 / legacy=21（此前手寫 main=23，與 client
+          #   minSdk 24 不一致）；
+          # - LDFLAGS 走 build_shared.LinkerFlags → release/LDFLAGS 的
+          #   runtime.godebugDefault=multipathtcp=0,tlssha1=1（此前硬編碼的
+          #   -X internal/godebug... 為靜默無效注入）；
+          # - -trimpath/-buildvcs=false 與此前手寫一致，行為不變。
+          # cronet-go 的 Android 預編譯靜態庫隨 Go 模塊分發（lib/android_*），
+          # gomobile + NDK 直接鏈接，無需額外提取步驟。
+          # 產出 libbox.aar + libbox-legacy.aar（build_libbox 若發現
+          # ../sing-box-for-android/app/libs 會自動複製；此處尚未建立，
+          # 由後續 Prepare Android Client 步驟複製）。
+          go run ./cmd/internal/build_libbox -target android
 
           if [ ! -f "libbox.aar" ]; then echo "::error::libbox.aar not found!"; exit 1; fi
-          if [ ! -f "libbox-legacy.aar" ]; then
-            echo "::error::libbox-legacy.aar not found (gomobile exit code: ${gomobile_exit})!"
-            exit 1
-          fi
+          if [ ! -f "libbox-legacy.aar" ]; then echo "::error::libbox-legacy.aar not found!"; exit 1; fi
           ls -lh libbox.aar libbox-legacy.aar
 
       - name: Prepare Android Client
@@ -1346,13 +1405,28 @@ jobs:
           if [ -d "$LEGACY_DIR" ]; then
             for apk in "$LEGACY_DIR"/*.apk; do
               [ -f "$apk" ] || continue
-              new_name="SFA-${VER}-legacy-$(basename "$apk")"
+              # 上游官方資產名格式：SFA-<core 版本>-legacy-android-5-<abi>.apk。
+              # gradle 輸出名攜帶 client 自身 versionName（可能與 core 版本不一致），
+              # 故按 ABI 重建命名。歷史缺陷：此前直接在 gradle 輸出名前再拼
+              # "SFA-${VER}-legacy-"，產生雙前綴文件名
+              # （SFA-<ver>-legacy-SFA-<ver>-legacy-android-5-*.apk）。
+              ABI=""
+              case "$(basename "$apk")" in
+                *universal*)   ABI="-universal" ;;
+                *arm64-v8a*)   ABI="-arm64-v8a" ;;
+                *armeabi-v7a*) ABI="-armeabi-v7a" ;;
+                *x86_64*)      ABI="-x86_64" ;;
+                *x86*)         ABI="-x86" ;;
+              esac
+              new_name="SFA-${VER}-legacy-android-5${ABI}.apk"
               mv -f "$apk" "apks/$new_name"
             done
           fi
 
-          TAGS_USED="${{ env.TAGS_COMMON }},${{ env.TAGS_SFA_EXTRA }},${{ env.TAGS_ANDROID_EXTRA }}"
-          TAGS_USED=$(echo "$TAGS_USED" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
+          # SFA libbox tags 現由上游 build_libbox 決定；元數據僅提取其源碼中的
+          # sharedTags 行（排除 darwinTags/notMemcTags），確保與實際構建一致。
+          TAGS_USED="$(grep -E 'sharedTags = append' ../sing-box/cmd/internal/build_libbox/main.go 2>/dev/null | grep -oE '"[a-z_0-9]+"' | tr -d '"' | sort -u | paste -sd, -)"
+          [ -n "$TAGS_USED" ] || TAGS_USED="build_libbox sharedTags (see upstream)"
 
           jq -n \
             --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -1531,7 +1605,8 @@ jobs:
           # 需 Xcode 26.x（macos-26 runner 自帶 Xcode 26.5）。macos-latest 的 Xcode 16.4
           # 報 'isolated' deinit requires frontend flag + LibboxStringIteratorProtocol
           # has no member 'value' 等編譯器類型推導問題。
-          go-version-file: sing-box/go.mod
+          # 與 build_core 同源：check job 動態解析的上游官方工具鏈（當前 1.26.8）
+          go-version: '${{ needs.check.outputs.go_version }}'
           cache: false
           cache-dependency-path: 'sing-box/go.sum'
 
