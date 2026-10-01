@@ -532,12 +532,19 @@ jobs:
           # （上游新增 tag 如 with_openvpn/with_openconnect 无需人工维护）。
           # 老版本源码缺文件时 fallback 到 env；env 中的本地独有 tag
           # （with_cloudflared/with_usbip 等）经下方 sort -u 合并去重后保留。
-          # 注意：上游 DEFAULT_BUILD_TAGS / DEFAULT_BUILD_TAGS_WINDOWS 默认含
-          # with_naive_outbound（其 CI 总是搭建 cronet）。本地 cronet 由 enable_naive
-          # 门控：未开启时绝不能带入 naive tag——产物无 libcronet 会在运行时
-          # "cronet: library not found" 崩溃。故 naive 关闭时统一读 OTHERS 文件。
+          # 对齐真实官方管线（sing-box-releases build-testing.yml Compute build
+          # environment）：Windows 在 enable_naive 时读 WINDOWS 文件；Android 恒用
+          # DEFAULT（官方 Android 行 naive:true，且 cronet 的 Android 静态库随 Go
+          # 模块分发 lib/android_*，NDK cgo 直接链接，无需本地门控）；linux/windows
+          # 的 naive 维持本地既定分歧——enable_naive 未开启时读 OTHERS（文件含
+          # with_naive_outbound，产物无 libcronet 时带该 tag 会在运行时
+          # "cronet: library not found" 崩溃，故必须剔除）。
           TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_CLI_EXTRA }}"
-          if [ "$ENABLE_NAIVE" = "true" ] && [ "${{ matrix.platform.goos }}" = "windows" ]; then
+          FORCE_NAIVE=false
+          if [ "${{ matrix.platform.goos }}" = "android" ]; then
+            TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS"
+            FORCE_NAIVE=true
+          elif [ "$ENABLE_NAIVE" = "true" ] && [ "${{ matrix.platform.goos }}" = "windows" ]; then
             TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS_WINDOWS"
           elif [ "$ENABLE_NAIVE" = "true" ]; then
             TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS"
@@ -553,27 +560,17 @@ jobs:
             TAGS="${TAGS},${{ matrix.platform.tags_extra }}"
           fi
 
-          # naive 资格判定（统一管住文件来源 + 显式追加两个入口）：
-          # - android：无 cronet 交叉编译环境（NDK cgo 未适配，上游虽支持但本地未跟进）
-          # - linux + purego 不再排除：CGO=0 走 purego 动态加载（libcronet.so 随包分发），
-          #   与上游 linux purego + naive 行为一致
-          NAIVE_ELIGIBLE=true
-          if [ "${{ matrix.platform.goos }}" = "android" ]; then
-            NAIVE_ELIGIBLE=false
-          fi
-          if [ "$ENABLE_NAIVE" = "true" ] && [ "$NAIVE_ELIGIBLE" = "true" ]; then
+          # naive：Android 恒带（与官方一致）；linux/windows 随 enable_naive 门控。
+          if [ "$FORCE_NAIVE" = "true" ] || [ "$ENABLE_NAIVE" = "true" ]; then
             TAGS="${TAGS},with_naive_outbound"
-          elif [ "$NAIVE_ELIGIBLE" = "false" ]; then
-            # 上游 DEFAULT_BUILD_TAGS 默认含 naive，合并进来的需剔除
-            TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^with_naive_outbound$' | grep -v '^$' | paste -sd, -)
           fi
 
-          # 上游 Android CLI 使用 DEFAULT_BUILD_TAGS_OTHERS：不含 with_gvisor
-          # （僅 system 棧）。本地 TAGS_COMMON 合併會把 gvisor 帶進 Android 產物，
-          # 與上游 Android 功能集不一致——剔除對齊（linux/windows 兩文件均含
-          # gvisor，不受此影響）。
-          if [ "${{ matrix.platform.goos }}" = "android" ]; then
-            TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^with_gvisor$' | grep -v '^$' | paste -sd, -)
+          # 上游官方（build-testing.yml Compute build environment）：linux/android
+          # 在源码含 include/ebpf.go 时自动追加 with_ebpf。
+          if [ "${{ matrix.platform.goos }}" = "linux" ] || [ "${{ matrix.platform.goos }}" = "android" ]; then
+            if [ -f sing-box/include/ebpf.go ] && ! echo "${TAGS}" | grep -q 'with_ebpf'; then
+              TAGS="${TAGS},with_ebpf"
+            fi
           fi
 
           case "${{ matrix.platform.variant }}" in
@@ -1103,32 +1100,17 @@ jobs:
           done
           echo "Applied $applied patch(es)."
 
-      - name: Resolve Android client ref from core pin
-        # 上游官方 SFA 由 core 的 clients/android 子模塊 pin 構建（上游 build.yml
-        # publish_android: git submodule update --init clients/android）。本地此前
-        # 直接拉 sing-box-for-android 分支 HEAD，客戶端源碼狀態與上游官方發佈
-        # 不一致（結果差異實錘：alpha.9 官方 SFA = pin fc21909d/09-24，分支 HEAD
-        # 已多出 5 天共 ~3300 行客戶端改動——libxposed 102、啟動生命周期修復等）。
-        # 改為跟隨 core 檢出點的子模塊 gitlink，與上游完全對齊；pin 缺失時回退分支。
-        if: matrix.target.sfa_repo != 'none'
-        id: sfa_pin
-        run: |
-          set -euo pipefail
-          PIN="$(git -C sing-box ls-tree HEAD clients/android | awk '{print $3}' | head -n1)"
-          if [ -n "$PIN" ]; then
-            echo "sfa_ref=${PIN}" >> "$GITHUB_OUTPUT"
-            echo "::notice::Using core clients/android pin ${PIN} (upstream-official SFA source state)"
-          else
-            echo "sfa_ref=${{ matrix.target.sfa_branch }}" >> "$GITHUB_OUTPUT"
-            echo "::warning::core has no clients/android pin; falling back to branch ${{ matrix.target.sfa_branch }}"
-          fi
-
       - name: Checkout Android Client
+        # 對齊真實官方管線（sing-box-releases build-testing.yml "Checkout
+        # sing-box-for-android"）：官方 SFA 直接拉 client 分支 HEAD（build 當下
+        # 的 reF1nd-testing/reF1nd-stable），並非 core 的 clients/android 子模塊
+        # pin——後者只是繼承自 sagernet 的源碼倉 build.yml 的做法（reF1nd 實際
+        # 不跑它）。此前一度誤改為 pin 檢出，已回退。
         if: matrix.target.sfa_repo != 'none'
         uses: actions/checkout@v6
         with:
           repository: ${{ matrix.target.sfa_repo }}
-          ref: ${{ steps.sfa_pin.outputs.sfa_ref }}
+          ref: ${{ matrix.target.sfa_branch }}
           path: sing-box-for-android
           # termux-app submodule is required: settings.gradle.kts includes
           # :terminal-view/:terminal-emulator under third_party/termux-app.
