@@ -137,6 +137,7 @@ jobs:
     outputs:
       matrix: ${{ steps.check.outputs.matrix }}
       has_update: ${{ steps.check.outputs.has_update }}
+      go_version: ${{ steps.gover.outputs.go_version }}
     steps:
       - name: Check versions and generate matrix
         id: check
