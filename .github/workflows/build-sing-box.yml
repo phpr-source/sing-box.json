@@ -2285,7 +2285,16 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const content = Buffer.from(fs.readFileSync('build-info.json')).toString('base64');
+            const info = JSON.parse(fs.readFileSync('build-info.json', 'utf8'));
+            // 歷史缺陷：全 skip 的 run（無新版可編）也會以 targets: [] 覆蓋版本基線，
+            // 令下一次 check 把 LAST_VER 判成空 -> has_update=true -> 無謂的全量重建 +
+            // release 刪建（2026-10-01 run 36872840381 即如此污染基線）。
+            // 基線只應隨「真實構建」前進：沒有產物記錄就保持原樣不動。
+            if (!Array.isArray(info.targets) || info.targets.length === 0) {
+              console.log('No built targets this run; leaving release-info baseline untouched.');
+              return;
+            }
+            const content = Buffer.from(JSON.stringify(info)).toString('base64');
             const { owner, repo } = context.repo;
             const path = 'build-info.json';
             const branch = 'release-info';
