@@ -766,6 +766,7 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
+        id: ndk
 
       - name: Log Build Environment
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
@@ -822,9 +823,17 @@ jobs:
           if [ "${{ matrix.platform.goos }}" = "windows" ]; then BIN_NAME="sing-box.exe"; fi
 
           NDK_TRIPLE="${{ matrix.platform.ndk_triple || '' }}"
-          if [ -n "$NDK_TRIPLE" ] && [ -n "${ANDROID_NDK_HOME:-}" ]; then
-            export CC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/${NDK_TRIPLE}-clang"
-            export CXX="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/${NDK_TRIPLE}-clang++"
+          if [ -n "$NDK_TRIPLE" ]; then
+            # 優先使用上方 Setup Android NDK（r28，與上游官方一致）：cronet-go 的
+            # libcronet.a 由較新 NDK 工具鏈編譯，鏡像預裝的 NDK 27.3 lld 不認識其
+            # 重定位類型（unknown relocation 315，run 36903444010 android-arm64）。
+            # r28 的 lld 可正常鏈接。僅在 r28 不可用時回退鏡像 ANDROID_NDK_HOME。
+            NDK_HOME="${{ steps.ndk.outputs.ndk-path }}"
+            [ -n "$NDK_HOME" ] || NDK_HOME="${ANDROID_NDK_HOME:-}"
+            if [ -n "$NDK_HOME" ]; then
+              export CC="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/${NDK_TRIPLE}-clang"
+              export CXX="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/${NDK_TRIPLE}-clang++"
+            fi
           fi
 
           # proxy.golang.org 偶發 HTTP/2 INTERNAL_ERROR（見 run 33086946550）會讓
