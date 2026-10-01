@@ -59,14 +59,14 @@ which file/hunk conflicted.
 |---|---|
 | `xhttp-core-directories.patch` | VLESS XHTTP 支持（新增目录）：`common/xray/`（XRAY 基础设施 50 文件）+ `common/congestion/` + `common/kmutex/`。来源：shtorm-7/sing-box-extended（extended 分支） |
 | `change_default_urltest.patch` | Default urltest URL `www.gstatic.com/generate_204` → `cp.cloudflare.com/generate_204` (more reachable in CN networks) |
-| `http_add_uot.patch` | HTTP outbound gains `udp_over_tcp` option (UDP over TCP, same mechanism as socks/shadowsocks) |
 | `make_log_better_log.patch` | Log timestamp format `[2006-01-02 15:04:05 UTC-07]` |
 
 ### reF1nd_Stable/ + reF1nd_Testing/
 
 | Patch | Effect |
 |---|---|
-| `urltest-autoban.patch` | **urltest 智能健康淘汰（AutoBan v4.6）**：`auto_ban` 配置块——EWMA 动态健康评分 + 被动单次失败熔断 + 主动指数退避恢复 + 每日固定时段全局大考（`check_times`）+ 群体故障防误杀 + 多目标 HTTPS 204 竞速探针 + TUN Protected Dialer + I/O 防抖 + 多 Group Hash 文件隔离 + `pinned_tags` 手动选择豁免。状态持久化默认 `autoban_<group>_<hash>.json`。本地原创设计（非上游移植） |
+| `urltest-autoban.patch` | **urltest 智能健康淘汰（AutoBan v4.6）**：`auto_ban` 配置块——EWMA 动态健康评分 + 被动单次失败熔断 + 主动指数退避恢复 + 每日固定时段全局大考（`check_times`）+ 群体故障防误杀 + 多目标 HTTPS 204 竞速探针 + TUN Protected Dialer + I/O 防抖 + 多 Group Hash 文件隔离 + `pinned_tags` 手动选择豁免。状态持久化默认 `autoban_<group>_<hash>.json`。本地原创设计（非上游移植）。**分支差异**：testing 版适配 2026-09-27 上游 `RealTag(detour, network)` 新签名（嵌套组按 network 解析；无 network 上下文用 `N.NetworkTCP` 规范键）与 `urltest_unified_delay` API |
+| `http_add_uot.patch` | HTTP outbound gains `udp_over_tcp` option (UDP over TCP, same mechanism as socks/shadowsocks)。**分支差异**：stable 版作用于仅 TCP 的旧实现；testing 版上游 HTTP 代理已重写（H2/H3、原生 TCP+UDP 注册），移植版保留原生 UDP 行为，仅在 `udp_over_tcp.enabled` 时把 UDP 流量切入 UoT 隧道。2026-10-01 因两分支结构分叉从 `common/` 拆分为 per-branch 变体 |
 | `xhttp-wiring.patch` | XHTTP 接入：`transport/v2rayxhttp/`（10 文件）+ `constant/v2ray.go`（+`xhttp` 类型）+ `option/v2ray_transport.go`（XHTTP 选项，含本地 `Range[T]` 替代私有 sing fork 的 `badoption.Range`）+ `option/range.go` + `transport/v2ray/transport.go` 注册 + `transport/v2rayhttp/conn.go`（HWIDContext）。**分支差异**：testing 版适配 sing-quic v0.7 API（`qtls.DialEarly` 签名变化），stable 版用 v0.6；testing 版含 `DescribeSchema` 变体 |
 | `make_log_better_option.patch` | Expose `disable_color` as a JSON log option (per-branch variant: branch layouts differ) |
 

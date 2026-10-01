@@ -1,0 +1,83 @@
+diff --git a/option/simple.go b/option/simple.go
+index 436d4537f..a6882f96f 100644
+--- a/option/simple.go
++++ b/option/simple.go
+@@ -96,6 +96,7 @@ type _HTTPOutboundOptions struct {
+ 	OutboundTLSOptionsContainer
+ 	Path                   string               `json:"path,omitempty"`
+ 	Headers                badoption.HTTPHeader `json:"headers,omitempty"`
++	UDPOverTCP             *UDPOverTCPOptions   `json:"udp_over_tcp,omitempty"`
+ 	Version                int                  `json:"version,omitempty" enum:"0,1,2,3"`
+ 	DisableVersionFallback bool                 `json:"disable_version_fallback,omitempty"`
+ 	HTTP2Options           HTTP2Options         `json:"-"`
+diff --git a/protocol/http/outbound.go b/protocol/http/outbound.go
+index c1e8832bb..bcbcf3d43 100644
+--- a/protocol/http/outbound.go
++++ b/protocol/http/outbound.go
+@@ -17,6 +17,7 @@ import (
+ 	"github.com/sagernet/sing/common/logger"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
++	"github.com/sagernet/sing/common/uot"
+ )
+ 
+ func RegisterOutbound(registry *outbound.Registry) {
+@@ -25,8 +26,9 @@ func RegisterOutbound(registry *outbound.Registry) {
+ 
+ type Outbound struct {
+ 	outbound.Adapter
+-	logger logger.ContextLogger
+-	client *http.Client
++	logger    logger.ContextLogger
++	client    *http.Client
++	uotClient *uot.Client
+ }
+ 
+ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.HTTPOutboundOptions) (adapter.Outbound, error) {
+@@ -48,11 +50,19 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return &Outbound{
++	httpOutbound := &Outbound{
+ 		Adapter: outbound.NewAdapterWithDialerOptions(C.TypeHTTP, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
+ 		logger:  logger,
+ 		client:  client,
+-	}, nil
++	}
++	uotOptions := common.PtrValueOrDefault(options.UDPOverTCP)
++	if uotOptions.Enabled {
++		httpOutbound.uotClient = &uot.Client{
++			Dialer:  client,
++			Version: uotOptions.Version,
++		}
++	}
++	return httpOutbound, nil
+ }
+ 
+ func (h *Outbound) InterfaceUpdated(ctx context.Context) {
+@@ -72,6 +82,10 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination
+ 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
+ 		return h.client.DialContext(ctx, network, destination)
+ 	case N.NetworkUDP:
++		if h.uotClient != nil {
++			h.logger.InfoContext(ctx, "outbound UoT connection to ", destination)
++			return h.uotClient.DialContext(ctx, network, destination)
++		}
+ 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
+ 		packetConn, err := h.client.ListenPacket(ctx, destination)
+ 		if err != nil {
+@@ -84,6 +98,13 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination
+ }
+ 
+ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	if h.uotClient != nil {
++		ctx, metadata := adapter.ExtendContext(ctx)
++		metadata.Outbound = h.Tag()
++		metadata.Destination = destination
++		h.logger.InfoContext(ctx, "outbound UoT packet connection to ", destination)
++		return h.uotClient.ListenPacket(ctx, destination)
++	}
+ 	ctx, metadata := adapter.ExtendContext(ctx)
+ 	metadata.Outbound = h.Tag()
+ 	metadata.Destination = destination
