@@ -3,8 +3,8 @@
   "rules": [
     {
       "domain_suffix": [
-        "cnb.cool",
-        "cnb.space"
+        "nexus-cdn.com",
+        "nexusmods.com"
       ]
     }
   ]
