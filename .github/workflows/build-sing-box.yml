@@ -1469,6 +1469,25 @@ jobs:
               echo "::warning::Core libbox requires fork-exclusive platform APIs (LookupSFTPServer/ReadSystemSSHHostKey) that the official client does not implement (client behind core). Skipping Apple build."
             fi
           fi
+          # 信號 3（客戶端超前於本分支 core，2026-10-01 新增）：client 子模塊的 Swift
+          # 代碼引用 gomobile 生成綁定 LibboxXxx，若本分支 core 的 libbox 未導出對應
+          # Go 標識符，xcodebuild 必炸 "cannot find 'LibboxXxx' in scope"（實錘案例：
+          # client pin 9f828a26 引用 LibboxPromotePowerReportDraft，stable 有
+          # power_report.go 而 testing 沒有 -> 僅 testing 的 apple 編譯失敗，見
+          # run 36877949919）。逐個 Libbox* 符號做大小寫不敏感比對，任一缺失即 skip。
+          # Swift 生成協議名的 "Protocol" 後綴（如 LibboxPlatformInterfaceProtocol，
+          # 來自 core 的 PlatformInterface）必須剝掉再比，否則兩個分支都會誤報。
+          if [ "$SKIP" = "false" ]; then
+            while read -r sym; do
+              go_name="${sym#Libbox}"
+              go_name="${go_name%Protocol}"
+              if ! grep -rqi "$go_name" experimental/libbox/ 2>/dev/null; then
+                SKIP="true"
+                echo "::warning::Pinned client references $sym but this branch's libbox does not export it (client ahead of core). Skipping Apple build."
+                break
+              fi
+            done < <(grep -rhoE 'Libbox[A-Za-z0-9_]+' clients/apple/Library --include='*.swift' 2>/dev/null | sort -u)
+          fi
           echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
           echo "::notice::era check done: skip=$SKIP (core Taildrop=$CORE_HAS_TAILDROP, client Taildrop=$CLIENT_USES_TAILDROP, pin=$(git -C clients/apple rev-parse --short HEAD 2>/dev/null || echo unknown))"
 
