@@ -1558,21 +1558,41 @@ jobs:
           set -euo pipefail
           # Clear SwiftPM cache to avoid stale repo references
           rm -rf ~/Library/Caches/org.swift.swiftpm
-          xcodebuild \
-            -project sing-box.xcodeproj \
-            -scheme SFI \
-            -destination 'generic/platform=iOS' \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath DerivedData \
-            build \
-            STRIP_INSTALLED_PRODUCT=NO \
-            ARCHS=arm64 \
-            ONLY_ACTIVE_ARCH=YES \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO
+          # xcodebuild 在 runner 鏡像上有與源碼無關的偶發崩潰：SwiftPM 包圖處理
+          # 拋出 "IDEGroup insertGroupSubitems" 內部異常（exit 134，見 run
+          # 36864837989 的 build_apple）。清 DerivedData 後重試通常可過；
+          # runner 關機信號（exit 143）重試無意義，直接放棄。
+          XB_OK=0
+          for attempt in 1 2 3; do
+            rm -rf DerivedData
+            if xcodebuild \
+              -project sing-box.xcodeproj \
+              -scheme SFI \
+              -destination 'generic/platform=iOS' \
+              -configuration Release \
+              -sdk iphoneos \
+              -derivedDataPath DerivedData \
+              build \
+              STRIP_INSTALLED_PRODUCT=NO \
+              ARCHS=arm64 \
+              ONLY_ACTIVE_ARCH=YES \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              COMPILER_INDEX_STORE_ENABLE=NO \
+              SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO
+            then
+              XB_OK=1
+              break
+            else
+              XB_RC=$?
+            fi
+            if [ "$XB_RC" -eq 143 ]; then
+              echo "::error::xcodebuild aborted by runner shutdown (exit 143); not retrying"
+              exit 1
+            fi
+            echo "::warning::xcodebuild exit $XB_RC (attempt $attempt/3): known SwiftPM flake, cleaning DerivedData and retrying"
+          done
+          [ "$XB_OK" -eq 1 ] || { echo "::error::xcodebuild failed after 3 attempts"; exit 1; }
 
           APP_PATH="DerivedData/Build/Products/Release-iphoneos/sing-box.app"
           [ -d "$APP_PATH" ] || { echo "::error::sing-box.app not produced"; exit 1; }
@@ -1595,19 +1615,36 @@ jobs:
           set -euo pipefail
           # Clear SwiftPM cache to avoid stale repo references
           rm -rf ~/Library/Caches/org.swift.swiftpm
-          xcodebuild \
-            -project sing-box.xcodeproj \
-            -scheme SFM \
-            -destination 'generic/platform=macOS' \
-            -configuration Release \
-            -sdk macosx \
-            -derivedDataPath DerivedData \
-            build \
-            -skipPackagePluginValidation \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO
+          # 與 Build SFI 相同的 xcodebuild 偶發崩潰重試護欄（見 SFI 步驟註釋）
+          XB_OK=0
+          for attempt in 1 2 3; do
+            rm -rf DerivedData
+            if xcodebuild \
+              -project sing-box.xcodeproj \
+              -scheme SFM \
+              -destination 'generic/platform=macOS' \
+              -configuration Release \
+              -sdk macosx \
+              -derivedDataPath DerivedData \
+              build \
+              -skipPackagePluginValidation \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              COMPILER_INDEX_STORE_ENABLE=NO \
+              SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO
+            then
+              XB_OK=1
+              break
+            else
+              XB_RC=$?
+            fi
+            if [ "$XB_RC" -eq 143 ]; then
+              echo "::error::xcodebuild aborted by runner shutdown (exit 143); not retrying"
+              exit 1
+            fi
+            echo "::warning::xcodebuild exit $XB_RC (attempt $attempt/3): known SwiftPM flake, cleaning DerivedData and retrying"
+          done
+          [ "$XB_OK" -eq 1 ] || { echo "::error::xcodebuild failed after 3 attempts"; exit 1; }
 
           APP_PATH="DerivedData/Build/Products/Release/sing-box.app"
           [ -d "$APP_PATH" ] || { echo "::error::sing-box.app (macOS) not produced"; exit 1; }
