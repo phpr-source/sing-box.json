@@ -364,11 +364,16 @@ jobs:
           - { name: darwin-amd64,        goos: darwin,  goarch: amd64, goamd64: v1, upx: false, cgo: "1" }
 
           # --- x86_64 高性能 v3 (N100/酷睿/Zen, 要求 AVX2) ---
-          - { name: linux-amd64-v3-purego, goos: linux, goarch: amd64, goamd64: v3, variant: purego, cgo: 0, upx: true, tags_extra: with_purego }
-          - { name: linux-amd64-v3-glibc,  goos: linux, goarch: amd64, goamd64: v3, variant: glibc,  cgo: 1, upx: true }
-          - { name: linux-amd64-v3-musl,   goos: linux, goarch: amd64, goamd64: v3, variant: musl,   cgo: 1, upx: true }
-          - { name: windows-amd64-v3,      goos: windows, goarch: amd64, goamd64: v3, upx: false, tags_extra: with_purego }
-          - { name: darwin-amd64-v3,       goos: darwin,  goarch: amd64, goamd64: v3, upx: false, cgo: "1" }
+          - { name: linux-amd64v3-purego, goos: linux, goarch: amd64, goamd64: v3, variant: purego, cgo: 0, upx: true, tags_extra: with_purego }
+          - { name: linux-amd64v3-glibc,  goos: linux, goarch: amd64, goamd64: v3, variant: glibc,  cgo: 1, upx: true }
+          - { name: linux-amd64v3-musl,   goos: linux, goarch: amd64, goamd64: v3, variant: musl,   cgo: 1, upx: true }
+          - { name: windows-amd64v3,      goos: windows, goarch: amd64, goamd64: v3, upx: false, tags_extra: with_purego }
+          - { name: darwin-amd64v3,       goos: darwin,  goarch: amd64, goamd64: v3, upx: false, cgo: "1" }
+          # 對齊上游官方產品矩陣（build-testing.yml darwin-legacy 行）：補丁版 Go
+          # （源碼倉 .github/setup_go_for_macos1013.sh 維護）+ MACOSX_DEPLOYMENT_TARGET
+          # 10.13 + naive:false（讀 OTHERS）。為 macOS 10.13 High Sierra 用戶提供官方
+          # 同款 legacy 產物。
+          - { name: darwin-amd64-legacy-macos-10.13, goos: darwin, goarch: amd64, goamd64: v1, upx: false, cgo: "1", legacy_macos: true, legacy_name: macos-10.13, macos_deployment_target: "10.13" }
 
           # --- ARM64 (Mac/R2S/R4S/树莓派4/5) ---
           - { name: linux-arm64-purego, goos: linux, goarch: arm64, variant: purego, cgo: 0, upx: true, tags_extra: with_purego }
@@ -391,6 +396,7 @@ jobs:
           - { name: android-arm64,  goos: android, goarch: arm64,           ndk_triple: "aarch64-linux-android23", cgo: "1", upx: false }
           - { name: android-arm,    goos: android, goarch: arm,    goarm: 7, ndk_triple: "armv7a-linux-androideabi23", cgo: "1", upx: false }
           - { name: android-amd64,  goos: android, goarch: amd64,  goamd64: v1, ndk_triple: "x86_64-linux-android23",    cgo: "1", upx: false }
+          - { name: android-amd64v3, goos: android, goarch: amd64,  goamd64: v3, ndk_triple: "x86_64-linux-android23",    cgo: "1", upx: false }
           - { name: android-386,    goos: android, goarch: 386,             ndk_triple: "i686-linux-android23",         cgo: "1", upx: false }
     runs-on: ${{ matrix.platform.goos == 'darwin' && 'macos-latest' || 'ubuntu-latest' }}
     env:
@@ -511,7 +517,8 @@ jobs:
           echo "Applied $applied patch(es)."
 
       - name: Setup Go
-        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
+        # darwin legacy（macos-10.13）行改用源碼倉維護的補丁版 Go（見下一步驟）
+        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && matrix.platform.legacy_macos != 'true'
         uses: actions/setup-go@v6
         with:
           # 上游官方產物的真實工具鏈（由 check job 動態解析，當前 1.26.8），
@@ -519,6 +526,20 @@ jobs:
           go-version: '${{ needs.check.outputs.go_version }}'
           cache: true
           cache-dependency-path: sing-box/go.sum
+
+      - name: Setup patched Go for macOS 10.13 legacy
+        # 對齊官方（build-testing.yml "Setup Go for macOS 10.13"）：腳本由上游
+        # 源碼倉維護（.github/setup_go_for_macos1013.sh，帶三個補丁 commit 的
+        # Go 1.26.8，恢复 macOS 10.13 支持），本地零維護隨源碼跟隨。
+        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && matrix.platform.legacy_macos == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sing-box/.github/setup_go_for_macos1013.sh
+          echo "PATH=$HOME/go/go_osx/bin:$PATH" >> "$GITHUB_ENV"
+          echo "GOROOT=$HOME/go/go_osx" >> "$GITHUB_ENV"
+          "$HOME/go/go_osx/bin/go" version
 
       - name: Configure Tags and CGO
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
@@ -544,9 +565,9 @@ jobs:
           if [ "${{ matrix.platform.goos }}" = "android" ]; then
             TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS"
             FORCE_NAIVE=true
-          elif [ "$ENABLE_NAIVE" = "true" ] && [ "${{ matrix.platform.goos }}" = "windows" ]; then
+          elif [ "$ENABLE_NAIVE" = "true" ] && [ "${{ matrix.platform.legacy_macos }}" != "true" ] && [ "${{ matrix.platform.goos }}" = "windows" ]; then
             TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS_WINDOWS"
-          elif [ "$ENABLE_NAIVE" = "true" ]; then
+          elif [ "$ENABLE_NAIVE" = "true" ] && [ "${{ matrix.platform.legacy_macos }}" != "true" ]; then
             TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS"
           else
             TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS_OTHERS"
@@ -560,8 +581,11 @@ jobs:
             TAGS="${TAGS},${{ matrix.platform.tags_extra }}"
           fi
 
-          # naive：Android 恒带（与官方一致）；linux/windows 随 enable_naive 门控。
-          if [ "$FORCE_NAIVE" = "true" ] || [ "$ENABLE_NAIVE" = "true" ]; then
+          # naive：Android 恒带（与官方一致）；linux/windows 随 enable_naive 门控；
+          # darwin legacy（macos-10.13）恒不带（官方 legacy 行 naive:false）。
+          if [ "${{ matrix.platform.legacy_macos }}" = "true" ]; then
+            TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^with_naive_outbound$' | grep -v '^$' | paste -sd, -)
+          elif [ "$FORCE_NAIVE" = "true" ] || [ "$ENABLE_NAIVE" = "true" ]; then
             TAGS="${TAGS},with_naive_outbound"
           fi
 
@@ -598,11 +622,11 @@ jobs:
           echo "suffix=${ARCHIVE_SUFFIX}" >> $GITHUB_OUTPUT
           echo "cgo_val=${CGO_VAL}" >> $GITHUB_OUTPUT
 
-          # Archive name: strip -purego suffix for standard-compatible naming
+          # Archive name 直接使用平台名。2026-10-02 對齊上游官方：不再剝離
+          # -purego 後綴——官方 linux purego 產物名即含 -purego
+          # （sing-box-<ver>-linux-amd64-purego.tar.gz），剝離後的
+          # linux-amd64.tar.gz 在官方命名體系中不存在，易與 glibc 產物混淆。
           ARCHIVE_NAME="${{ matrix.platform.name }}"
-          if [ "${{ matrix.platform.variant }}" = "purego" ]; then
-            ARCHIVE_NAME=$(echo "$ARCHIVE_NAME" | sed 's/-purego$//')
-          fi
           echo "archive_name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
 
       - name: Install GCC cross-compilers for glibc targets
@@ -793,6 +817,9 @@ jobs:
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
         env:
           CGO_ENABLED: ${{ steps.env.outputs.cgo_val }}
+          # darwin legacy（macos-10.13）行注入 10.13 部署目標（官方同款）；
+          # 其餘平台為空字串不生效。
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform.macos_deployment_target || '' }}
         run: |
           set -euo pipefail
           cd sing-box
@@ -945,6 +972,10 @@ jobs:
           ARCHIVE_NAME="${{ steps.env.outputs.archive_name }}"
           STANDALONE_NAME="sing-box-${VER}-${ARCHIVE_NAME}"
 
+          # 2026-10-02 對齊上游官方歸檔結構（build-testing.yml Archive 步驟）：
+          # 包內為頂層目錄 sing-box-<ver>-<os>-<arch>[-variant]/（含二進制、LICENSE、
+          # 可選 libcronet 庫），解壓不散落文件。此前為平鋪結構，屬結果差異。
+          # UPX 變體目錄名追加 -upx（本地附加變體，官方無）。
           if [ "$UPX_SUPPORTED" = "true" ]; then
             cp "$BIN_NAME" "${STANDALONE_NAME}.upx.tmp"
             UPX_OK=false
@@ -956,45 +987,44 @@ jobs:
             if [ "$UPX_OK" = "true" ]; then
               mv "${STANDALONE_NAME}.upx.tmp" "${STANDALONE_NAME}.upx"
               # Package UPX as tar.gz, binary renamed to sing-box for script compatibility
-              mkdir -p upx_tmp
-              cp "${STANDALONE_NAME}.upx" "upx_tmp/$BIN_NAME"
-              cp LICENSE "upx_tmp/" 2>/dev/null || true
+              mkdir -p "${STANDALONE_NAME}-upx"
+              cp "${STANDALONE_NAME}.upx" "${STANDALONE_NAME}-upx/$BIN_NAME"
+              cp LICENSE "${STANDALONE_NAME}-upx/" 2>/dev/null || true
               UPX_ARCHIVE="${STANDALONE_NAME}-upx.tar.gz"
-              tar --no-same-owner -C upx_tmp -czf "release_files/${UPX_ARCHIVE}" "$BIN_NAME" LICENSE
-              rm -rf upx_tmp
+              tar --no-same-owner -czf "release_files/${UPX_ARCHIVE}" "${STANDALONE_NAME}-upx"
+              rm -rf "${STANDALONE_NAME}-upx"
               echo "standalone_bin=${STANDALONE_NAME}.upx" >> $GITHUB_ENV
             else
               rm -f "${STANDALONE_NAME}.upx.tmp"
-              cp "$BIN_NAME" "${STANDALONE_NAME}"
+              mkdir -p "${STANDALONE_NAME}"
+              cp "$BIN_NAME" "${STANDALONE_NAME}/"
+              cp LICENSE "${STANDALONE_NAME}/" 2>/dev/null || true
               echo "standalone_bin=${STANDALONE_NAME}" >> $GITHUB_ENV
             fi
           else
-            if [ "${{ matrix.platform.goos }}" = "windows" ]; then
-              cp "$BIN_NAME" "${STANDALONE_NAME}.exe"
-              echo "standalone_bin=${STANDALONE_NAME}.exe" >> $GITHUB_ENV
-            else
-              cp "$BIN_NAME" "${STANDALONE_NAME}"
-              echo "standalone_bin=${STANDALONE_NAME}" >> $GITHUB_ENV
-            fi
+            mkdir -p "${STANDALONE_NAME}"
+            cp "$BIN_NAME" "${STANDALONE_NAME}/"
+            cp LICENSE "${STANDALONE_NAME}/" 2>/dev/null || true
+            echo "standalone_bin=${STANDALONE_NAME}" >> $GITHUB_ENV
           fi
 
           if [ "${{ matrix.platform.goos }}" = "windows" ]; then
             ZIP_NAME="${STANDALONE_NAME}.zip"
             if [ -f "libcronet.dll" ]; then
-              zip -q9 "release_files/${ZIP_NAME}" "$BIN_NAME" "libcronet.dll" LICENSE 2>/dev/null || zip -q9 "release_files/${ZIP_NAME}" "$BIN_NAME" "libcronet.dll"
-            else
-              zip -q9 "release_files/${ZIP_NAME}" "$BIN_NAME" LICENSE 2>/dev/null || zip -q9 "release_files/${ZIP_NAME}" "$BIN_NAME"
+              cp "libcronet.dll" "${STANDALONE_NAME}/"
             fi
+            rm -f "release_files/${ZIP_NAME}"
+            zip -q9 -r "release_files/${ZIP_NAME}" "${STANDALONE_NAME}"
             echo "package_file=${ZIP_NAME}" >> $GITHUB_ENV
           else
             TAR_NAME="${STANDALONE_NAME}.tar.gz"
             if [ -f "libcronet.so" ]; then
-              tar --no-same-owner -czf "release_files/${TAR_NAME}" "$BIN_NAME" "libcronet.so" LICENSE 2>/dev/null || tar --no-same-owner -czf "release_files/${TAR_NAME}" "$BIN_NAME" "libcronet.so"
-            else
-              tar --no-same-owner -czf "release_files/${TAR_NAME}" "$BIN_NAME" LICENSE 2>/dev/null || tar --no-same-owner -czf "release_files/${TAR_NAME}" "$BIN_NAME"
+              cp "libcronet.so" "${STANDALONE_NAME}/"
             fi
+            tar --no-same-owner -czf "release_files/${TAR_NAME}" "${STANDALONE_NAME}"
             echo "package_file=${TAR_NAME}" >> $GITHUB_ENV
           fi
+          rm -rf "${STANDALONE_NAME}"
 
       - name: Generate Build Checksums
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
@@ -1299,6 +1329,18 @@ jobs:
           if [ ! -f "libbox-legacy.aar" ]; then echo "::error::libbox-legacy.aar not found!"; exit 1; fi
           ls -lh libbox.aar libbox-legacy.aar
 
+      - name: Sync client VERSION_NAME with core version
+        # 對齊官方（build-testing.yml "Update VERSION_NAME for temporary tag"）：
+        # client 分支 HEAD 的 version.properties 可能領先或落後本次構建的 core
+        # 版本，官方在版本不匹配場景會改寫 VERSION_NAME。本地滾動構建恆做同步，
+        # 保證 APK 內部 versionName 與 core 版本一致（VERSION_CODE 仍取 client 值，
+        # 與官方一致）。
+        if: matrix.target.sfa_repo != 'none'
+        run: |
+          set -euo pipefail
+          sed -i "s/^VERSION_NAME=.*/VERSION_NAME=${{ matrix.target.ver }}/" sing-box-for-android/version.properties
+          grep '^VERSION_NAME=' sing-box-for-android/version.properties
+
       - name: Prepare Android Client
         if: matrix.target.sfa_repo != 'none'
         run: |
@@ -1326,7 +1368,7 @@ jobs:
           )
           
           echo "::group::Building release APKs"
-          ./gradlew :app:assembleOtherRelease "${SIGNING_ARGS[@]}"
+          ./gradlew --build-cache --parallel :app:assembleOtherRelease "${SIGNING_ARGS[@]}"
           echo "::endgroup::"
 
           echo "::group::Building legacy APKs (Android 5.x)"
@@ -1420,17 +1462,22 @@ jobs:
           TAGS_USED="$(grep -E 'sharedTags = append' ../sing-box/cmd/internal/build_libbox/main.go 2>/dev/null | grep -oE '"[a-z_0-9]+"' | tr -d '"' | sort -u | paste -sd, -)"
           [ -n "$TAGS_USED" ] || TAGS_USED="build_libbox sharedTags (see upstream)"
 
+          # 元數據文件名對齊官方（SFA-version-metadata.json），內容為官方欄位
+          # （version_code/version_name）+ 本地擴展欄位（target_id/build 時間/tags）。
+          VERSION_CODE="$(grep '^VERSION_CODE=' sing-box-for-android/version.properties | cut -d'=' -f2)"
           jq -n \
+            --argjson version_code "${VERSION_CODE:-0}" \
             --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg version_name "${{ matrix.target.ver }}" \
             --arg target_id "${{ matrix.target.id }}" \
             --arg tags "$TAGS_USED" \
             '{
-              target_id: $target_id,
+              version_code: $version_code,
               version_name: $version_name,
+              target_id: $target_id,
               build_time: $built_at,
               build_tags: $tags
-            }' > "apks/SFA-${{ matrix.target.id }}-metadata.json"
+            }' > "apks/SFA-version-metadata.json"
 
       - name: Generate Build Checksums
         if: matrix.target.sfa_repo != 'none'
