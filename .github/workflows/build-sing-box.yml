@@ -1946,7 +1946,9 @@ jobs:
           case "$ARCH" in
             x86_64|amd64)
               if grep -q "avx2" /proc/cpuinfo 2>/dev/null; then
-                FILE_ARCH="amd64-v3"
+                # 資產命名已對齊官方（amd64v3 無連字符），此處同步否則安裝器
+                # 在 AVX2 機器上匹配不到 v3 資產。
+                FILE_ARCH="amd64v3"
               else
                 FILE_ARCH="amd64"
               fi
