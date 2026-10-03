@@ -1582,7 +1582,12 @@ jobs:
     # macos-latest (Xcode 16.4) cannot compile the Apple client.
     runs-on: macos-26
     needs: [init, check]
-    timeout-minutes: 60
+    # 2026-10-03：60 → 120。当前 client pin 包圖 26 個依賴 + Xcode 26.5 下，
+    # stable apple 實際構建耗時 ~55-61min，貼著 60min 上限——job 超時在 GitHub
+    # 上表現為 conclusion=cancelled 而非 failure，連續兩個 run（37098783466 後
+    # 兩次 run B）都在 60min27s 整被取消，極易誤判為 runner 隨機抖動。
+    # testing 側 era-skip 秒過不受影響；xcodebuild 三次重試也獲得相應餘量。
+    timeout-minutes: 120
     if: >-
       needs.check.outputs.has_update == 'true' &&
       needs.check.outputs.matrix != '[]' &&
