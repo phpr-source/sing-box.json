@@ -2308,7 +2308,11 @@ jobs:
 
             (
               cd "release_files/${target_id}"
-              find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec sha256sum {} \; | sed 's/ \.\// /' > SHA256SUMS.txt
+              # 條目必須與 release 頁的平鋪資產名一致：gh release upload 只取
+              # basename（linux/xxx.tar.gz → xxx.tar.gz），此前把本地分層目錄前綴
+              # 帶進校驗單，用戶 sha256sum -c 全部 "No such file or directory"
+              # （哈希本身正確，僅路徑錯——2026-10-04 實測坐實後修正）。
+              find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec sha256sum {} \; | sed -E 's| \./[a-z]+/| |' > SHA256SUMS.txt
             )
             echo "" >> release_body.txt
             echo "## 🔐 SHA256 Checksums" >> release_body.txt
