@@ -1985,7 +1985,12 @@ jobs:
           # 且無人察覺——此處硬失敗。腿本身失敗或被過濾/跳過不計入期望值，
           # 部分失敗仍可發佈其餘 target 的既有語義不變。
           # --paginate 跨頁時 --jq 會輸出多段結果，改用管道 jq -s 聚合全部頁。
-          EXPECTED=$(gh api --paginate             "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100"             | jq -s '[.[].jobs[] | select((.name | startswith("build_core")) and .conclusion == "success")] | length')
+          # 期望值必須按「Build Core 步驟 conclusion=success」計數，而非 job 結論：
+          # rebuild_platform 過濾腿與 enable_naive 下跳過的 android 腿以 job
+          # success 結束（skip 置位後全部步驟 skipped），按 job 結論計數會把
+          # 過濾腿也計入期望值，聚焦重建必然誤觸本閘門
+          # （run 37098783466：job 結論 54 vs 實際 pkg 16，發佈被正確拒絕但屬誤傷）。
+          EXPECTED=$(gh api --paginate             "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100"             | jq -s '[.[].jobs[] | select((.name | startswith("build_core")) and ([.steps[]? | select(.name == "Build Core" and .conclusion == "success")] | length > 0))] | length')
           ACTUAL=$(find ./tmp -maxdepth 1 -type d -name "pkg-*" | wc -l)
           echo "build_core succeeded legs: ${EXPECTED}; downloaded pkg artifacts: ${ACTUAL}"
           if [ "${ACTUAL}" -lt "${EXPECTED}" ]; then
