@@ -914,7 +914,10 @@ jobs:
               # 本地靜態化組合以逐字對齊官方（實證：上游 musl 產物即為靜態，
               # 二進制探針 file/ldd）。其餘腿（本地獨有）保留組合保證自包含。
               CHROMIUM_MUSL=false
-              if [ "$ENABLE_NAIVE" = "true" ]; then
+              # ENABLE_NAIVE 是 Configure Tags 步驟的局部變量，此處（Build Core）
+              # 不可引用——set -u 下未綁定即退出（run 37115970972 的 musl 腿實錯
+              # "ENABLE_NAIVE: unbound variable"）。直接讀 dispatch 輸入。
+              if [ "${{ github.event.inputs.enable_naive || 'false' }}" = "true" ]; then
                 case "${{ matrix.platform.goarch }}" in
                   amd64|arm64) CHROMIUM_MUSL=true ;;
                 esac
