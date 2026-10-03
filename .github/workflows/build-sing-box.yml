@@ -94,17 +94,10 @@ jobs:
     outputs:
       start_time: ${{ steps.time.outputs.start }}
       android_secrets_valid: ${{ steps.validate.outputs.android_secrets_valid }}
-      version_code: ${{ steps.calc.outputs.code }}
     steps:
       - name: Record Start Time
         id: time
         run: echo "start=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
-
-      - name: Calculate Android Version Code
-        id: calc
-        run: |
-          CODE=$(( ($(date +%s) / 60) + ${{ github.run_number }} ))
-          echo "code=$CODE" >> $GITHUB_OUTPUT
 
       - name: Validate Secrets
         id: validate
@@ -572,8 +565,8 @@ jobs:
 
           # 基础 tags 以 reF1nd 上游为基准：跟随源码 release/ 目录的 tag 文件自动同步
           # （上游新增 tag 如 with_openvpn/with_openconnect 无需人工维护）。
-          # 老版本源码缺文件时 fallback 到 env；env 中的本地独有 tag
-          # （with_cloudflared/with_usbip 等）经下方 sort -u 合并去重后保留。
+          # 老版本源码缺文件时 fallback 到 env；本地独有产品线的 env 基线
+          # 经下方去重保序合并后保留。
           # 对齐真实官方管线（sing-box-releases build-testing.yml Compute build
           # environment）：Windows 在 enable_naive 时读 WINDOWS 文件；Android 恒用
           # DEFAULT（官方 Android 行 naive:true，且 cronet 的 Android 静态库随 Go
@@ -621,10 +614,10 @@ jobs:
             fi
           fi
 
-          if [ -n "${{ matrix.platform.tags_extra }}" ]; then
-            TAGS="${TAGS},${{ matrix.platform.tags_extra }}"
-          fi
-
+          # 追加順序對齊上游 Compute build environment（文件序 → naive → ebpf →
+          # purego/musl）：有上游對應物的腿，二進制內嵌的 -tags 串（sing-box
+          # version 的 Tags 行即原串）與官方逐字一致。此前 tags_extra 先於
+          # naive/ebpf 追加且 sort -u 重排字典序，集合相同但順序不同。
           # naive：Android 恒带（与官方一致）；linux/windows 随 enable_naive 门控；
           # darwin legacy（macos-10.13）恒不带（官方 legacy 行 naive:false）。
           if [ "${{ matrix.platform.legacy_macos }}" = "true" ]; then
@@ -639,6 +632,10 @@ jobs:
             if [ -f sing-box/include/ebpf.go ] && ! echo "${TAGS}" | grep -q 'with_ebpf'; then
               TAGS="${TAGS},with_ebpf"
             fi
+          fi
+
+          if [ -n "${{ matrix.platform.tags_extra }}" ]; then
+            TAGS="${TAGS},${{ matrix.platform.tags_extra }}"
           fi
 
           case "${{ matrix.platform.variant }}" in
@@ -661,7 +658,9 @@ jobs:
               ;;
           esac
 
-          TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
+          # 去重保序（awk 首现保留）：替代 sort -u——字典序重排會讓二進制內嵌
+          # -tags 串與上游「文件序 + 追加」不同（集合相同、順序不同，見上方註釋）。
+          TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^$' | awk '!seen[$0]++' | paste -sd, -)
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
           echo "suffix=${ARCHIVE_SUFFIX}" >> $GITHUB_OUTPUT
           echo "cgo_val=${CGO_VAL}" >> $GITHUB_OUTPUT
@@ -910,8 +909,20 @@ jobs:
 
           if [ "${{ matrix.platform.goos }}" = "linux" ] && [ "$CGO_ENABLED" = "1" ]; then
             if [ "${{ matrix.platform.variant }}" = "musl" ]; then
-              LDFLAGS="$LDFLAGS -extldflags '-static'"
-              TAGS_STR="$TAGS_STR,osusergo,netgo"
+              # chromium musl 工具鏈（enable_naive 的 amd64/arm64 腿，與上游 musl
+              # 行同構）默認靜態鏈接且上游不加 osusergo/netgo/-extldflags——跳過
+              # 本地靜態化組合以逐字對齊官方（實證：上游 musl 產物即為靜態，
+              # 二進制探針 file/ldd）。其餘腿（本地獨有）保留組合保證自包含。
+              CHROMIUM_MUSL=false
+              if [ "$ENABLE_NAIVE" = "true" ]; then
+                case "${{ matrix.platform.goarch }}" in
+                  amd64|arm64) CHROMIUM_MUSL=true ;;
+                esac
+              fi
+              if [ "$CHROMIUM_MUSL" != "true" ]; then
+                LDFLAGS="$LDFLAGS -extldflags '-static'"
+                TAGS_STR="$TAGS_STR,osusergo,netgo"
+              fi
             fi
           fi
 
