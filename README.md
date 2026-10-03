@@ -2,9 +2,10 @@
 
 > 自動檢測並編譯 [reF1nd/sing-box](https://github.com/reF1nd/sing-box) 的 Stable 和 Testing 分支。
 
-## 📦 最新版本狀態 (2026-10-03 09:58 UTC+8)
+## 📦 最新版本狀態 (2026-10-03 10:59 UTC+8)
 
-
+- 🔄 強制構建 **[reF1nd_Stable](https://github.com/reF1nd/sing-box/tree/reF1nd-stable)** `v1.14.2-reF1nd` (2026-09-26) [reF1nd_Stable v1.14.2-reF1nd]
+- 🔄 強制構建 **[reF1nd_Testing](https://github.com/reF1nd/sing-box/tree/reF1nd-testing)** `v1.15.0-alpha.9-reF1nd` (2026-09-27) [reF1nd_Testing v1.15.0-alpha.9-reF1nd]
 ---
 
 ## 📥 快速安裝 (Linux)
