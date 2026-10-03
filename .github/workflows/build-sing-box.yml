@@ -43,7 +43,7 @@ on:
         type: boolean
         default: false
       enable_naive:
-        description: "Enable naive outbound (Linux/Windows only). Android CLI builds are skipped when enabled."
+        description: "Additionally build linux glibc/musl CLI with chromium-toolchain naive (windows/darwin and linux purego amd64/arm64 include naive by default)"
         required: false
         type: boolean
         default: false
@@ -364,7 +364,10 @@ jobs:
     timeout-minutes: ${{ github.event.inputs.enable_naive == 'true' && 60 || 30 }}
     strategy:
       fail-fast: false
-      max-parallel: ${{ github.event.inputs.enable_naive == 'true' && 2 || 8 }}
+      # 2026-10-04：取消 enable_naive 時降到 2 的舊政策——那源自 android/darwin
+      # 跳過+全矩陣 chromium 的舊語義；新語義下 chromium 僅及 linux cgo 腿，
+      # 上游同類管線 max-parallel 高達 13，8 並發安全。
+      max-parallel: 8
       matrix:
         target: ${{ fromJson(needs.check.outputs.matrix) }}
         platform:
@@ -434,26 +437,60 @@ jobs:
         id: check_naive
         if: steps.filter.outputs.skip != 'true'
         run: |
+          # 2026-10-04 第八輪：naive 政策重構。舊語義（遺跡）：enable_naive=true
+          # 時跳過 android/darwin 腿——那是 cronet 未接線時代的產物；如今 android
+          # 恒 naive、darwin 經模塊分發庫即可 naive，跳過只會讓產物莫名消失。
+          # 新語義：不再有任何腿因 naive 被跳過（skip 恆 false，下游條件不動），
+          # naive 覆蓋由 Configure Tags 的「免費腿默認 naive」政策決定：
+          #   - 恒 naive（與上游一一對應，無額外成本）：android、darwin 非 legacy、
+          #     windows、linux purego 的 amd64/arm64（僅需隨包抽取 .so）
+          #   - enable_naive=true 才 naive（需 chromium 工具鏈，成本高）：linux
+          #     cgo glibc/musl（amd64/arm64 為上游同構路徑；本地獨有架構走混合模式）
+          #   - 恒不 naive：darwin legacy（上游 legacy 行 naive:false）、linux mips
+          #     大端（cronet-go 無 lib/linux_mips，庫不存在，2026-10-04 實查）
+          # skip 輸出保留恆 false，下游步驟的 if 條件無需改動。
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+          NAIVE_ELIGIBLE=false
+          NEEDS_CRONET=false
           if [ "${{ matrix.platform.goos }}" = "android" ]; then
-            if [ "${{ github.event.inputs.enable_naive }}" = "true" ]; then
-              # Android CLI has no cronet cross-compilation environment, so naive is unavailable
-              echo "::warning::Android CLI targets are not compatible with naive outbound. Skipping."
-              echo "skip=true" >> $GITHUB_OUTPUT
-            else
-              echo "skip=false" >> $GITHUB_OUTPUT
+            NAIVE_ELIGIBLE=true
+          elif [ "${{ matrix.platform.legacy_macos }}" = "true" ]; then
+            NAIVE_ELIGIBLE=false
+          elif [ "${{ matrix.platform.goos }}" = "windows" ]; then
+            NAIVE_ELIGIBLE=true
+            NEEDS_CRONET=true
+          elif [ "${{ matrix.platform.goos }}" = "darwin" ]; then
+            NAIVE_ELIGIBLE=true
+          elif [ "${{ matrix.platform.goos }}" = "linux" ]; then
+            if [ "${{ matrix.platform.variant }}" = "purego" ]; then
+              case "${{ matrix.platform.goarch }}" in
+                amd64|arm64)
+                  # 免費腿：僅需隨包抽取預編譯 libcronet.so（上游同款）
+                  NAIVE_ELIGIBLE=true
+                  NEEDS_CRONET=true
+                  ;;
+                mips)
+                  # cronet-go 無大端 mips 預編譯庫，naive 不可用
+                  NAIVE_ELIGIBLE=false
+                  ;;
+                *)
+                  # 本地獨有 purego 架構（armv7/mipsle/riscv64）：庫存在
+                  # （lib/linux_{arm,mipsle,riscv64}），僅 enable_naive 時跟隨
+                  if [ "${{ github.event.inputs.enable_naive }}" = "true" ]; then
+                    NAIVE_ELIGIBLE=true
+                    NEEDS_CRONET=true
+                  fi
+                  ;;
+              esac
+            elif [ "${{ github.event.inputs.enable_naive }}" = "true" ]; then
+              # linux cgo（glibc/musl）：chromium 工具鏈路徑
+              NAIVE_ELIGIBLE=true
+              NEEDS_CRONET=true
             fi
-            exit 0
           fi
-          if [ "${{ github.event.inputs.enable_naive }}" = "true" ]; then
-            if [[ "${{ matrix.platform.goos }}" != "linux" && "${{ matrix.platform.goos }}" != "windows" ]]; then
-              echo "skip=true" >> $GITHUB_OUTPUT
-              echo "::notice::Naive outbound not supported on ${{ matrix.platform.goos }}. Skipping."
-            else
-              echo "skip=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "skip=false" >> $GITHUB_OUTPUT
-          fi
+          echo "naive_eligible=${NAIVE_ELIGIBLE}" >> $GITHUB_OUTPUT
+          echo "needs_cronet=${NEEDS_CRONET}" >> $GITHUB_OUTPUT
 
       - name: Resolve Commit
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
@@ -561,49 +598,44 @@ jobs:
         run: |
           CGO_VAL="${{ matrix.platform.cgo || '0' }}"
           ARCHIVE_SUFFIX=""
-          ENABLE_NAIVE="${{ github.event.inputs.enable_naive || 'false' }}"
 
           # 基础 tags 以 reF1nd 上游为基准：跟随源码 release/ 目录的 tag 文件自动同步
           # （上游新增 tag 如 with_openvpn/with_openconnect 无需人工维护）。
           # 老版本源码缺文件时 fallback 到 env；本地独有产品线的 env 基线
           # 经下方去重保序合并后保留。
-          # 对齐真实官方管线（sing-box-releases build-testing.yml Compute build
-          # environment）：Windows 在 enable_naive 时读 WINDOWS 文件；Android 恒用
-          # DEFAULT（官方 Android 行 naive:true，且 cronet 的 Android 静态库随 Go
-          # 模块分发 lib/android_*，NDK cgo 直接链接，无需本地门控）；linux/windows
-          # 的 naive 维持本地既定分歧——enable_naive 未开启时读 OTHERS（文件含
-          # with_naive_outbound，产物无 libcronet 时带该 tag 会在运行时
-          # "cronet: library not found" 崩溃，故必须剔除）。
+          # 2026-10-04 第八輪：naive 政策重構後的文件選擇——與上游 Compute build
+          # environment 同構：windows 非 legacy 恒讀 WINDOWS（上游 windows 行恒
+          # naive）；naive 腿讀 DEFAULT；其餘讀 OTHERS。免費腿（android/darwin
+          # 非 legacy/windows/linux purego amd64|arm64）默認即 naive，與上游產物
+          # 對齊且無額外構建成本；linux cgo 的 naive 維持 enable_naive 門控
+          # （chromium 工具鏈成本），本地獨有架構的差異參見 check_naive 步驟註釋。
           TAGS="${{ env.TAGS_COMMON }},${{ env.TAGS_CLI_EXTRA }}"
           FORCE_NAIVE=false
           if [ "${{ matrix.platform.goos }}" = "android" ]; then
             TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS"
             FORCE_NAIVE=true
-          elif [ "$ENABLE_NAIVE" = "true" ] && [ "${{ matrix.platform.legacy_macos }}" != "true" ] && [ "${{ matrix.platform.goos }}" = "windows" ]; then
+          elif [ "${{ matrix.platform.legacy_macos }}" != "true" ] && [ "${{ matrix.platform.goos }}" = "windows" ]; then
             TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS_WINDOWS"
-          elif [ "$ENABLE_NAIVE" = "true" ] && [ "${{ matrix.platform.legacy_macos }}" != "true" ]; then
+          elif [ "${{ steps.check_naive.outputs.naive_eligible }}" = "true" ]; then
             TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS"
           else
             TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS_OTHERS"
           fi
           SRC_TAGS=$(cat "$TAGS_FILE" 2>/dev/null || true)
-          # 第四輪對齊（2026-10-03）：tags 基準的跟隨策略。
-          # 與上游存在一一對應產物的行（android 恒 naive 行、darwin legacy 恒
-          # naive:false 行、enable_naive=true 時的 linux/windows/darwin 行），tags
-          # 純跟隨源碼 tag 文件——上游對文件的增刪（如 testing 2026-09-27
-          # 77c97b03 "Remove dependency on gVisor" 同時從 OTHERS/WINDOWS 移除
-          # with_gvisor）必須如實反映到產物；此前無條件併入 env 基線會對抗上游
-          # 的有意刪除（實證：testing OTHERS/WINDOWS 現均無 with_gvisor，
-          # DEFAULT 則兩分支仍含且為 env 基線超集，故其餘行不受影響）。
-          # 本地獨有產品線（enable_naive=false 的 linux/windows、darwin 非naive、
-          # armv7/mips/mipsle/riscv64）上游不構建，保留 env 基線疊加以維持本地
-          # gvisor 等特性；老源碼缺 tag 文件時同樣回退 env 基線。
+          # tags 基準的跟隨策略（第四輪確立、第八輪隨 naive 政策擴展）：與上游
+          # 存在一一對應產物的行，tags 純跟隨源碼 tag 文件——上游對文件的增刪
+          # （如 testing 2026-09-27 77c97b03 "Remove dependency on gVisor" 同時
+          # 從 OTHERS/WINDOWS 移除 with_gvisor）必須如實反映到產物。免費腿默認
+          # naive 後，windows/darwin 非 legacy/linux purego amd64|arm64 全部成為
+          # 對應行；本地獨有產品線（linux cgo 非 enable_naive、armv7/mips/mipsle/
+          # riscv64 非 enable_naive）保留 env 基線疊加以維持本地 gvisor 等特性；
+          # 老源碼缺 tag 文件時同樣回退 env 基線。
           HAS_COUNTERPART=false
           if [ "${{ matrix.platform.goos }}" = "android" ]; then
             HAS_COUNTERPART=true
           elif [ "${{ matrix.platform.legacy_macos }}" = "true" ]; then
             HAS_COUNTERPART=true
-          elif [ "$ENABLE_NAIVE" = "true" ]; then
+          elif [ "${{ steps.check_naive.outputs.naive_eligible }}" = "true" ]; then
             HAS_COUNTERPART=true
           fi
           if [ -n "$SRC_TAGS" ]; then
@@ -616,13 +648,12 @@ jobs:
 
           # 追加順序對齊上游 Compute build environment（文件序 → naive → ebpf →
           # purego/musl）：有上游對應物的腿，二進制內嵌的 -tags 串（sing-box
-          # version 的 Tags 行即原串）與官方逐字一致。此前 tags_extra 先於
-          # naive/ebpf 追加且 sort -u 重排字典序，集合相同但順序不同。
-          # naive：Android 恒带（与官方一致）；linux/windows 随 enable_naive 门控；
+          # version 的 Tags 行即原串）與官方逐字一致。
+          # naive：android 恒带；免費腿默認帶；linux cgo 隨 enable_naive；
           # darwin legacy（macos-10.13）恒不带（官方 legacy 行 naive:false）。
           if [ "${{ matrix.platform.legacy_macos }}" = "true" ]; then
             TAGS=$(echo "${TAGS}" | tr ',' '\n' | grep -v '^with_naive_outbound$' | grep -v '^$' | paste -sd, -)
-          elif [ "$FORCE_NAIVE" = "true" ] || [ "$ENABLE_NAIVE" = "true" ]; then
+          elif [ "$FORCE_NAIVE" = "true" ] || [ "${{ steps.check_naive.outputs.naive_eligible }}" = "true" ]; then
             TAGS="${TAGS},with_naive_outbound"
           fi
 
@@ -759,7 +790,7 @@ jobs:
           fi
 
       - name: Setup cronet-go
-        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && github.event.inputs.enable_naive == 'true' && (matrix.platform.goos == 'windows' || matrix.platform.goos == 'linux')
+        if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && steps.check_naive.outputs.needs_cronet == 'true'
         timeout-minutes: 25
         run: |
           set -euo pipefail
@@ -1076,6 +1107,12 @@ jobs:
               mkdir -p "${STANDALONE_NAME}-upx"
               cp "${STANDALONE_NAME}.upx" "${STANDALONE_NAME}-upx/$BIN_NAME"
               cp LICENSE "${STANDALONE_NAME}-upx/" 2>/dev/null || true
+              # 2026-10-04 修復：UPX 變體必須與普通變體同樣攜帶 libcronet.so——
+              # naive 免費腿默認開啟後，purego UPX 變體若缺 .so 會復現
+              # "cronet: library not found" 啟動崩潰（tag 在而庫不在）。
+              if [ -f "libcronet.so" ]; then
+                cp "libcronet.so" "${STANDALONE_NAME}-upx/"
+              fi
               UPX_ARCHIVE="${STANDALONE_NAME}-upx.tar.gz"
               tar --no-same-owner -czf "release_files/${UPX_ARCHIVE}" "${STANDALONE_NAME}-upx"
               rm -rf "${STANDALONE_NAME}-upx"
@@ -2099,10 +2136,23 @@ jobs:
           [ -z "$ASSET_URL" ] && { echo "No release found for $FILE_ARCH"; exit 1; }
           curl -fSL -o "$WORK_DIR/archive.tar.gz" "$ASSET_URL"
           tar -xzf "$WORK_DIR/archive.tar.gz" -C "$WORK_DIR"
-          chmod +x "$WORK_DIR/sing-box"
-          INSTALLED_VER=$("$WORK_DIR/sing-box" version 2>/dev/null | head -n1 || echo "unknown")
+          # 2026-10-04 修復（第二輪回歸）：歸檔自頂層目錄重構後，本腳本仍按平鋪
+          # 佈局取 $WORK_DIR/sing-box——必然找不到而退出。改為在解包樹中定位。
+          BIN_PATH=$(find "$WORK_DIR" -type f -name sing-box | head -n 1)
+          [ -n "$BIN_PATH" ] || { echo "Binary not found in archive"; exit 1; }
+          chmod +x "$BIN_PATH"
+          INSTALLED_VER=$("$BIN_PATH" version 2>/dev/null | head -n1 || echo "unknown")
           echo "Binary reports: $INSTALLED_VER"
-          $SUDO_CMD mv "$WORK_DIR/sing-box" /usr/local/bin/sing-box
+          # naive 免費腿默認開啟後，linux purego 歸檔攜帶 libcronet.so——
+          # 一併安裝，否則 naive 配置觸發 "cronet: library not found"。
+          SO_PATH=$(find "$WORK_DIR" -type f -name libcronet.so | head -n 1)
+          if [ -n "$SO_PATH" ]; then
+            $SUDO_CMD mkdir -p /usr/local/lib
+            $SUDO_CMD cp "$SO_PATH" /usr/local/lib/libcronet.so
+            $SUDO_CMD ldconfig 2>/dev/null || true
+            echo "libcronet.so installed to /usr/local/lib."
+          fi
+          $SUDO_CMD mv "$BIN_PATH" /usr/local/bin/sing-box
           echo "Installation complete."
           INSTALLEOF
           chmod +x /tmp/install-linux.sh
