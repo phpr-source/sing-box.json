@@ -373,7 +373,7 @@ jobs:
           # （源碼倉 .github/setup_go_for_macos1013.sh 維護）+ MACOSX_DEPLOYMENT_TARGET
           # 10.13 + naive:false（讀 OTHERS）。為 macOS 10.13 High Sierra 用戶提供官方
           # 同款 legacy 產物。
-          - { name: darwin-amd64-legacy-macos-10.13, goos: darwin, goarch: amd64, goamd64: v1, upx: false, cgo: "1", legacy_macos: true, legacy_name: macos-10.13, macos_deployment_target: "10.13" }
+          - { name: darwin-amd64-legacy-macos-10.13, goos: darwin, goarch: amd64, goamd64: v1, upx: false, cgo: "1", legacy_macos: "true", legacy_name: macos-10.13, macos_deployment_target: "10.13" }
 
           # --- ARM64 (Mac/R2S/R4S/树莓派4/5) ---
           - { name: linux-arm64-purego, goos: linux, goarch: arm64, variant: purego, cgo: 0, upx: true, tags_extra: with_purego }
@@ -994,6 +994,10 @@ jobs:
               tar --no-same-owner -czf "release_files/${UPX_ARCHIVE}" "${STANDALONE_NAME}-upx"
               rm -rf "${STANDALONE_NAME}-upx"
               echo "standalone_bin=${STANDALONE_NAME}.upx" >> $GITHUB_ENV
+              # 普通變體目錄仍需建立（尾部通用打包對兩種路徑一致處理）
+              mkdir -p "${STANDALONE_NAME}"
+              cp "$BIN_NAME" "${STANDALONE_NAME}/"
+              cp LICENSE "${STANDALONE_NAME}/" 2>/dev/null || true
             else
               rm -f "${STANDALONE_NAME}.upx.tmp"
               mkdir -p "${STANDALONE_NAME}"
