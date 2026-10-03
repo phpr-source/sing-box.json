@@ -138,6 +138,7 @@ jobs:
       matrix: ${{ steps.check.outputs.matrix }}
       has_update: ${{ steps.check.outputs.has_update }}
       go_version: ${{ steps.gover.outputs.go_version }}
+      go_version_darwin: ${{ steps.gover.outputs.go_version_darwin }}
     steps:
       - name: Check versions and generate matrix
         id: check
@@ -336,8 +337,21 @@ jobs:
             GO_VER="1.26.8"
             echo "::warning::Could not resolve upstream Go version; using last known value ${GO_VER}"
           fi
+          # 第四輪對齊（2026-10-03）：上游 darwin CLI 行用獨立的 GO_VERSION_DARWIN
+          # （當前與 GO_VERSION 同值 1.26.8；oldstable 管線中兩者已分叉
+          # ~1.25.12/^1.25.3，證明該旋鈕真實使用）。一旦上游單獨調整 darwin
+          # 工具鏈，本地 darwin 行必須跟隨而非沿用 CLI 版本，否則 darwin 產物
+          # 與官方静默漂移。解析失敗時回退 GO_VER。
+          GO_DARWIN_VER=""
+          if [ -n "${WF:-}" ]; then
+            GO_DARWIN_VER="$(echo "$WF" | grep -m1 -oE "GO_VERSION_DARWIN:[[:space:]]*'?\"?[0-9]+(\.[0-9]+)*'?\"?" | grep -oE '[0-9]+(\.[0-9]+)*' | head -n1 || true)"
+          fi
+          if [ -z "$GO_DARWIN_VER" ]; then
+            GO_DARWIN_VER="$GO_VER"
+          fi
           echo "go_version=${GO_VER}" >> "$GITHUB_OUTPUT"
-          echo "Resolved Go toolchain: ${GO_VER}"
+          echo "go_version_darwin=${GO_DARWIN_VER}" >> "$GITHUB_OUTPUT"
+          echo "Resolved Go toolchain: ${GO_VER} (darwin: ${GO_DARWIN_VER})"
 
       - name: Upload Metadata
         if: steps.check.outputs.has_update == 'true'
@@ -527,8 +541,10 @@ jobs:
         uses: actions/setup-go@v6
         with:
           # 上游官方產物的真實工具鏈（由 check job 動態解析，當前 1.26.8），
-          # 非再沿用 go.mod 下限 1.25.5——與官方二進制的 stdlib 級差異已對齊
-          go-version: '${{ needs.check.outputs.go_version }}'
+          # 非再沿用 go.mod 下限 1.25.5——與官方二進制的 stdlib 級差異已對齊。
+          # darwin 行取上游專用的 GO_VERSION_DARWIN（上游 Setup Go for Darwin
+          # 同款，當前同值；上游單調 darwin 版本時自動跟隨），其餘行用 CLI 版本。
+          go-version: "${{ matrix.platform.goos == 'darwin' && needs.check.outputs.go_version_darwin || needs.check.outputs.go_version }}"
           cache: true
           cache-dependency-path: sing-box/go.sum
 
@@ -578,8 +594,31 @@ jobs:
             TAGS_FILE="sing-box/release/DEFAULT_BUILD_TAGS_OTHERS"
           fi
           SRC_TAGS=$(cat "$TAGS_FILE" 2>/dev/null || true)
+          # 第四輪對齊（2026-10-03）：tags 基準的跟隨策略。
+          # 與上游存在一一對應產物的行（android 恒 naive 行、darwin legacy 恒
+          # naive:false 行、enable_naive=true 時的 linux/windows/darwin 行），tags
+          # 純跟隨源碼 tag 文件——上游對文件的增刪（如 testing 2026-09-27
+          # 77c97b03 "Remove dependency on gVisor" 同時從 OTHERS/WINDOWS 移除
+          # with_gvisor）必須如實反映到產物；此前無條件併入 env 基線會對抗上游
+          # 的有意刪除（實證：testing OTHERS/WINDOWS 現均無 with_gvisor，
+          # DEFAULT 則兩分支仍含且為 env 基線超集，故其餘行不受影響）。
+          # 本地獨有產品線（enable_naive=false 的 linux/windows、darwin 非naive、
+          # armv7/mips/mipsle/riscv64）上游不構建，保留 env 基線疊加以維持本地
+          # gvisor 等特性；老源碼缺 tag 文件時同樣回退 env 基線。
+          HAS_COUNTERPART=false
+          if [ "${{ matrix.platform.goos }}" = "android" ]; then
+            HAS_COUNTERPART=true
+          elif [ "${{ matrix.platform.legacy_macos }}" = "true" ]; then
+            HAS_COUNTERPART=true
+          elif [ "$ENABLE_NAIVE" = "true" ]; then
+            HAS_COUNTERPART=true
+          fi
           if [ -n "$SRC_TAGS" ]; then
-            TAGS="${SRC_TAGS},${TAGS}"
+            if [ "$HAS_COUNTERPART" = "true" ]; then
+              TAGS="$SRC_TAGS"
+            else
+              TAGS="${SRC_TAGS},${TAGS}"
+            fi
           fi
 
           if [ -n "${{ matrix.platform.tags_extra }}" ]; then
@@ -730,7 +769,12 @@ jobs:
             CRONET_GO_VERSION=$(cat sing-box/.github/CRONET_GO_VERSION 2>/dev/null || echo "main")
             git init "$HOME/cronet-go"
             git -C "$HOME/cronet-go" remote add origin https://github.com/sagernet/cronet-go.git
-            git -C "$HOME/cronet-go" fetch --depth=1 origin "$CRONET_GO_VERSION"
+            # 借鑒上游官方管線（build-testing.yml Clone cronet-go）：sparse-checkout
+            # 排除 lib/（各架構預編譯庫，數十 MB×N，僅 purego/android/windows 路徑
+            # 經 Go 模塊或單文件 sparse 抽取使用），linux cgo 路徑只需 naiveproxy
+            # 源碼與 build-naive 工具，--filter=blob:none 省帶寬。
+            git -C "$HOME/cronet-go" sparse-checkout set --no-cone '/*' '!/lib'
+            git -C "$HOME/cronet-go" fetch --depth=1 --filter=blob:none origin "$CRONET_GO_VERSION"
             git -C "$HOME/cronet-go" checkout FETCH_HEAD
           fi
 
@@ -763,14 +807,37 @@ jobs:
               GPG_TTY=/dev/null ./naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh || exit 1
             fi
 
+            # 第四輪對齊（2026-10-03，上游 build-testing.yml Download/Set Chromium
+            # toolchain 同款）：上游存在 naive linux 行的架構（amd64/amd64v3/arm64），
+            # musl 須用 --libc=musl 專用工具鏈/sysroot（此前誤用 glibc 工具鏈）；
+            # build-naive env 原樣導入（含 CC/CXX = Chromium 自帶 clang——官方
+            # naive 產物的實際編譯器。此前本地剝離 CC/CXX 落回系統 gcc，編譯器
+            # 與官方不同屬結果差異）。本地獨有架構（arm/mips/mipsle/riscv64）
+            # 上游無對應行，維持原狀（系統/交叉 gcc + 剝離 CC/CXX），避免
+            # Chromium 工具鏈對冷門架構支持不明引入回歸。
+            UPSTREAM_NAIVE_ARCH=true
+            case "${{ matrix.platform.goarch }}" in
+              amd64|arm64) ;;
+              *) UPSTREAM_NAIVE_ARCH=false ;;
+            esac
+            LIBC_FLAG=""
+            STRIP_CC_RE='^(CC|CXX)='
+            if [ "$UPSTREAM_NAIVE_ARCH" = "true" ]; then
+              if [ "${{ matrix.platform.variant }}" = "musl" ]; then
+                LIBC_FLAG="--libc=musl"
+              fi
+              # 不剝離任何行：grep -vE 匹配不到該哨兵模式即全保留
+              STRIP_CC_RE='^__KEEP_ALL_ENV_LINES__$'
+            fi
+
             for i in 1 2 3; do
-              if go run ./cmd/build-naive --target="$TARGET" download-toolchain; then break; fi
+              if go run ./cmd/build-naive --target="$TARGET" $LIBC_FLAG download-toolchain; then break; fi
               echo "::warning::cronet toolchain download failed, retrying ($i/3)..."
               sleep $((i * 10))
               if [ "$i" -eq 3 ]; then exit 1; fi
             done
 
-            go run ./cmd/build-naive --target="$TARGET" env 2>/dev/null | grep -E '^[A-Za-z0-9_]+=' | grep -vE '^(CC|CXX)=' >> "$GITHUB_ENV" || exit 1
+            go run ./cmd/build-naive --target="$TARGET" $LIBC_FLAG env 2>/dev/null | grep -E '^[A-Za-z0-9_]+=' | grep -vE "$STRIP_CC_RE" >> "$GITHUB_ENV" || exit 1
 
           elif [ "${{ matrix.platform.goos }}" = "windows" ]; then
             # 上游方案（reF1nd build-stable.yml L505-515）：sparse-checkout 直接抽取

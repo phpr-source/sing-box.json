@@ -27,51 +27,66 @@ jobs:
   cleanup-caches:
     runs-on: ubuntu-latest
     steps:
-      - name: Prune Old Actions Caches
+      - name: Prune Actions caches (family GC + budget)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Fetching caches older than 7 days..."
-          CUTOFF_DATE=$(date -u -d "7 days ago" +%Y-%m-%dT%H:%M:%SZ)
-          PAGE=1
-          while true; do
-            CACHES=$(gh api "repos/${{ github.repository }}/actions/caches?per_page=100&page=$PAGE" --jq '.actions_caches')
-            if [ "$(echo "$CACHES" | jq 'length')" -eq 0 ]; then
-              break
-            fi
-            echo "$CACHES" | jq -r --arg cutoff "$CUTOFF_DATE" '.[] | select(.created_at < $cutoff) | .id' | while read -r cache_id; do
-              if [ -n "$cache_id" ]; then
-                echo "Deleting cache ID: $cache_id"
-                gh api -X DELETE "repos/${{ github.repository }}/actions/caches/$cache_id" || true
-                sleep 1
-              fi
-            done
-            PAGE=$((PAGE + 1))
-          done
+          # 2026-10-03 借鑒上游官方管線的 cache_gc（sing-box-releases build-*.yml），
+          # 取代原「7 天裁剪 + 家族無關預算淘汰」兩段式：
+          # 1) 同 (ref, cache family) 只保留 created_at 最新一條——go.sum /
+          #    CRONET_GO_VERSION / setup-go 等 key 變化後，舊 key 快取即成死重，
+          #    原邏輯要等 7 天才清，且 7 天裁剪可能把某家族唯一的新快取也刪掉
+          #    （冷重建）；家族 = key 去掉尾部 -<16+ 位 hex> 哈希後的剩餘部分。
+          # 2) 9GB 預算只對「各族最新」計算，按 last_accessed 最舊先刪。
+          # 注意：--paginate 跨頁時 --jq 會輸出多段 JSON，必須管道 jq -s 聚合，
+          # 不能把 --jq 直接寫在 gh api 上按單文件解析。
+          set -euo pipefail
+          gh api --paginate "repos/${{ github.repository }}/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | [.id, .ref, .created_at, .last_accessed_at, .size_in_bytes, .key] | @tsv' \
+            > "$RUNNER_TEMP/caches.tsv"
+          python3 - "${{ github.repository }}" "$RUNNER_TEMP/caches.tsv" <<'EOF'
+          import re
+          import subprocess
+          import sys
 
-          # 预算控制：GitHub 免费缓存 10GB，保留 9GB 头寸。
-          # 超限时按 last_accessed_at 最旧的先删，直到回到预算内（防 25 平台矩阵缓存膨胀撞上限）。
-          echo "Checking total cache usage against 9GB budget..."
-          BUDGET_BYTES=$((9 * 1024 * 1024 * 1024))
-          CACHE_LIST=$(gh api "repos/${{ github.repository }}/actions/caches?per_page=100" --jq '.actions_caches')
-          TOTAL=$(echo "$CACHE_LIST" | jq '[.[].size_in_bytes] | add // 0')
-          echo "Total cache usage: $TOTAL bytes (budget $BUDGET_BYTES)"
-          if [ "$TOTAL" -gt "$BUDGET_BYTES" ]; then
-            # 进程替换（非管道）：while 在主 shell 执行，TOTAL 更新才生效
-            while IFS=$'\t' read -r cache_id cache_size cache_time; do
-              [ -z "$cache_id" ] && continue
-              if [ "$TOTAL" -le "$BUDGET_BYTES" ]; then
-                echo "Back under budget."
-                break
-              fi
-              echo "Evicting cache $cache_id (${cache_size}B, last accessed $cache_time)"
-              gh api -X DELETE "repos/${{ github.repository }}/actions/caches/$cache_id" || true
-              TOTAL=$((TOTAL - cache_size))
-              sleep 1
-            done < <(echo "$CACHE_LIST" | jq -r 'sort_by(.last_accessed_at // .created_at) | .[] | "\(.id)\t\(.size_in_bytes)\t\(.last_accessed_at // .created_at)"')
-          else
-            echo "Within budget, no eviction needed."
-          fi
+          repository, list_path = sys.argv[1], sys.argv[2]
+          budget = 9 * 1024 * 1024 * 1024
+          rows = []
+          with open(list_path) as list_file:
+              for line in list_file:
+                  cache_id, ref, created_at, accessed_at, size, key = line.rstrip("\n").split("\t")
+                  family = key
+                  while True:
+                      stripped = re.sub(r"-[0-9a-f]{16,}$", "", family)
+                      if stripped == family:
+                          break
+                      family = stripped
+                  rows.append({
+                      "id": cache_id, "ref": ref, "created": created_at,
+                      "accessed": accessed_at, "size": int(size), "key": key,
+                      "family": family,
+                  })
+          newest = {}
+          for row in rows:
+              group = (row["ref"], row["family"])
+              if group not in newest or row["created"] > newest[group]["created"]:
+                  newest[group] = row
+          doomed = [row for row in rows if newest[(row["ref"], row["family"])] is not row]
+          kept = [row for row in rows if newest[(row["ref"], row["family"])] is row]
+          total = sum(row["size"] for row in kept)
+          for row in sorted(kept, key=lambda entry: entry["accessed"]):
+              if total <= budget:
+                  break
+              doomed.append(row)
+              total -= row["size"]
+          for row in doomed:
+              print(f"delete {row['size'] >> 20}MB {row['key']} ({row['ref']})")
+              subprocess.run(
+                  ["gh", "api", "-X", "DELETE", f"repos/{repository}/actions/caches/{row['id']}"],
+                  check=False,
+              )
+          print(f"kept {len(rows) - len(doomed)} caches, {total >> 20}MB total")
+          EOF
 
   cleanup-releases:
     runs-on: ubuntu-latest
