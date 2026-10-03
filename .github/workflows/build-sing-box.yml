@@ -1556,7 +1556,10 @@ jobs:
 
           # 元數據文件名對齊官方（SFA-version-metadata.json），內容為官方欄位
           # （version_code/version_name）+ 本地擴展欄位（target_id/build 時間/tags）。
-          VERSION_CODE="$(grep '^VERSION_CODE=' sing-box-for-android/version.properties | cut -d'=' -f2)"
+          # 2026-10-04 修復：本步驟開頭已 cd sing-box-for-android，此前 grep 又拼
+          # 一層目錄前綴 → 靜默失敗 → version_code 恆為 0（上游為 client
+          # version.properties 實值 2056）；並剝除可能的 CR。
+          VERSION_CODE="$(grep '^VERSION_CODE=' version.properties | cut -d'=' -f2 | tr -d '\r')"
           jq -n \
             --argjson version_code "${VERSION_CODE:-0}" \
             --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
