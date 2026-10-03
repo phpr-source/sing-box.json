@@ -77,15 +77,23 @@ jobs:
         id: resolve
         run: |
           set -euo pipefail
-          # 對齊真實構建的工具鏈：上游官方 CI（build.yml）硬編碼的 go-version
-          # 才是官方產物的編譯工具鏈（當前 1.26.8），go.mod 的 go directive 只是
-          # 下限（1.25.5）。冒煙編譯應使用與真實構建一致的工具鏈。
-          rm -rf /tmp/sing-box-go
-          git clone --quiet --depth 1 --branch reF1nd-testing \
-            https://github.com/reF1nd/sing-box.git /tmp/sing-box-go
-          go_version="$(grep -m1 -oE 'go-version:[[:space:]]*"?[0-9]+\.[0-9]+\.[0-9]+' \
-            /tmp/sing-box-go/.github/workflows/build.yml 2>/dev/null \
+          # 真相源：reF1nd/sing-box-releases 的官方管線 env GO_VERSION（與真實
+          # 構建同源，當前 1.26.8）；源碼倉 build.yml 恰好硬編碼同值但可能漂移，
+          # 僅作二級回退；go.mod（1.25.5 下限）三級回退。冒煙編譯應使用與真實
+          # 構建一致的工具鏈。
+          go_version="$(curl -sfL -m 60 \
+            "https://raw.githubusercontent.com/reF1nd/sing-box-releases/dev/.github/workflows/build-testing.yml" 2>/dev/null \
+            | grep -m1 -oE "GO_VERSION:[[:space:]]*'[0-9]+\.[0-9]+\.[0-9]+'" \
             | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+          if [ -z "$go_version" ]; then
+            echo "::warning::Cannot parse GO_VERSION from official build-testing.yml; falling back to source-repo build.yml"
+            rm -rf /tmp/sing-box-go
+            git clone --quiet --depth 1 --branch reF1nd-testing \
+              https://github.com/reF1nd/sing-box.git /tmp/sing-box-go
+            go_version="$(grep -m1 -oE 'go-version:[[:space:]]*"?[0-9]+\.[0-9]+\.[0-9]+' \
+              /tmp/sing-box-go/.github/workflows/build.yml 2>/dev/null \
+              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+          fi
           if [ -z "$go_version" ]; then
             echo "::warning::Cannot parse go-version from upstream build.yml; falling back to go.mod"
             go_version="$(sed -n 's/^go \([0-9.]*\)$/\1/p' /tmp/sing-box-go/go.mod | head -1)"

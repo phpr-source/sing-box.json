@@ -307,20 +307,25 @@ jobs:
         id: gover
         run: |
           set -euo pipefail
-          # 對齊上游官方產物的真實工具鏈：reF1nd build.yml 硬編碼的 go-version
-          # （當前 1.26.8）才是官方二進制的編譯工具鏈，go.mod 的 go directive
-          # 只是下限（1.25.5）。此前本地按 go.mod 編譯，與上游官方產物存在
-          # stdlib 級差異。此處動態讀取上游 build.yml 自動跟隨，失敗逐級回退。
+          # 對齊上游官方產物的真實工具鏈。真相源是 reF1nd/sing-box-releases 的
+          # build-{stable,testing}.yml（官方實際執行的管線）env 塊的 GO_VERSION
+          # （當前 1.26.8）；源碼倉繼承自 sagernet 的 build.yml 恰好硬編碼同值，
+          # 但可能與真實管線漂移，故僅作二級回退；go.mod（1.25.5 下限）三級回退。
           GO_VER=""
           for i in 1 2 3; do
             WF="$(curl -sfL -m ${CURL_TIMEOUT_API} \
-              "https://raw.githubusercontent.com/reF1nd/sing-box/reF1nd-testing/.github/workflows/build.yml" || true)"
+              "https://raw.githubusercontent.com/reF1nd/sing-box-releases/dev/.github/workflows/build-testing.yml" || true)"
             if [ -n "$WF" ]; then
-              GO_VER="$(echo "$WF" | grep -m1 -oE 'go-version:[[:space:]]*"?[0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+              GO_VER="$(echo "$WF" | grep -m1 -oE "GO_VERSION:[[:space:]]*'?\"?[0-9]+\.[0-9]+\.[0-9]+'?\"?" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
               [ -n "$GO_VER" ] && break
             fi
             sleep 5
           done
+          if [ -z "$GO_VER" ]; then
+            GO_VER="$(curl -sfL -m ${CURL_TIMEOUT_API} \
+              "https://raw.githubusercontent.com/reF1nd/sing-box/reF1nd-testing/.github/workflows/build.yml" \
+              | grep -m1 -oE 'go-version:[[:space:]]*"?[0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+          fi
           if [ -z "$GO_VER" ]; then
             GO_VER="$(curl -sfL -m ${CURL_TIMEOUT_API} \
               "https://raw.githubusercontent.com/reF1nd/sing-box/reF1nd-testing/go.mod" \
@@ -1158,7 +1163,9 @@ jobs:
           # termux-app submodule is required: settings.gradle.kts includes
           # :terminal-view/:terminal-emulator under third_party/termux-app.
           # Gradle 9.3.1+ hard-fails configuring a project whose dir is missing.
-          submodules: true
+          # recursive 對齊官方（git submodule update --init --recursive），
+          # 防 client 增加嵌套子模塊後本地漏拉。
+          submodules: recursive
 
       - name: Restore missing Kotlin imports
         # The upstream reF1nd-stable branch of sing-box-for-android references
@@ -1899,6 +1906,25 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: ./tmp/
+
+      - name: Verify artifact completeness
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 對齊官方 publish.yml 的 build-manifest 完整性校驗（簡化等價實現）：
+          # 以「實際構建成功的 build_core 腿數」為期望值，核對下載到的 pkg-* 產
+          # 物數。腿成功但 artifact 缺失（上傳/下載環節事故）會造成半截 release
+          # 且無人察覺——此處硬失敗。腿本身失敗或被過濾/跳過不計入期望值，
+          # 部分失敗仍可發佈其餘 target 的既有語義不變。
+          # --paginate 跨頁時 --jq 會輸出多段結果，改用管道 jq -s 聚合全部頁。
+          EXPECTED=$(gh api --paginate             "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100"             | jq -s '[.[].jobs[] | select((.name | startswith("build_core")) and .conclusion == "success")] | length')
+          ACTUAL=$(find ./tmp -maxdepth 1 -type d -name "pkg-*" | wc -l)
+          echo "build_core succeeded legs: ${EXPECTED}; downloaded pkg artifacts: ${ACTUAL}"
+          if [ "${ACTUAL}" -lt "${EXPECTED}" ]; then
+            echo "::error::Artifact completeness check failed: ${ACTUAL} pkg artifacts < ${EXPECTED} successful build_core legs. Refusing to publish a partial release."
+            exit 1
+          fi
 
       - name: Verify Build Checksums
         run: |
