@@ -2490,7 +2490,21 @@ jobs:
             echo "Uploading APKs from $target_id to $tag..."
             for f in "$apk_dir"/*.apk "$apk_dir"/*-metadata.json; do
               [ -f "$f" ] || continue
-              gh release upload "$tag" "$f" --clobber --repo ${{ github.repository }} 2>&1 || echo "::warning::Upload failed for $(basename "$f")"
+              # 2026-10-04：上傳重試 3 次後硬失敗——此前軟失敗（僅 warning）會
+              # 留下缺資產的 release 且無人察覺（SFI 503 瞬斷事件坐實）。
+              UPLOADED=false
+              for attempt in 1 2 3; do
+                if gh release upload "$tag" "$f" --clobber --repo ${{ github.repository }}; then
+                  UPLOADED=true
+                  break
+                fi
+                echo "::warning::Upload attempt $attempt failed for $(basename "$f")"
+                sleep $((attempt * 10))
+              done
+              if [ "$UPLOADED" != "true" ]; then
+                echo "::error::Upload failed after 3 attempts: $(basename "$f")"
+                exit 1
+              fi
             done
           done
 
@@ -2563,7 +2577,21 @@ jobs:
               # 排除构建时校验清单：release 根级 SHA256SUMS.txt 由 publish_core 生成，
               # 避免同名覆盖导致用户校验 Linux 产物失败
               [ "$(basename "$f")" = "SHA256SUMS.txt" ] && continue
-              gh release upload "$tag" "$f" --clobber --repo ${{ github.repository }} 2>&1 || echo "::warning::Upload failed for $(basename "$f")"
+              # 2026-10-04：上傳重試 3 次後硬失敗——此前軟失敗（僅 warning）會
+              # 留下缺資產的 release 且無人察覺（SFI 503 瞬斷事件坐實）。
+              UPLOADED=false
+              for attempt in 1 2 3; do
+                if gh release upload "$tag" "$f" --clobber --repo ${{ github.repository }}; then
+                  UPLOADED=true
+                  break
+                fi
+                echo "::warning::Upload attempt $attempt failed for $(basename "$f")"
+                sleep $((attempt * 10))
+              done
+              if [ "$UPLOADED" != "true" ]; then
+                echo "::error::Upload failed after 3 attempts: $(basename "$f")"
+                exit 1
+              fi
             done
           done
 
