@@ -70,12 +70,11 @@ concurrency:
   # 對齊 reF1nd publish.yml 的 cancel-in-progress: false 保護語義。
   cancel-in-progress: false
 
+# 2026-10-04 借鑒上游最小權限模型：頂層僅讀，寫權限下沉到實際需要的 job
+# （publish* 需 contents:write；attest 另需 id-token/attestations；finalize 推送
+# README/release-info 需 contents:write；issue 自動化需 issues:write）。
 permissions:
-  contents: write
-  actions: write
-  issues: write
-  id-token: write
-  attestations: write
+  contents: read
 
 env:
   # Go 版本不在此配置：由 check job 從上游官方 build.yml 動態解析（當前 1.26.8，
@@ -348,7 +347,7 @@ jobs:
 
       - name: Upload Metadata
         if: steps.check.outputs.has_update == 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: workflow-metadata
           path: release_notes.txt
@@ -509,7 +508,7 @@ jobs:
 
       - name: Checkout Repository
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           # 主仓（本仓库）检出到 workspace 根：Apply Patches 依赖 ../patches/ 目录。
           # 历史缺陷：此前从未检出主仓，patches/ 不存在导致所有 build_core 静默应用 0 个
@@ -520,7 +519,7 @@ jobs:
 
       - name: Checkout Core
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: ${{ matrix.target.repo }}
           ref: ${{ steps.resolve.outputs.ref }}
@@ -568,7 +567,7 @@ jobs:
       - name: Setup Go
         # darwin legacy（macos-10.13）行改用源碼倉維護的補丁版 Go（見下一步驟）
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && matrix.platform.legacy_macos != 'true'
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           # 上游官方產物的真實工具鏈（由 check job 動態解析，當前 1.26.8），
           # 非再沿用 go.mod 下限 1.25.5——與官方二進制的 stdlib 級差異已對齊。
@@ -731,7 +730,7 @@ jobs:
           matrix.platform.goos == 'linux' &&
           matrix.platform.variant == 'musl' &&
           matrix.platform.goarch != 'amd64'
-        uses: goto-bus-stop/setup-zig@v2
+        uses: goto-bus-stop/setup-zig@abea47f85e598557f500fa1fd2ab7464fcb39406 # v2
         with:
           version: 0.13.0
 
@@ -759,7 +758,7 @@ jobs:
 
       - name: Cache Chromium toolchain
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && steps.env.outputs.cgo_val == '1' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/cronet-go/naiveproxy/src/third_party/llvm-build/
@@ -777,7 +776,7 @@ jobs:
 
       - name: Setup ccache
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && steps.env.outputs.cgo_val == '1' && github.event.inputs.enable_naive == 'true' && matrix.platform.goos == 'linux'
-        uses: hendrikmuhs/ccache-action@v1
+        uses: hendrikmuhs/ccache-action@77c3f8fd59034e6f3d5c58867ded0185b48d534f # v1
         with:
           key: ${{ runner.os }}-cgo-${{ matrix.platform.goarch }}
 
@@ -889,7 +888,7 @@ jobs:
 
       - name: Setup Android NDK
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true' && matrix.platform.goos == 'android'
-        uses: nttld/setup-ndk@v1
+        uses: nttld/setup-ndk@2817442ee7c3346c1eb7d2ec60263c93206ba14f # v1
         with:
           ndk-version: r28
         id: ndk
@@ -1163,7 +1162,7 @@ jobs:
 
       - name: Upload Package Artifact
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: pkg-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
           path: |
@@ -1173,7 +1172,7 @@ jobs:
 
       - name: Upload Standalone Binary Artifact
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: bin-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
           path: sing-box/dist/${{ env.standalone_bin }}
@@ -1182,7 +1181,7 @@ jobs:
 
       - name: Upload Metadata Artifact
         if: steps.check_naive.outputs.skip != 'true' && steps.filter.outputs.skip != 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: meta-${{ matrix.target.id }}-${{ matrix.platform.name }}${{ steps.env.outputs.suffix }}
           path: sing-box/dist/artifact-meta.json
@@ -1211,7 +1210,7 @@ jobs:
 
       - name: Checkout Repository
         if: matrix.target.sfa_repo != 'none'
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           # 主仓检出（patches/ 所需，见 build_core 同名步骤注释）
           sparse-checkout: |
@@ -1220,7 +1219,7 @@ jobs:
 
       - name: Checkout Core
         if: matrix.target.sfa_repo != 'none'
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: ${{ matrix.target.repo }}
           ref: ${{ matrix.target.core_ref }}
@@ -1273,7 +1272,7 @@ jobs:
         # pin——後者只是繼承自 sagernet 的源碼倉 build.yml 的做法（reF1nd 實際
         # 不跑它）。此前一度誤改為 pin 檢出，已回退。
         if: matrix.target.sfa_repo != 'none'
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: ${{ matrix.target.sfa_repo }}
           ref: ${{ matrix.target.sfa_branch }}
@@ -1353,7 +1352,7 @@ jobs:
 
       - name: Setup Go
         if: matrix.target.sfa_repo != 'none'
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           # 與 build_core 同源：check job 動態解析的上游官方工具鏈（當前 1.26.8）
           go-version: '${{ needs.check.outputs.go_version }}'
@@ -1363,13 +1362,13 @@ jobs:
       - name: Setup Android NDK
         if: matrix.target.sfa_repo != 'none'
         id: setup-ndk
-        uses: nttld/setup-ndk@v1
+        uses: nttld/setup-ndk@2817442ee7c3346c1eb7d2ec60263c93206ba14f # v1
         with:
           ndk-version: r28
 
       - name: Setup Gradle
         if: matrix.target.sfa_repo != 'none'
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0（對齊上游釘版）
         with:
           cache-read-only: false
 
@@ -1621,7 +1620,7 @@ jobs:
 
       - name: Upload APK Artifacts
         if: matrix.target.sfa_repo != 'none'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: apk-${{ matrix.target.id }}
           path: |
@@ -1652,7 +1651,7 @@ jobs:
         target: ${{ fromJson(needs.check.outputs.matrix) }}
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           # 主仓检出（patches/ 所需，见 build_core 同名步骤注释）
           sparse-checkout: |
@@ -1660,7 +1659,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Checkout Core
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: ${{ matrix.target.repo }}
           ref: ${{ matrix.target.core_ref }}
@@ -1774,7 +1773,7 @@ jobs:
 
       - name: Setup Go
         if: steps.era.outputs.skip != 'true'
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           # Go 版本由 sing-box core 的 go.mod go directive 決定（與 CLI/Android 一致）。
           # 真正的約束是 Xcode：Apple client 用了 Swift 6 `isolated deinit` 特性，
@@ -2000,7 +1999,7 @@ jobs:
 
       - name: Upload Apple Artifacts
         if: steps.era.outputs.skip != 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: apple-${{ matrix.target.id }}
           path: apple-out/*
@@ -2010,6 +2009,10 @@ jobs:
   publish_core:
     runs-on: ubuntu-latest
     needs: [init, check, build_core]
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     # Runs even if some core matrix entries fail (always()), but skips on cancel or
     # no update. Core artifacts drive the release body; android/apple jobs
     # upload their own artifacts to the same release tag independently.
@@ -2021,7 +2024,7 @@ jobs:
       release_version: ${{ steps.prepare.outputs.release_version }}
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Configure Git User
         run: |
@@ -2029,7 +2032,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: ./tmp/
 
@@ -2423,7 +2426,7 @@ jobs:
           echo "release_version=${FIRST_VER}" >> $GITHUB_OUTPUT
 
       - name: Generate Build Provenance
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@92c65d2898f1f53cfdc910b962cecff86e7f8fcc # v1
         with:
           subject-path: |
             release_files/**/*.tar.gz
@@ -2431,7 +2434,7 @@ jobs:
 
       - name: Upload Build Info Artifact
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: build-info
           path: |
@@ -2441,7 +2444,7 @@ jobs:
           compression-level: 0
 
       - name: Upload Telegram Payloads
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: tg-payloads
           path: /tmp/tg-payload-*.tar.gz
@@ -2451,11 +2454,13 @@ jobs:
   publish_android:
     runs-on: ubuntu-latest
     needs: [check, build_android, publish_core]
+    permissions:
+      contents: write
     if: always() && needs.check.outputs.has_update == 'true' && !cancelled()
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: ./tmp/
 
@@ -2519,11 +2524,13 @@ jobs:
   publish_apple:
     runs-on: ubuntu-latest
     needs: [check, build_apple, publish_core]
+    permissions:
+      contents: write
     if: always() && needs.check.outputs.has_update == 'true' && !cancelled()
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: ./tmp/
 
@@ -2563,14 +2570,16 @@ jobs:
   finalize:
     needs: [check, build_core, build_android, build_apple, publish_core, publish_android, publish_apple]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     if: always() && !cancelled()
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download Metadata & Build Infos
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: ./downloads/
 
@@ -2594,7 +2603,7 @@ jobs:
             }' > build-info.json
 
       - name: Update release-info branch via API
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const fs = require('fs');
@@ -2712,7 +2721,7 @@ jobs:
           sed -n "${BEG},$((FIN))p" README.md
 
       - name: Commit and Push README
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const fs = require('fs');
@@ -2856,7 +2865,7 @@ jobs:
 
       - name: Download all release packages for TG
         if: steps.status.outputs.status == 'success'
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           pattern: '{tg-payloads,apk-*,apple-*}'
@@ -3063,6 +3072,8 @@ jobs:
     if: failure() && (github.event_name == 'schedule' || github.event_name == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      issues: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       ISSUE_TITLE: "🔴 定時構建失敗: sing-box"
@@ -3146,9 +3157,11 @@ jobs:
       (github.event_name == 'schedule' || github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      issues: write
     steps:
       - name: Close stale build-failure issues
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           ISSUE_TITLE: "🔴 定時構建失敗: sing-box"
         with:
