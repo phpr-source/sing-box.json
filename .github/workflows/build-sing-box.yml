@@ -2537,8 +2537,6 @@ jobs:
             fi
           done
 
-  finalize:
-
   publish_apple:
     runs-on: ubuntu-latest
     needs: [check, build_apple, publish_core]
