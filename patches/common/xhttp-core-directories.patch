@@ -1,6 +1,6 @@
 diff --git a/common/congestion/congestion.go b/common/congestion/congestion.go
 new file mode 100644
-index 00000000..885dffaf
+index 0000000..885dffa
 --- /dev/null
 +++ b/common/congestion/congestion.go
 @@ -0,0 +1,54 @@
@@ -60,7 +60,7 @@ index 00000000..885dffaf
 +}
 diff --git a/common/kmutex/mutex.go b/common/kmutex/mutex.go
 new file mode 100644
-index 00000000..6e2e4ec7
+index 0000000..6e2e4ec
 --- /dev/null
 +++ b/common/kmutex/mutex.go
 @@ -0,0 +1,54 @@
@@ -120,7 +120,7 @@ index 00000000..6e2e4ec7
 +}
 diff --git a/common/kmutex/mutex_test.go b/common/kmutex/mutex_test.go
 new file mode 100644
-index 00000000..6648442b
+index 0000000..6648442
 --- /dev/null
 +++ b/common/kmutex/mutex_test.go
 @@ -0,0 +1,96 @@
@@ -220,9 +220,406 @@ index 00000000..6648442b
 +	}
 +	wg.Wait()
 +}
+diff --git a/common/xray/LICENSE b/common/xray/LICENSE
+new file mode 100644
+index 0000000..d0a1fa1
+--- /dev/null
++++ b/common/xray/LICENSE
+@@ -0,0 +1,373 @@
++Mozilla Public License Version 2.0
++==================================
++
++1. Definitions
++--------------
++
++1.1. "Contributor"
++    means each individual or legal entity that creates, contributes to
++    the creation of, or owns Covered Software.
++
++1.2. "Contributor Version"
++    means the combination of the Contributions of others (if any) used
++    by a Contributor and that particular Contributor's Contribution.
++
++1.3. "Contribution"
++    means Covered Software of a particular Contributor.
++
++1.4. "Covered Software"
++    means Source Code Form to which the initial Contributor has attached
++    the notice in Exhibit A, the Executable Form of such Source Code
++    Form, and Modifications of such Source Code Form, in each case
++    including portions thereof.
++
++1.5. "Incompatible With Secondary Licenses"
++    means
++
++    (a) that the initial Contributor has attached the notice described
++        in Exhibit B to the Covered Software; or
++
++    (b) that the Covered Software was made available under the terms of
++        version 1.1 or earlier of the License, but not also under the
++        terms of a Secondary License.
++
++1.6. "Executable Form"
++    means any form of the work other than Source Code Form.
++
++1.7. "Larger Work"
++    means a work that combines Covered Software with other material, in
++    a separate file or files, that is not Covered Software.
++
++1.8. "License"
++    means this document.
++
++1.9. "Licensable"
++    means having the right to grant, to the maximum extent possible,
++    whether at the time of the initial grant or subsequently, any and
++    all of the rights conveyed by this License.
++
++1.10. "Modifications"
++    means any of the following:
++
++    (a) any file in Source Code Form that results from an addition to,
++        deletion from, or modification of the contents of Covered
++        Software; or
++
++    (b) any new file in Source Code Form that contains any Covered
++        Software.
++
++1.11. "Patent Claims" of a Contributor
++    means any patent claim(s), including without limitation, method,
++    process, and apparatus claims, in any patent Licensable by such
++    Contributor that would be infringed, but for the grant of the
++    License, by the making, using, selling, offering for sale, having
++    made, import, or transfer of either its Contributions or its
++    Contributor Version.
++
++1.12. "Secondary License"
++    means either the GNU General Public License, Version 2.0, the GNU
++    Lesser General Public License, Version 2.1, the GNU Affero General
++    Public License, Version 3.0, or any later versions of those
++    licenses.
++
++1.13. "Source Code Form"
++    means the form of the work preferred for making modifications.
++
++1.14. "You" (or "Your")
++    means an individual or a legal entity exercising rights under this
++    License. For legal entities, "You" includes any entity that
++    controls, is controlled by, or is under common control with You. For
++    purposes of this definition, "control" means (a) the power, direct
++    or indirect, to cause the direction or management of such entity,
++    whether by contract or otherwise, or (b) ownership of more than
++    fifty percent (50%) of the outstanding shares or beneficial
++    ownership of such entity.
++
++2. License Grants and Conditions
++--------------------------------
++
++2.1. Grants
++
++Each Contributor hereby grants You a world-wide, royalty-free,
++non-exclusive license:
++
++(a) under intellectual property rights (other than patent or trademark)
++    Licensable by such Contributor to use, reproduce, make available,
++    modify, display, perform, distribute, and otherwise exploit its
++    Contributions, either on an unmodified basis, with Modifications, or
++    as part of a Larger Work; and
++
++(b) under Patent Claims of such Contributor to make, use, sell, offer
++    for sale, have made, import, and otherwise transfer either its
++    Contributions or its Contributor Version.
++
++2.2. Effective Date
++
++The licenses granted in Section 2.1 with respect to any Contribution
++become effective for each Contribution on the date the Contributor first
++distributes such Contribution.
++
++2.3. Limitations on Grant Scope
++
++The licenses granted in this Section 2 are the only rights granted under
++this License. No additional rights or licenses will be implied from the
++distribution or licensing of Covered Software under this License.
++Notwithstanding Section 2.1(b) above, no patent license is granted by a
++Contributor:
++
++(a) for any code that a Contributor has removed from Covered Software;
++    or
++
++(b) for infringements caused by: (i) Your and any other third party's
++    modifications of Covered Software, or (ii) the combination of its
++    Contributions with other software (except as part of its Contributor
++    Version); or
++
++(c) under Patent Claims infringed by Covered Software in the absence of
++    its Contributions.
++
++This License does not grant any rights in the trademarks, service marks,
++or logos of any Contributor (except as may be necessary to comply with
++the notice requirements in Section 3.4).
++
++2.4. Subsequent Licenses
++
++No Contributor makes additional grants as a result of Your choice to
++distribute the Covered Software under a subsequent version of this
++License (see Section 10.2) or under the terms of a Secondary License (if
++permitted under the terms of Section 3.3).
++
++2.5. Representation
++
++Each Contributor represents that the Contributor believes its
++Contributions are its original creation(s) or it has sufficient rights
++to grant the rights to its Contributions conveyed by this License.
++
++2.6. Fair Use
++
++This License is not intended to limit any rights You have under
++applicable copyright doctrines of fair use, fair dealing, or other
++equivalents.
++
++2.7. Conditions
++
++Sections 3.1, 3.2, 3.3, and 3.4 are conditions of the licenses granted
++in Section 2.1.
++
++3. Responsibilities
++-------------------
++
++3.1. Distribution of Source Form
++
++All distribution of Covered Software in Source Code Form, including any
++Modifications that You create or to which You contribute, must be under
++the terms of this License. You must inform recipients that the Source
++Code Form of the Covered Software is governed by the terms of this
++License, and how they can obtain a copy of this License. You may not
++attempt to alter or restrict the recipients' rights in the Source Code
++Form.
++
++3.2. Distribution of Executable Form
++
++If You distribute Covered Software in Executable Form then:
++
++(a) such Covered Software must also be made available in Source Code
++    Form, as described in Section 3.1, and You must inform recipients of
++    the Executable Form how they can obtain a copy of such Source Code
++    Form by reasonable means in a timely manner, at a charge no more
++    than the cost of distribution to the recipient; and
++
++(b) You may distribute such Executable Form under the terms of this
++    License, or sublicense it under different terms, provided that the
++    license for the Executable Form does not attempt to limit or alter
++    the recipients' rights in the Source Code Form under this License.
++
++3.3. Distribution of a Larger Work
++
++You may create and distribute a Larger Work under terms of Your choice,
++provided that You also comply with the requirements of this License for
++the Covered Software. If the Larger Work is a combination of Covered
++Software with a work governed by one or more Secondary Licenses, and the
++Covered Software is not Incompatible With Secondary Licenses, this
++License permits You to additionally distribute such Covered Software
++under the terms of such Secondary License(s), so that the recipient of
++the Larger Work may, at their option, further distribute the Covered
++Software under the terms of either this License or such Secondary
++License(s).
++
++3.4. Notices
++
++You may not remove or alter the substance of any license notices
++(including copyright notices, patent notices, disclaimers of warranty,
++or limitations of liability) contained within the Source Code Form of
++the Covered Software, except that You may alter any license notices to
++the extent required to remedy known factual inaccuracies.
++
++3.5. Application of Additional Terms
++
++You may choose to offer, and to charge a fee for, warranty, support,
++indemnity or liability obligations to one or more recipients of Covered
++Software. However, You may do so only on Your own behalf, and not on
++behalf of any Contributor. You must make it absolutely clear that any
++such warranty, support, indemnity, or liability obligation is offered by
++You alone, and You hereby agree to indemnify every Contributor for any
++liability incurred by such Contributor as a result of warranty, support,
++indemnity or liability terms You offer. You may include additional
++disclaimers of warranty and limitations of liability specific to any
++jurisdiction.
++
++4. Inability to Comply Due to Statute or Regulation
++---------------------------------------------------
++
++If it is impossible for You to comply with any of the terms of this
++License with respect to some or all of the Covered Software due to
++statute, judicial order, or regulation then You must: (a) comply with
++the terms of this License to the maximum extent possible; and (b)
++describe the limitations and the code they affect. Such description must
++be placed in a text file included with all distributions of the Covered
++Software under this License. Except to the extent prohibited by statute
++or regulation, such description must be sufficiently detailed for a
++recipient of ordinary skill to be able to understand it.
++
++5. Termination
++--------------
++
++5.1. The rights granted under this License will terminate automatically
++if You fail to comply with any of its terms. However, if You become
++compliant, then the rights granted under this License from a particular
++Contributor are reinstated (a) provisionally, unless and until such
++Contributor explicitly and finally terminates Your grants, and (b) on an
++ongoing basis, if such Contributor fails to notify You of the
++non-compliance by some reasonable means prior to 60 days after You have
++come back into compliance. Moreover, Your grants from a particular
++Contributor are reinstated on an ongoing basis if such Contributor
++notifies You of the non-compliance by some reasonable means, this is the
++first time You have received notice of non-compliance with this License
++from such Contributor, and You become compliant prior to 30 days after
++Your receipt of the notice.
++
++5.2. If You initiate litigation against any entity by asserting a patent
++infringement claim (excluding declaratory judgment actions,
++counter-claims, and cross-claims) alleging that a Contributor Version
++directly or indirectly infringes any patent, then the rights granted to
++You by any and all Contributors for the Covered Software under Section
++2.1 of this License shall terminate.
++
++5.3. In the event of termination under Sections 5.1 or 5.2 above, all
++end user license agreements (excluding distributors and resellers) which
++have been validly granted by You or Your distributors under this License
++prior to termination shall survive termination.
++
++************************************************************************
++*                                                                      *
++*  6. Disclaimer of Warranty                                           *
++*  -------------------------                                           *
++*                                                                      *
++*  Covered Software is provided under this License on an "as is"       *
++*  basis, without warranty of any kind, either expressed, implied, or  *
++*  statutory, including, without limitation, warranties that the       *
++*  Covered Software is free of defects, merchantable, fit for a        *
++*  particular purpose or non-infringing. The entire risk as to the     *
++*  quality and performance of the Covered Software is with You.        *
++*  Should any Covered Software prove defective in any respect, You     *
++*  (not any Contributor) assume the cost of any necessary servicing,   *
++*  repair, or correction. This disclaimer of warranty constitutes an   *
++*  essential part of this License. No use of any Covered Software is   *
++*  authorized under this License except under this disclaimer.         *
++*                                                                      *
++************************************************************************
++
++************************************************************************
++*                                                                      *
++*  7. Limitation of Liability                                          *
++*  --------------------------                                          *
++*                                                                      *
++*  Under no circumstances and under no legal theory, whether tort      *
++*  (including negligence), contract, or otherwise, shall any           *
++*  Contributor, or anyone who distributes Covered Software as          *
++*  permitted above, be liable to You for any direct, indirect,         *
++*  special, incidental, or consequential damages of any character      *
++*  including, without limitation, damages for lost profits, loss of    *
++*  goodwill, work stoppage, computer failure or malfunction, or any    *
++*  and all other commercial damages or losses, even if such party      *
++*  shall have been informed of the possibility of such damages. This   *
++*  limitation of liability shall not apply to liability for death or   *
++*  personal injury resulting from such party's negligence to the       *
++*  extent applicable law prohibits such limitation. Some               *
++*  jurisdictions do not allow the exclusion or limitation of           *
++*  incidental or consequential damages, so this exclusion and          *
++*  limitation may not apply to You.                                    *
++*                                                                      *
++************************************************************************
++
++8. Litigation
++-------------
++
++Any litigation relating to this License may be brought only in the
++courts of a jurisdiction where the defendant maintains its principal
++place of business and such litigation shall be governed by laws of that
++jurisdiction, without reference to its conflict-of-law provisions.
++Nothing in this Section shall prevent a party's ability to bring
++cross-claims or counter-claims.
++
++9. Miscellaneous
++----------------
++
++This License represents the complete agreement concerning the subject
++matter hereof. If any provision of this License is held to be
++unenforceable, such provision shall be reformed only to the extent
++necessary to make it enforceable. Any law or regulation which provides
++that the language of a contract shall be construed against the drafter
++shall not be used to construe this License against a Contributor.
++
++10. Versions of the License
++---------------------------
++
++10.1. New Versions
++
++Mozilla Foundation is the license steward. Except as provided in Section
++10.3, no one other than the license steward has the right to modify or
++publish new versions of this License. Each version will be given a
++distinguishing version number.
++
++10.2. Effect of New Versions
++
++You may distribute the Covered Software under the terms of the version
++of the License under which You originally received the Covered Software,
++or under the terms of any subsequent version published by the license
++steward.
++
++10.3. Modified Versions
++
++If you create software not governed by this License, and you want to
++create a new license for such software, you may create and use a
++modified version of this License if you rename the license and remove
++any references to the name of the license steward (except to note that
++such modified license differs from this License).
++
++10.4. Distributing Source Code Form that is Incompatible With Secondary
++Licenses
++
++If You choose to distribute Source Code Form that is Incompatible With
++Secondary Licenses under the terms of this version of the License, the
++notice described in Exhibit B of this License must be attached.
++
++Exhibit A - Source Code Form License Notice
++-------------------------------------------
++
++  This Source Code Form is subject to the terms of the Mozilla Public
++  License, v. 2.0. If a copy of the MPL was not distributed with this
++  file, You can obtain one at https://mozilla.org/MPL/2.0/.
++
++If it is not possible or desirable to put the notice in a particular
++file, then You may include the notice in a location (such as a LICENSE
++file in a relevant directory) where a recipient would be likely to look
++for such a notice.
++
++You may add additional accurate notices of copyright ownership.
++
++Exhibit B - "Incompatible With Secondary Licenses" Notice
++---------------------------------------------------------
++
++  This Source Code Form is "Incompatible With Secondary Licenses", as
++  defined by the Mozilla Public License, v. 2.0.
+diff --git a/common/xray/NOTICE b/common/xray/NOTICE
+new file mode 100644
+index 0000000..4ee2bd8
+--- /dev/null
++++ b/common/xray/NOTICE
+@@ -0,0 +1,12 @@
++# Origin & License Notice
++
++The Go source files under this directory tree (`common/xray/**`) are derived
++from Xray-core (https://github.com/XTLS/Xray-core), which is licensed under
++the Mozilla Public License, Version 2.0 (see `LICENSE` in this directory).
++
++They were vendored into this repository as part of the XHTTP transport port
++(originally from the shtorm-7 sing-box-extended fork) and adapted where the
++surrounding sing-box code base requires it (module paths, integration points).
++
++Modifications beyond the original Xray-core sources are licensed under this
++repository's license; the MPL 2.0 continues to cover the derived files.
 diff --git a/common/xray/buf/buffer.go b/common/xray/buf/buffer.go
 new file mode 100644
-index 00000000..38bbc9c4
+index 0000000..38bbc9c
 --- /dev/null
 +++ b/common/xray/buf/buffer.go
 @@ -0,0 +1,348 @@
@@ -576,7 +973,7 @@ index 00000000..38bbc9c4
 +}
 diff --git a/common/xray/buf/copy.go b/common/xray/buf/copy.go
 new file mode 100644
-index 00000000..efab0e17
+index 0000000..efab0e1
 --- /dev/null
 +++ b/common/xray/buf/copy.go
 @@ -0,0 +1,124 @@
@@ -706,7 +1103,7 @@ index 00000000..efab0e17
 +}
 diff --git a/common/xray/buf/io.go b/common/xray/buf/io.go
 new file mode 100644
-index 00000000..5b7826e0
+index 0000000..5b7826e
 --- /dev/null
 +++ b/common/xray/buf/io.go
 @@ -0,0 +1,127 @@
@@ -839,7 +1236,7 @@ index 00000000..5b7826e0
 +}
 diff --git a/common/xray/buf/multi_buffer.go b/common/xray/buf/multi_buffer.go
 new file mode 100644
-index 00000000..8fe09c81
+index 0000000..8fe09c8
 --- /dev/null
 +++ b/common/xray/buf/multi_buffer.go
 @@ -0,0 +1,310 @@
@@ -1155,7 +1552,7 @@ index 00000000..8fe09c81
 +}
 diff --git a/common/xray/buf/override.go b/common/xray/buf/override.go
 new file mode 100644
-index 00000000..2032854f
+index 0000000..2032854
 --- /dev/null
 +++ b/common/xray/buf/override.go
 @@ -0,0 +1,38 @@
@@ -1199,7 +1596,7 @@ index 00000000..2032854f
 +}
 diff --git a/common/xray/buf/reader.go b/common/xray/buf/reader.go
 new file mode 100644
-index 00000000..17b2e491
+index 0000000..17b2e49
 --- /dev/null
 +++ b/common/xray/buf/reader.go
 @@ -0,0 +1,175 @@
@@ -1380,7 +1777,7 @@ index 00000000..17b2e491
 +}
 diff --git a/common/xray/buf/writer.go b/common/xray/buf/writer.go
 new file mode 100644
-index 00000000..c76316c5
+index 0000000..c76316c
 --- /dev/null
 +++ b/common/xray/buf/writer.go
 @@ -0,0 +1,284 @@
@@ -1670,7 +2067,7 @@ index 00000000..c76316c5
 +)
 diff --git a/common/xray/bytespool/pool.go b/common/xray/bytespool/pool.go
 new file mode 100644
-index 00000000..6f632d52
+index 0000000..6f632d5
 --- /dev/null
 +++ b/common/xray/bytespool/pool.go
 @@ -0,0 +1,72 @@
@@ -1748,7 +2145,7 @@ index 00000000..6f632d52
 +}
 diff --git a/common/xray/common.go b/common/xray/common.go
 new file mode 100644
-index 00000000..266f57ef
+index 0000000..266f57e
 --- /dev/null
 +++ b/common/xray/common.go
 @@ -0,0 +1,32 @@
@@ -1786,7 +2183,7 @@ index 00000000..266f57ef
 +}
 diff --git a/common/xray/cpuid/cpuid.go b/common/xray/cpuid/cpuid.go
 new file mode 100644
-index 00000000..60938fe3
+index 0000000..60938fe
 --- /dev/null
 +++ b/common/xray/cpuid/cpuid.go
 @@ -0,0 +1,18 @@
@@ -1808,32 +2205,9 @@ index 00000000..60938fe3
 +	// HasAESGCM indicates whether the CPU has AES-GCM hardware acceleration.
 +	HasAESGCM = hasGCMAsmAMD64 || hasGCMAsmARM64 || hasGCMAsmS390X || hasGCMAsmPPC64
 +)
-diff --git a/common/xray/crypto/crypto.go b/common/xray/crypto/crypto.go
-new file mode 100644
-index 00000000..4356d412
---- /dev/null
-+++ b/common/xray/crypto/crypto.go
-@@ -0,0 +1,17 @@
-+package crypto
-+
-+import (
-+	"crypto/rand"
-+	"math/big"
-+)
-+
-+func RandBetween(from int64, to int64) int64 {
-+	if from == to {
-+		return from
-+	}
-+	if from > to {
-+		from, to = to, from
-+	}
-+	bigInt, _ := rand.Int(rand.Reader, big.NewInt(to-from))
-+	return from + bigInt.Int64()
-+}
 diff --git a/common/xray/errors/errors.go b/common/xray/errors/errors.go
 new file mode 100644
-index 00000000..54af7cbe
+index 0000000..54af7cb
 --- /dev/null
 +++ b/common/xray/errors/errors.go
 @@ -0,0 +1,25 @@
@@ -1864,7 +2238,7 @@ index 00000000..54af7cbe
 +}
 diff --git a/common/xray/interfaces.go b/common/xray/interfaces.go
 new file mode 100644
-index 00000000..428c3388
+index 0000000..428c338
 --- /dev/null
 +++ b/common/xray/interfaces.go
 @@ -0,0 +1,52 @@
@@ -1922,7 +2296,7 @@ index 00000000..428c3388
 +}
 diff --git a/common/xray/net/address.go b/common/xray/net/address.go
 new file mode 100644
-index 00000000..7a99c8ad
+index 0000000..7a99c8a
 --- /dev/null
 +++ b/common/xray/net/address.go
 @@ -0,0 +1,181 @@
@@ -2109,7 +2483,7 @@ index 00000000..7a99c8ad
 +}
 diff --git a/common/xray/net/destination.go b/common/xray/net/destination.go
 new file mode 100644
-index 00000000..561c7726
+index 0000000..561c772
 --- /dev/null
 +++ b/common/xray/net/destination.go
 @@ -0,0 +1,146 @@
@@ -2261,7 +2635,7 @@ index 00000000..561c7726
 +}
 diff --git a/common/xray/net/net.go b/common/xray/net/net.go
 new file mode 100644
-index 00000000..9bc049d9
+index 0000000..9bc049d
 --- /dev/null
 +++ b/common/xray/net/net.go
 @@ -0,0 +1,13 @@
@@ -2280,7 +2654,7 @@ index 00000000..9bc049d9
 +const ChromeH2KeepAlivePeriod = 45 * time.Second
 diff --git a/common/xray/net/network.go b/common/xray/net/network.go
 new file mode 100644
-index 00000000..356d7fda
+index 0000000..356d7fd
 --- /dev/null
 +++ b/common/xray/net/network.go
 @@ -0,0 +1,33 @@
@@ -2319,7 +2693,7 @@ index 00000000..356d7fda
 +}
 diff --git a/common/xray/net/port.go b/common/xray/net/port.go
 new file mode 100644
-index 00000000..6d42c40b
+index 0000000..6d42c40
 --- /dev/null
 +++ b/common/xray/net/port.go
 @@ -0,0 +1,55 @@
@@ -2380,7 +2754,7 @@ index 00000000..6d42c40b
 +}
 diff --git a/common/xray/net/system.go b/common/xray/net/system.go
 new file mode 100644
-index 00000000..7e1c4b01
+index 0000000..7e1c4b0
 --- /dev/null
 +++ b/common/xray/net/system.go
 @@ -0,0 +1,84 @@
@@ -2470,7 +2844,7 @@ index 00000000..7e1c4b01
 +type Resolver = net.Resolver
 diff --git a/common/xray/pipe/impl.go b/common/xray/pipe/impl.go
 new file mode 100644
-index 00000000..7b2a97a8
+index 0000000..7b2a97a
 --- /dev/null
 +++ b/common/xray/pipe/impl.go
 @@ -0,0 +1,209 @@
@@ -2685,7 +3059,7 @@ index 00000000..7b2a97a8
 +}
 diff --git a/common/xray/pipe/pipe.go b/common/xray/pipe/pipe.go
 new file mode 100644
-index 00000000..06f949fa
+index 0000000..06f949f
 --- /dev/null
 +++ b/common/xray/pipe/pipe.go
 @@ -0,0 +1,53 @@
@@ -2744,7 +3118,7 @@ index 00000000..06f949fa
 +}
 diff --git a/common/xray/pipe/reader.go b/common/xray/pipe/reader.go
 new file mode 100644
-index 00000000..cafe444a
+index 0000000..cafe444
 --- /dev/null
 +++ b/common/xray/pipe/reader.go
 @@ -0,0 +1,41 @@
@@ -2791,7 +3165,7 @@ index 00000000..cafe444a
 +}
 diff --git a/common/xray/pipe/writer.go b/common/xray/pipe/writer.go
 new file mode 100644
-index 00000000..15312635
+index 0000000..1531263
 --- /dev/null
 +++ b/common/xray/pipe/writer.go
 @@ -0,0 +1,29 @@
@@ -2826,7 +3200,7 @@ index 00000000..15312635
 +}
 diff --git a/common/xray/serial/serial.go b/common/xray/serial/serial.go
 new file mode 100644
-index 00000000..9d8cb4ca
+index 0000000..9d8cb4c
 --- /dev/null
 +++ b/common/xray/serial/serial.go
 @@ -0,0 +1,29 @@
@@ -2861,7 +3235,7 @@ index 00000000..9d8cb4ca
 +}
 diff --git a/common/xray/serial/string.go b/common/xray/serial/string.go
 new file mode 100644
-index 00000000..8fdcd7f6
+index 0000000..8fdcd7f
 --- /dev/null
 +++ b/common/xray/serial/string.go
 @@ -0,0 +1,35 @@
@@ -2902,7 +3276,7 @@ index 00000000..8fdcd7f6
 +}
 diff --git a/common/xray/signal/done/done.go b/common/xray/signal/done/done.go
 new file mode 100644
-index 00000000..189a8cf3
+index 0000000..189a8cf
 --- /dev/null
 +++ b/common/xray/signal/done/done.go
 @@ -0,0 +1,49 @@
@@ -2957,7 +3331,7 @@ index 00000000..189a8cf3
 +}
 diff --git a/common/xray/signal/notifier.go b/common/xray/signal/notifier.go
 new file mode 100644
-index 00000000..19836e54
+index 0000000..19836e5
 --- /dev/null
 +++ b/common/xray/signal/notifier.go
 @@ -0,0 +1,26 @@
@@ -2989,7 +3363,7 @@ index 00000000..19836e54
 +}
 diff --git a/common/xray/signal/pubsub/pubsub.go b/common/xray/signal/pubsub/pubsub.go
 new file mode 100644
-index 00000000..6de453e8
+index 0000000..6de453e
 --- /dev/null
 +++ b/common/xray/signal/pubsub/pubsub.go
 @@ -0,0 +1,105 @@
@@ -3100,7 +3474,7 @@ index 00000000..6de453e8
 +}
 diff --git a/common/xray/signal/semaphore/semaphore.go b/common/xray/signal/semaphore/semaphore.go
 new file mode 100644
-index 00000000..8696b148
+index 0000000..8696b14
 --- /dev/null
 +++ b/common/xray/signal/semaphore/semaphore.go
 @@ -0,0 +1,27 @@
@@ -3133,7 +3507,7 @@ index 00000000..8696b148
 +}
 diff --git a/common/xray/signal/timer.go b/common/xray/signal/timer.go
 new file mode 100644
-index 00000000..52961bf5
+index 0000000..52961bf
 --- /dev/null
 +++ b/common/xray/signal/timer.go
 @@ -0,0 +1,85 @@
@@ -3224,7 +3598,7 @@ index 00000000..52961bf5
 +}
 diff --git a/common/xray/stat/connection.go b/common/xray/stat/connection.go
 new file mode 100644
-index 00000000..463db62d
+index 0000000..463db62
 --- /dev/null
 +++ b/common/xray/stat/connection.go
 @@ -0,0 +1,34 @@
@@ -3264,7 +3638,7 @@ index 00000000..463db62d
 +}
 diff --git a/common/xray/stats/stats.go b/common/xray/stats/stats.go
 new file mode 100644
-index 00000000..70bbd026
+index 0000000..70bbd02
 --- /dev/null
 +++ b/common/xray/stats/stats.go
 @@ -0,0 +1,13 @@
@@ -3283,7 +3657,7 @@ index 00000000..70bbd026
 +}
 diff --git a/common/xray/task/common.go b/common/xray/task/common.go
 new file mode 100644
-index 00000000..11078fb9
+index 0000000..11078fb
 --- /dev/null
 +++ b/common/xray/task/common.go
 @@ -0,0 +1,10 @@
@@ -3299,7 +3673,7 @@ index 00000000..11078fb9
 +}
 diff --git a/common/xray/task/periodic.go b/common/xray/task/periodic.go
 new file mode 100644
-index 00000000..6abe41ae
+index 0000000..6abe41a
 --- /dev/null
 +++ b/common/xray/task/periodic.go
 @@ -0,0 +1,85 @@
@@ -3390,7 +3764,7 @@ index 00000000..6abe41ae
 +}
 diff --git a/common/xray/task/task.go b/common/xray/task/task.go
 new file mode 100644
-index 00000000..a1538392
+index 0000000..a153839
 --- /dev/null
 +++ b/common/xray/task/task.go
 @@ -0,0 +1,64 @@
@@ -3460,7 +3834,7 @@ index 00000000..a1538392
 +}
 diff --git a/common/xray/utils/browser.go b/common/xray/utils/browser.go
 new file mode 100644
-index 00000000..944c5cdd
+index 0000000..944c5cd
 --- /dev/null
 +++ b/common/xray/utils/browser.go
 @@ -0,0 +1,290 @@
@@ -3756,7 +4130,7 @@ index 00000000..944c5cdd
 +}
 diff --git a/common/xray/utils/padding.go b/common/xray/utils/padding.go
 new file mode 100644
-index 00000000..fe95ba9a
+index 0000000..fe95ba9
 --- /dev/null
 +++ b/common/xray/utils/padding.go
 @@ -0,0 +1,24 @@
@@ -3786,7 +4160,7 @@ index 00000000..fe95ba9a
 +}
 diff --git a/common/xray/uuid/uuid.go b/common/xray/uuid/uuid.go
 new file mode 100644
-index 00000000..31c7b531
+index 0000000..31c7b53
 --- /dev/null
 +++ b/common/xray/uuid/uuid.go
 @@ -0,0 +1,105 @@
