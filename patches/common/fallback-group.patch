@@ -1,15 +1,15 @@
 diff --git a/constant/proxy.go b/constant/proxy.go
-index 10382ab..0bdc60a 100644
+index 10382ab..28cf3d2 100644
 --- a/constant/proxy.go
 +++ b/constant/proxy.go
-@@ -49,6 +49,7 @@ const (
+@@ -48,6 +48,7 @@ const (
+ )
  
  const (
- 	TypeSelector    = "selector"
 +	TypeFallback    = "fallback"
+ 	TypeSelector    = "selector"
  	TypeURLTest     = "urltest"
  	TypeLoadBalance = "loadbalance"
- )
 @@ -123,6 +124,8 @@ func ProxyDisplayName(proxyType string) string {
  		return "Selector"
  	case TypeURLTest:
@@ -20,17 +20,17 @@ index 10382ab..0bdc60a 100644
  		return "LoadBalance"
  	default:
 diff --git a/include/registry.go b/include/registry.go
-index d3ed42a..1b87f8d 100644
+index d3ed42a..db20ec8 100644
 --- a/include/registry.go
 +++ b/include/registry.go
-@@ -103,6 +103,7 @@ func OutboundRegistry() *outbound.Registry {
- 
+@@ -104,6 +104,7 @@ func OutboundRegistry() *outbound.Registry {
  	group.RegisterSelector(registry)
  	group.RegisterURLTest(registry)
-+	group.RegisterFallback(registry)
  	group.RegisterLoadBalance(registry)
++	group.RegisterFallback(registry)
  
  	socks.RegisterOutbound(registry)
+ 	http.RegisterOutbound(registry)
 diff --git a/option/group.go b/option/group.go
 index 4ee11d9..d1d5d08 100644
 --- a/option/group.go
@@ -49,14 +49,15 @@ index 4ee11d9..d1d5d08 100644
  	URL         string             `json:"url,omitempty"`
 diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
 new file mode 100644
-index 0000000..772367a
+index 0000000..9011762
 --- /dev/null
 +++ b/protocol/group/fallback.go
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,244 @@
 +package group
 +
 +import (
 +	"context"
++	"io"
 +	"net"
 +	"sync"
 +	"time"
@@ -73,6 +74,17 @@ index 0000000..772367a
 +	"github.com/sagernet/sing/service"
 +)
 +
++// Fallback outbound group, ported verbatim from shtorm-7/sing-box-extended
++// (protocol/group/fallback.go) and adapted to both reF1nd branches:
++//   - reF1nd-stable: OutboundGroup = {Now, All}; failover runs inside
++//     DialContext/ListenPacket (dial failure -> blacklist).
++//   - reF1nd-testing: OutboundGroup = {All, Selected, AttachConnection};
++//     route resolves members via Selected, and chain dial failures are
++//     reported through adapter.ConnectionFailureListener (route/conn.go
++//     notifyConnectionFailure) -> OnConnectionFailure blacklists the member
++//     that was last resolved/used. The superset below compiles on both.
++// AttachConnection is a no-op: this group never interrupts existing
++// connections (faithful to the upstream shtorm-7 implementation).
 +func RegisterFallback(registry *outbound.Registry) {
 +	outbound.Register[option.FallbackOutboundOptions](registry, C.TypeFallback, NewFallback)
 +}
@@ -177,6 +189,48 @@ index 0000000..772367a
 +		return conn, nil
 +	}
 +	return nil, err
++}
++
++// Selected returns the first non-blacklisted outbound in configured order;
++// when every tag is blacklisted it degrades to the first configured tag
++// (the last-resort pass in DialContext will still try blacklisted tags).
++// Only used by the reF1nd-testing routing model.
++func (s *Fallback) Selected(network string) adapter.Outbound {
++	s.mtx.Lock()
++	defer s.mtx.Unlock()
++	for _, tag := range s.tags {
++		if !s.isBlacklisted(tag) {
++			if outbound, ok := s.outbounds[tag]; ok {
++				s.lastUsedOutbound = tag
++				return outbound
++			}
++		}
++	}
++	if outbound, ok := s.outbounds[s.tags[0]]; ok {
++		return outbound
++	}
++	return nil
++}
++
++// AttachConnection satisfies adapter.OutboundGroup on reF1nd-testing.
++// This group never interrupts existing connections, so the closer is
++// discarded and the detach function is a no-op.
++func (s *Fallback) AttachConnection(io.Closer) func() {
++	return func() {}
++}
++
++// OnConnectionFailure satisfies adapter.ConnectionFailureListener on
++// reF1nd-testing (notified by route/conn.go notifyConnectionFailure for
++// every element of the dial chain). The member resolved most recently is
++// blacklisted; under concurrent dials this may transiently mislabel a
++// healthy member, which the blacklist timeout (default 1m) and the
++// last-resort pass self-heal — same tolerance as the original semantics.
++func (s *Fallback) OnConnectionFailure(context.Context) {
++	s.mtx.Lock()
++	defer s.mtx.Unlock()
++	if tag := s.lastUsedOutbound; tag != "" {
++		s.addToBlacklist(tag)
++	}
 +}
 +
 +func (s *Fallback) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
