@@ -2624,6 +2624,29 @@ jobs:
       contents: write
     if: always() && !cancelled()
     steps:
+      - name: Guard against failed or cancelled publish jobs
+        # 2026-10-06：publish_* 被 runner 故障取消（conclusion=cancelled）时，
+        # 不触发任何 failure() 下游——run 37352980719 实锤：publish_apple
+        # cancelled 后静默留下缺 SFI/SFM 资产的 stable release，无人察覺。
+        # 此守卫让 run 变红，rerun --failed 即可恢复。仅在有真实构建时执法
+        # （无更新 run 的 publish_* 全为 skipped，属正常）。
+        if: needs.check.outputs.has_update == 'true'
+        env:
+          PC: ${{ needs.publish_core.result }}
+          PA: ${{ needs.publish_android.result }}
+          PP: ${{ needs.publish_apple.result }}
+        run: |
+          set -euo pipefail
+          bad=""
+          [ "$PC" = "success" ] || bad="$bad publish_core=$PC"
+          case "$PA" in success|skipped) ;; *) bad="$bad publish_android=$PA" ;; esac
+          case "$PP" in success|skipped) ;; *) bad="$bad publish_apple=$PP" ;; esac
+          if [ -n "$bad" ]; then
+            echo "::error::Publish jobs did not fully succeed:$bad — rerun the failed jobs to restore the full release."
+            exit 1
+          fi
+          echo "Publish guard OK (publish_core=$PC, publish_android=$PA, publish_apple=$PP)"
+
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
