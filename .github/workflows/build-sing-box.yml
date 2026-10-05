@@ -1049,6 +1049,11 @@ jobs:
             if ! echo "$FILE_HEADER" | grep -qiE "PE32.*executable"; then
               echo "::error::File is not a valid PE executable!"; exit 1
             fi
+          elif [ "${{ matrix.platform.goos }}" = "darwin" ]; then
+            # 2026-10-05 補齊：darwin 此前只過尺寸檢查，Mach-O 從未被校驗
+            if ! echo "$FILE_HEADER" | grep -qi "Mach-O"; then
+              echo "::error::File is not a valid Mach-O executable!"; exit 1
+            fi
           fi
 
           echo "✅ Verification passed."
@@ -2135,7 +2140,8 @@ jobs:
           ASSET_URL=$(curl -sSL -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
             | grep -oE '"browser_download_url":\s*"[^"]+"' | cut -d '"' -f 4 \
-            | grep "linux" | grep -E "${FILE_ARCH}[-.]" | grep -vE "glibc|musl" | grep "\.tar\.gz" | head -n 1)
+            | grep "linux" | grep -E "${FILE_ARCH}[-.]" | grep -vE "glibc|musl" \
+            | grep -v -- "-upx" | grep "\.tar\.gz" | head -n 1)
           [ -z "$ASSET_URL" ] && { echo "No release found for $FILE_ARCH"; exit 1; }
           curl -fSL -o "$WORK_DIR/archive.tar.gz" "$ASSET_URL"
           tar -xzf "$WORK_DIR/archive.tar.gz" -C "$WORK_DIR"
@@ -2506,6 +2512,29 @@ jobs:
                 exit 1
               fi
             done
+
+            # 2026-10-05：SFA 校驗單此前只在 artifact 內部核驗、從未發佈——
+            # release 級 SHA256SUMS.txt 僅覆蓋 tar.gz/zip 歸檔，用戶無法對
+            # APK 做完整性校驗。必須先改名再上傳：gh upload 以檔案基名作
+            # 資產名，直接上傳會與 release 級 SHA256SUMS.txt 同名互覆
+            # （2026-10-04 熱修教訓）。
+            if [ -f "$apk_dir/SHA256SUMS.txt" ]; then
+              SUM_ASSET="/tmp/SHA256SUMS-SFA-${target_id}.txt"
+              cp "$apk_dir/SHA256SUMS.txt" "$SUM_ASSET"
+              SUM_UPLOADED=false
+              for attempt in 1 2 3; do
+                if gh release upload "$tag" "$SUM_ASSET" --clobber --repo ${{ github.repository }}; then
+                  SUM_UPLOADED=true
+                  break
+                fi
+                echo "::warning::Upload attempt $attempt failed for $(basename "$SUM_ASSET")"
+                sleep $((attempt * 10))
+              done
+              if [ "$SUM_UPLOADED" != "true" ]; then
+                echo "::error::Upload failed after 3 attempts: $(basename "$SUM_ASSET")"
+                exit 1
+              fi
+            fi
           done
 
       - name: Add SFA section to release body
@@ -2593,6 +2622,26 @@ jobs:
                 exit 1
               fi
             done
+
+            # 2026-10-05：Apple 校驗單（SFI/SFM）與 SFA 同理發佈為獨立資產，
+            # 先改名避免與 release 級 SHA256SUMS.txt 同名互覆。
+            if [ -f "$apple_dir/SHA256SUMS.txt" ]; then
+              SUM_ASSET="/tmp/SHA256SUMS-Apple-${target_id}.txt"
+              cp "$apple_dir/SHA256SUMS.txt" "$SUM_ASSET"
+              SUM_UPLOADED=false
+              for attempt in 1 2 3; do
+                if gh release upload "$tag" "$SUM_ASSET" --clobber --repo ${{ github.repository }}; then
+                  SUM_UPLOADED=true
+                  break
+                fi
+                echo "::warning::Upload attempt $attempt failed for $(basename "$SUM_ASSET")"
+                sleep $((attempt * 10))
+              done
+              if [ "$SUM_UPLOADED" != "true" ]; then
+                echo "::error::Upload failed after 3 attempts: $(basename "$SUM_ASSET")"
+                exit 1
+              fi
+            fi
           done
 
   finalize:
@@ -2700,6 +2749,11 @@ jobs:
           fi
 
       - name: Update README version block
+        # 2026-10-05 閘門：僅在真實構建發生時更新。無更新 run 此前會用空 NOTES
+        # 重寫版本塊（workflow-metadata artifact 不存在 → mv 失敗 → echo "" 兜底
+        # 成功 → NOTES 為空串而非 '暫無更新記錄'），把上一個版本的狀態記錄清空
+        # 並留下時間戳滾動的空提交（origin/main 416adf6/09a9207 兩次清空實錘）。
+        if: needs.check.outputs.has_update == 'true'
         run: |
           set -euo pipefail
           # 過去本步驟以硬編碼 heredoc 全量覆蓋 README.md，凡是模板中沒有的段落都會被
@@ -2749,6 +2803,9 @@ jobs:
           sed -n "${BEG},$((FIN))p" README.md
 
       - name: Commit and Push README
+        # 與上一步驟同一閘門：無更新 run 不觸碰 README（內容本就無變化，
+        # 只會產生時間戳滾動的空提交噪音）。
+        if: needs.check.outputs.has_update == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
@@ -2929,7 +2986,7 @@ jobs:
 
       - name: Send SFA APKs to Telegram
         if: env.SEND_APK == 'true'
-        uses: xz-dev/TelegramFileUploader@v1
+        uses: xz-dev/TelegramFileUploader@f597b98950e55d2b15f2fc94d1410cb557d829e0 # v1（2026-10-05 釘版，供應鏈補漏）
         continue-on-error: true
         with:
           to-who: "${{ secrets.CHAT_ID }}"
@@ -2959,7 +3016,7 @@ jobs:
 
       - name: Send Android CLI binaries to Telegram
         if: env.SEND_ACLI == 'true'
-        uses: xz-dev/TelegramFileUploader@v1
+        uses: xz-dev/TelegramFileUploader@f597b98950e55d2b15f2fc94d1410cb557d829e0 # v1（2026-10-05 釘版，供應鏈補漏）
         continue-on-error: true
         with:
           to-who: "${{ secrets.CHAT_ID }}"
@@ -2989,7 +3046,7 @@ jobs:
 
       - name: Send Linux binaries to Telegram
         if: env.SEND_LINUX == 'true'
-        uses: xz-dev/TelegramFileUploader@v1
+        uses: xz-dev/TelegramFileUploader@f597b98950e55d2b15f2fc94d1410cb557d829e0 # v1（2026-10-05 釘版，供應鏈補漏）
         continue-on-error: true
         with:
           to-who: "${{ secrets.CHAT_ID }}"
@@ -3019,7 +3076,7 @@ jobs:
 
       - name: Send Windows binaries to Telegram
         if: env.SEND_WIN == 'true'
-        uses: xz-dev/TelegramFileUploader@v1
+        uses: xz-dev/TelegramFileUploader@f597b98950e55d2b15f2fc94d1410cb557d829e0 # v1（2026-10-05 釘版，供應鏈補漏）
         continue-on-error: true
         with:
           to-who: "${{ secrets.CHAT_ID }}"
@@ -3049,7 +3106,7 @@ jobs:
 
       - name: Send Darwin binaries to Telegram
         if: env.SEND_DARWIN == 'true'
-        uses: xz-dev/TelegramFileUploader@v1
+        uses: xz-dev/TelegramFileUploader@f597b98950e55d2b15f2fc94d1410cb557d829e0 # v1（2026-10-05 釘版，供應鏈補漏）
         continue-on-error: true
         with:
           to-who: "${{ secrets.CHAT_ID }}"
@@ -3079,7 +3136,7 @@ jobs:
 
       - name: Send Apple clients to Telegram
         if: env.SEND_APPLE == 'true'
-        uses: xz-dev/TelegramFileUploader@v1
+        uses: xz-dev/TelegramFileUploader@f597b98950e55d2b15f2fc94d1410cb557d829e0 # v1（2026-10-05 釘版，供應鏈補漏）
         continue-on-error: true
         with:
           to-who: "${{ secrets.CHAT_ID }}"

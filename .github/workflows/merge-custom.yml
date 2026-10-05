@@ -15,11 +15,11 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4（2026-10-05 釘版）
         with:
           ref: main
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5（2026-10-05 釘版）
         with:
           python-version: '3.10'
 
@@ -34,19 +34,28 @@ jobs:
           # 被 cleanup.yml 的 cleanup-releases 當作普通 stable release 刪除後，
           # wget 404（退出碼 8），且無人察覺——上游規則轉換連續超時把它掩蓋了 14 天。
           RELEASE_TAG="sing-box-testing"
+          # 2026-10-05 修復：原正則 `linux-amd64\.tar\.gz$` 只匹配無變體後綴的資產名，
+          # 而 2026-10-02 資產改名後所有歸檔必帶 -purego/-glibc/-musl 後綴——
+          # 正則永不匹配 → 本 workflow 自那時起每天 failure，並連帶令 build-rules
+          # （workflow_run 依賴本 workflow success）連續 skipped，規則鏈斷裂 3 天。
+          # 現對齊 rules-Converter 的匹配方式並排除 -upx 變體（字母序 -upx 排 . 前，
+          # head -1 否則會命中 glibc-upx 包）。
           ASSET_URL=$(curl -sL -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
-            | jq -r '.assets[] | select(.name | test("linux-amd64\\.tar\\.gz$")) | .browser_download_url' \
+            | jq -r '.assets[] | select((.name | test("linux-amd64.*\\.tar\\.gz$")) and (.name | test("-upx") | not)) | .browser_download_url' \
             | head -n 1)
           if [ -z "$ASSET_URL" ]; then
             echo "::error::No linux-amd64 asset found in $RELEASE_TAG"
             exit 1
           fi
           curl -L --fail --retry 3 -o sb-core.tar.gz "$ASSET_URL"
-          tar -xzf sb-core.tar.gz
+          # 2026-10-05：解包到 runner 臨時目錄（同 rules-Converter），防止頂層目錄
+          # 結構殘留被下方 git add . 提交進倉庫。
+          mkdir -p "$RUNNER_TEMP/sb-core-extract"
+          tar -xzf sb-core.tar.gz -C "$RUNNER_TEMP/sb-core-extract"
           rm -f sb-core.tar.gz
-          FOUND=$(find . -maxdepth 2 -name "sing-box" -type f 2>/dev/null | head -n 1)
+          FOUND=$(find "$RUNNER_TEMP/sb-core-extract" -maxdepth 2 -name "sing-box" -type f 2>/dev/null | head -n 1)
           if [ -z "$FOUND" ]; then
             echo "::error::sing-box binary not found after extraction"
             exit 1

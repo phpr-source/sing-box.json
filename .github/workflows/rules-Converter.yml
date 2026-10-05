@@ -17,7 +17,9 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4（2026-10-05 釘版）
+        with:
+          ref: main
 
       - name: Resolve Format Version
         run: |
@@ -32,7 +34,7 @@ jobs:
           echo "Resolved format version: $FMT_VER"
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5（2026-10-05 釘版）
         with:
           go-version: '1.22'
           cache: true
@@ -46,11 +48,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 2026-10-05 兩處修復：①資產選擇排除 -upx 變體（字母序 -upx 排 . 前，
+          # head -1 曾命中 glibc-upx 包）；②解包到 runner 臨時目錄——歸檔自
+          # 2026-10-02 起為頂層目錄結構，在倉庫工作樹內解包會殘留
+          # sing-box-<ver>-*/ 目錄，被下方 git add . 提交進倉庫
+          # （98e2fa5 實錘提交了 sing-box-1.15.0-alpha.9-...-glibc-upx/LICENSE）。
           RELEASE_TAG="sing-box-testing"
           ASSET_URL=$(curl -sL -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
-            | jq -r '.assets[] | select(.name | test("linux-amd64.*\\.tar\\.gz$")) | .browser_download_url' \
+            | jq -r '.assets[] | select((.name | test("linux-amd64.*\\.tar\\.gz$")) and (.name | test("-upx") | not)) | .browser_download_url' \
             | head -n 1)
 
           if [ -z "$ASSET_URL" ]; then
@@ -59,7 +66,7 @@ jobs:
             ASSET_URL=$(curl -sL -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer $GH_TOKEN" \
               "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
-              | jq -r '.assets[] | select(.name | test("linux-amd64.*\\.tar\\.gz$")) | .browser_download_url' \
+              | jq -r '.assets[] | select((.name | test("linux-amd64.*\\.tar\\.gz$")) and (.name | test("-upx") | not)) | .browser_download_url' \
               | head -n 1)
           fi
 
@@ -69,22 +76,17 @@ jobs:
           fi
 
           curl -L --fail --retry 3 -o sb-core.tar.gz "$ASSET_URL"
-          tar -xzf sb-core.tar.gz
+          mkdir -p "$RUNNER_TEMP/sb-core-extract"
+          tar -xzf sb-core.tar.gz -C "$RUNNER_TEMP/sb-core-extract"
           rm -f sb-core.tar.gz
 
-          if [ ! -f "sing-box" ]; then
-            FOUND=$(find . -maxdepth 2 -name "sing-box" -type f 2>/dev/null | head -n 1)
-            if [ -n "$FOUND" ]; then
-              mv "$FOUND" ./sing-box
-            fi
-          fi
-
-          if [ ! -f "sing-box" ]; then
+          FOUND=$(find "$RUNNER_TEMP/sb-core-extract" -maxdepth 2 -name "sing-box" -type f 2>/dev/null | head -n 1)
+          if [ -z "$FOUND" ]; then
             echo "::error::Binary not found after extraction"
             exit 1
           fi
-          chmod +x sing-box
-          mv sing-box sb-core
+          mv "$FOUND" ./sb-core
+          chmod +x sb-core
 
       - name: Download & Process
         run: |
