@@ -618,10 +618,10 @@ index acf28de..ecec34d 100644
 +}
 diff --git a/transport/v2rayxhttp/client.go b/transport/v2rayxhttp/client.go
 new file mode 100644
-index 0000000..0ea9c92
+index 0000000..8e48ccf
 --- /dev/null
 +++ b/transport/v2rayxhttp/client.go
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,404 @@
 +package xhttp
 +
 +import (
@@ -714,7 +714,15 @@ index 0000000..0ea9c92
 +		dest2 := options2.ServerOptions.Build()
 +		var tlsConfig2 tls.Config
 +		if options2.TLS != nil {
-+			tlsConfig2, err = tls.NewClient(ctx, log.NewNOPFactory().Logger(), options2.Server, common.PtrValueOrDefault(options2.TLS))
++			// 从服务上下文取真实 logger：内层 TLS 的 kTLS 等配置期警告此前被 NOP
++			// logger 静默吞掉（全树唯一 NOP 点）。对齐 shtorm-7 的可见性语义；
++			// 其实现经 fork 工厂链穿参，本仓（reF1nd 分支）工厂无 logger 参数，
++			// 改由 ctx 派生（box 在 ctx 注册 log.Factory），运行时结果一致。
++			clientLogger := log.NewNOPFactory().Logger()
++			if factory := service.FromContext[log.Factory](ctx); factory != nil {
++				clientLogger = factory.Logger()
++			}
++			tlsConfig2, err = tls.NewClient(ctx, clientLogger, options2.Server, common.PtrValueOrDefault(options2.TLS))
 +			if err != nil {
 +				return nil, err
 +			}
