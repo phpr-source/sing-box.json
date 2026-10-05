@@ -2537,32 +2537,7 @@ jobs:
             fi
           done
 
-      - name: Add SFA section to release body
-        if: always()
-        run: |
-          set -euo pipefail
-          TAG_MAP=$(cat ./tmp/build-info/tag_map.json 2>/dev/null || echo '{}')
-          for apk_dir in ./tmp/apk-*; do
-            [ -d "$apk_dir" ] || continue
-            target_id=$(basename "$apk_dir" | sed 's/apk-//')
-            tag=$(echo "$TAG_MAP" | jq -r --arg tid "$target_id" '.[$tid] // empty')
-            [ -n "$tag" ] || continue
-            body=$(gh release view "$tag" --json body -q .body 2>/dev/null || true)
-            {
-              echo "$body"
-              echo ""
-              echo "## 📱 SFA (Android) 下載"
-              echo ""
-              echo '| 檔案 | 架構 |'
-              echo '|---|---|'
-              for f in "$apk_dir"/*.apk; do
-                [ -f "$f" ] || continue
-                name=$(basename "$f")
-                echo "| [$name](https://github.com/${{ github.repository }}/releases/download/$tag/$name) | APK |"
-              done
-            } > /tmp/sfa_body_${target_id}.md
-            gh release edit "$tag" --notes-file "/tmp/sfa_body_${target_id}.md" --repo ${{ github.repository }} 2>&1 || echo "::warning::Failed to update release body for $tag"
-          done
+  finalize:
 
   publish_apple:
     runs-on: ubuntu-latest
@@ -2724,6 +2699,69 @@ jobs:
               branch,
               ...(sha && { sha })
             });
+
+      - name: Append product download sections to release body
+        # 2026-10-05：SFA 段自 publish_android 挪入 finalize，並新增 Apple 段。
+        # 動機：publish_android/publish_apple 並行讀-改-寫同一 release body 會
+        # 互相丟更新（gh release edit 是全文替換）；finalize 在兩者之後運行，
+        # 是唯一寫者。段落按 release 實際資產清單生成（非本地 artifact 目錄），
+        # 剝除舊段後重追加——rerun/重試冪等，內容始終與線上資產一致。
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG_MAP=$(cat ./downloads/build-info/tag_map.json 2>/dev/null || echo '{}')
+          if [ "$TAG_MAP" = "{}" ]; then
+            echo "No published tags this run; skipping release body sections."
+            exit 0
+          fi
+          for tid in $(echo "$TAG_MAP" | jq -r 'keys[]'); do
+            tag=$(echo "$TAG_MAP" | jq -r --arg tid "$tid" '.[$tid]')
+            body=$(gh release view "$tag" --json body -q .body 2>/dev/null || true)
+            [ -n "$body" ] || continue
+            # 剝除既有 SFA/Apple 段（塊級：從各自標題到下一個 ## 標題或文末；
+            # History 是 ### 標題且位於段落之前，不受影響）
+            body=$(printf '%s\n' "$body" | LC_ALL=C awk '
+              /^## 📱 SFA \(Android\) 下載/ || /^## 🍎 Apple 客戶端下載/ { skip=1; next }
+              skip && /^## / { skip=0 }
+              !skip
+            ')
+            assets=$(gh api "repos/${{ github.repository }}/releases/tags/$tag" --jq '.assets[].name' 2>/dev/null || true)
+            sfa=$(printf '%s\n' "$assets" | grep -E '^SFA-.*\.apk$' || true)
+            apple=$(printf '%s\n' "$assets" | grep -E '^(SFI-.*\.tipa|SFM-.*\.zip)$' || true)
+            {
+              printf '%s\n' "$body"
+              if [ -n "$sfa" ]; then
+                echo ""
+                echo "## 📱 SFA (Android) 下載"
+                echo ""
+                echo '| 檔案 | 說明 |'
+                echo '|---|---|'
+                printf '%s\n' "$sfa" | while IFS= read -r name; do
+                  [ -n "$name" ] || continue
+                  echo "| [$name](https://github.com/${{ github.repository }}/releases/download/$tag/$name) | APK |"
+                done
+              fi
+              if [ -n "$apple" ]; then
+                echo ""
+                echo "## 🍎 Apple 客戶端下載"
+                echo ""
+                echo '| 檔案 | 說明 |'
+                echo '|---|---|'
+                printf '%s\n' "$apple" | while IFS= read -r name; do
+                  [ -n "$name" ] || continue
+                  case "$name" in
+                    SFI-*) desc="SFI (iOS, TrollStore/越獄安裝)" ;;
+                    SFM-*) desc="SFM (macOS)" ;;
+                    *)     continue ;;
+                  esac
+                  echo "| [$name](https://github.com/${{ github.repository }}/releases/download/$tag/$name) | $desc |"
+                done
+              fi
+            } > /tmp/body_new_${tid}.md
+            gh release edit "$tag" --notes-file "/tmp/body_new_${tid}.md" --repo "${{ github.repository }}" \
+              || echo "::warning::Failed to update release body for $tag"
+          done
 
       - name: Log Build Summary
         if: always()

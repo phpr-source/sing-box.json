@@ -39,8 +39,38 @@ SFA APK 已附在 Release Assets 中，請直接前往：
 
 ## 📦 文件命名規則
 
+`sing-box-<版本>-<系統>-<架構>[-變體][-upx].<副檔名>`
+
+- **變體（僅 Linux）**：`glibc`（動態鏈接，兼容性最好）/ `musl`（靜態鏈接，適合 OpenWrt 等嵌入式）/
+  `purego`（純 Go 無 CGO，隨包附 `libcronet.so`，naive 可用）
+- **架構後綴**：`amd64v3` 要求 AVX2（N100/新酷睿/Zen+）；無後綴 amd64 兼容老設備；
+  `legacy-macos-10.13` 為 macOS 10.13 High Sierra 專用
 - **打包版本** (`xxx.tar.gz` / `xxx.zip`): 包含 LICENSE 的標準發行版
 - **UPX 壓縮版** (`xxx-upx.tar.gz`): 經 UPX 壓縮的精簡版，適合小閃存設備
+  （啟動稍慢，個別殺軟可能誤報，常規使用請選標準版；`install-linux.sh` 自動選標準版）
+
+## 🔐 完整性校驗
+
+每個 Release 提供三份校驗單（均為平鋪檔案名，可直接 `sha256sum -c`）：
+
+| 檔案 | 覆蓋範圍 |
+|---|---|
+| `SHA256SUMS.txt` | 全部 tar.gz / zip 歸檔 + install-linux.sh 所屬歸檔 |
+| `SHA256SUMS-SFA-<target>.txt` | 全部 SFA APK 與元數據 |
+| `SHA256SUMS-Apple-<target>.txt` | SFI .tipa 與 SFM .zip |
+
+校驗示例：
+
+```bash
+sha256sum -c SHA256SUMS-SFA-reF1nd_Stable.txt
+```
+
+## 🍎 Apple 客戶端（SFI / SFM）
+
+- **SFI** (`SFI-<版本>.tipa`)：iOS 客戶端，TrollStore 或越獄環境安裝（ldid 簽名，非 App Store 分發）
+- **SFM** (`SFM-<版本>.zip`)：macOS 客戶端（.app 打包 zip，解壓後拖入「應用程式」）
+
+> Apple 客戶端為本倉附加構建（上游官方不發布）；Testing 渠道因 libbox API era 檢查可能自動跳過。
 
 ## 🛠️ 支持的版本與特性
 
