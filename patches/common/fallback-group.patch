@@ -49,7 +49,7 @@ index 4ee11d9..d1d5d08 100644
  	URL         string             `json:"url,omitempty"`
 diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
 new file mode 100644
-index 0000000..b91fbcc
+index 0000000..c6644cd
 --- /dev/null
 +++ b/protocol/group/fallback.go
 @@ -0,0 +1,266 @@
@@ -264,7 +264,7 @@ index 0000000..b91fbcc
 +	var err error
 +	for _, tag := range active {
 +		var conn net.PacketConn
-+		if outbound := s.outbounds[tag]; outbound != nil && !common.Contains(outbound.Network(), network) {
++		if outbound := s.outbounds[tag]; outbound != nil && !common.Contains(outbound.Network(), N.NetworkUDP) {
 +			continue
 +		}
 +		conn, err = s.outbounds[tag].ListenPacket(ctx, destination)
