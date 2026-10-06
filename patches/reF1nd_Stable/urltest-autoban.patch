@@ -1,5 +1,5 @@
 diff --git a/daemon/started_service.go b/daemon/started_service.go
-index df4354179..b8074f07e 100644
+index df43541..b8074f0 100644
 --- a/daemon/started_service.go
 +++ b/daemon/started_service.go
 @@ -729,7 +729,7 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
@@ -12,7 +12,7 @@ index df4354179..b8074f07e 100644
  		go func() {
  			t, err := urltest.URLTest(boxService.ctx, "", outbound)
 diff --git a/experimental/clashapi/api_meta_group.go b/experimental/clashapi/api_meta_group.go
-index 7103665ff..0c29d3f5e 100644
+index 7103665..0c29d3f 100644
 --- a/experimental/clashapi/api_meta_group.go
 +++ b/experimental/clashapi/api_meta_group.go
 @@ -89,7 +89,7 @@ func getGroupDelay(server *Server) func(w http.ResponseWriter, r *http.Request)
@@ -25,15 +25,16 @@ index 7103665ff..0c29d3f5e 100644
  
  		if err != nil {
 diff --git a/option/group.go b/option/group.go
-index 4ee11d9f1..bef9795c4 100644
+index d1d5d08..19c8e53 100644
 --- a/option/group.go
 +++ b/option/group.go
-@@ -16,6 +16,52 @@ type URLTestOutboundOptions struct {
+@@ -16,6 +16,54 @@ type URLTestOutboundOptions struct {
  	IdleTimeout               badoption.Duration     `json:"idle_timeout,omitempty"`
  	InterruptExistConnections bool                   `json:"interrupt_exist_connections,omitempty"`
  	Fallback                  URLTestFallbackOptions `json:"fallback,omitempty"`
-+	// AutoBan: multi-slot scheduled health check with temporary circuit breaking,
-+	// permanent ban and automatic recovery.
++	// AutoBan v3: EWMA health scoring + passive circuit breaking + active
++	// exponential-backoff recovery with environmental guards (mass-failure
++	// suppression, direct-network preflight). See protocol/group/autoban.go.
 +	AutoBan *URLTestAutoBanOptions `json:"auto_ban,omitempty"`
 +}
 +
@@ -47,7 +48,8 @@ index 4ee11d9f1..bef9795c4 100644
 +	FailThreshold int `json:"fail_threshold,omitempty"`
 +	// Deprecated: kept for compatibility. v3 uses EWMA time decay instead.
 +	FailCooldown badoption.Duration `json:"fail_cooldown,omitempty"`
-+	// State file path (default "autoban.json", resolved by filemanager).
++	// State file path, resolved by filemanager. Default is derived per group
++	// ("autoban_<safe_tag>_<hash>.json") so multiple groups never share state.
 +	Path string `json:"path,omitempty"`
 +	// Single probe URL (compatibility). If ProbeURLs is empty, this is used.
 +	ProbeURL string `json:"probe_url,omitempty"`
@@ -83,7 +85,7 @@ index 4ee11d9f1..bef9795c4 100644
  type GroupCommonOption struct {
 diff --git a/protocol/group/autoban.go b/protocol/group/autoban.go
 new file mode 100644
-index 000000000..052232b9d
+index 0000000..052232b
 --- /dev/null
 +++ b/protocol/group/autoban.go
 @@ -0,0 +1,1340 @@
@@ -1428,7 +1430,7 @@ index 000000000..052232b9d
 +	return time.Duration(rand.Int63n(int64(maxJitter)))
 +}
 diff --git a/protocol/group/loadbalance.go b/protocol/group/loadbalance.go
-index 6fd61413b..93b4f28ea 100644
+index 6fd6141..93b4f28 100644
 --- a/protocol/group/loadbalance.go
 +++ b/protocol/group/loadbalance.go
 @@ -475,7 +475,7 @@ func (g *LoadBalanceGroup) urlTestWait(ctx context.Context, force bool) (map[str
@@ -1441,7 +1443,7 @@ index 6fd61413b..93b4f28ea 100644
  		updateLoadBalanceURLTestHistory(g.outbound, g.history, g.tag, outbounds)
  	}
 diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
-index 9ed80c202..69fc4056a 100644
+index 9ed80c2..69fc405 100644
 --- a/protocol/group/urltest.go
 +++ b/protocol/group/urltest.go
 @@ -2,6 +2,8 @@ package group
