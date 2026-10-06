@@ -1430,10 +1430,10 @@ index 0000000..f095908
 +	return time.Duration(rand.Int63n(int64(maxJitter)))
 +}
 diff --git a/protocol/group/loadbalance.go b/protocol/group/loadbalance.go
-index f77c1aa..f8a9cc1 100644
+index 114e136..5c54c4a 100644
 --- a/protocol/group/loadbalance.go
 +++ b/protocol/group/loadbalance.go
-@@ -495,7 +495,7 @@ func (g *LoadBalanceGroup) urlTestWait(ctx context.Context, force bool) (map[str
+@@ -493,7 +493,7 @@ func (g *LoadBalanceGroup) urlTestWait(ctx context.Context, force bool) (map[str
  func (g *LoadBalanceGroup) urlTestLocked(ctx context.Context, force bool) (map[string]uint16, error) {
  	ctx = urltest.ContextWithUnifiedDelay(ctx, urltest.UnifiedDelayFromContext(g.ctx))
  	outbounds := g.loadOutbounds()
@@ -1443,7 +1443,7 @@ index f77c1aa..f8a9cc1 100644
  		updateLoadBalanceURLTestHistory(g.outbound, g.history, g.tag, outbounds)
  	}
 diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
-index 8d19da9..bc8bff2 100644
+index 7a3e1b2..a84aa68 100644
 --- a/protocol/group/urltest.go
 +++ b/protocol/group/urltest.go
 @@ -2,6 +2,8 @@ package group
@@ -1512,10 +1512,10 @@ index 8d19da9..bc8bff2 100644
  	return outbound, nil
  }
  
-@@ -142,6 +187,41 @@ func (s *URLTest) Start() error {
- 		return err
+@@ -149,6 +194,44 @@ func (s *URLTest) Start(stage adapter.StartStage, scope *adapter.Scope) error {
  	}
  	s.group = group
+ 	scope.Add(group.Close)
 +	if s.autoBan != nil {
 +		group.autoBan = s.autoBan
 +		s.autoBan.logger = s.logger
@@ -1550,20 +1550,14 @@ index 8d19da9..bc8bff2 100644
 +			s.logger.Warn("auto_ban: load state: ", err)
 +		}
 +		s.autoBan.Start()
++		// 上游 2026-10-05 起生命周期改 scope 管理（包装层 Close 移除），
++		// AutoBan 关闭以 scope 注册；LIFO 使其先于 group.Close 停止记账。
++		scope.Add(func() error { s.autoBan.Close(); return nil })
 +	}
  	for _, providerTag := range s.providerTags {
- 		s.providers[providerTag].RegisterCallback(s.onProviderUpdated)
- 	}
-@@ -154,12 +234,19 @@ func (s *URLTest) PostStart() error {
- }
- 
- func (s *URLTest) Close() error {
-+	if s.autoBan != nil {
-+		s.autoBan.Close()
-+	}
- 	return common.Close(
- 		common.PtrOrNil(s.group),
- 	)
+ 		p := s.providers[providerTag]
+ 		element := p.RegisterCallback(s.onProviderUpdated)
+@@ -158,6 +241,10 @@ func (s *URLTest) Start(stage adapter.StartStage, scope *adapter.Scope) error {
  }
  
  func (s *URLTest) All() []string {
@@ -1574,7 +1568,7 @@ index 8d19da9..bc8bff2 100644
  	outbounds := s.group.loadOutbounds()
  	tags := make([]string, 0, len(outbounds))
  	for _, detour := range outbounds {
-@@ -203,6 +290,63 @@ func (s *URLTest) References() []string {
+@@ -201,6 +288,63 @@ func (s *URLTest) References() []string {
  	return references
  }
  
@@ -1638,7 +1632,7 @@ index 8d19da9..bc8bff2 100644
  func (s *URLTest) SelectPreMatchOutbound(metadata *adapter.InboundContext, selectOutbound func(adapter.Outbound) (adapter.Outbound, adapter.PreMatchAction)) (adapter.Outbound, adapter.PreMatchAction) {
  	s.group.Touch()
  	network := metadata.Network
-@@ -267,6 +411,13 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
+@@ -265,6 +409,13 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
  	if outbound == nil {
  		outbound, _ = s.group.Select(network)
  	}
@@ -1652,7 +1646,7 @@ index 8d19da9..bc8bff2 100644
  	if outbound == nil {
  		return nil, E.New("missing supported outbound")
  	}
-@@ -285,6 +436,13 @@ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
+@@ -283,6 +434,13 @@ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
  	if outbound == nil {
  		outbound, _ = s.group.Select(N.NetworkUDP)
  	}
@@ -1666,7 +1660,7 @@ index 8d19da9..bc8bff2 100644
  	if outbound == nil {
  		return nil, E.New("missing supported outbound")
  	}
-@@ -353,8 +511,11 @@ type URLTestGroup struct {
+@@ -351,8 +509,11 @@ type URLTestGroup struct {
  	close                        chan struct{}
  	started                      atomic.Bool
  	lastActive                   common.TypedValue[time.Time]
@@ -1678,7 +1672,7 @@ index 8d19da9..bc8bff2 100644
  }
  
  func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, fallback URLTestFallback, interruptExternalConnections bool) (*URLTestGroup, error) {
-@@ -436,11 +597,33 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -434,11 +595,33 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  	var minOutbound adapter.Outbound
  	var fallbackIgnoreOutboundDelay uint16
  	var fallbackIgnoreOutbound adapter.Outbound
@@ -1713,7 +1707,7 @@ index 8d19da9..bc8bff2 100644
  				if history := g.history.LoadURLTestHistory(RealTag(selectedOutbound, network)); history != nil {
  					minOutbound = selectedOutbound
  					minDelay = history.Delay
-@@ -448,7 +631,10 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -446,7 +629,10 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  			}
  		case N.NetworkUDP:
  			selectedOutbound := g.selectedOutboundUDP.Load()
@@ -1725,7 +1719,7 @@ index 8d19da9..bc8bff2 100644
  				if history := g.history.LoadURLTestHistory(RealTag(selectedOutbound, network)); history != nil {
  					minOutbound = selectedOutbound
  					minDelay = history.Delay
-@@ -458,7 +644,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -456,7 +642,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  	}
  	outbounds := g.loadOutbounds()
  	for _, detour := range outbounds {
@@ -1734,7 +1728,7 @@ index 8d19da9..bc8bff2 100644
  			continue
  		}
  		history := g.history.LoadURLTestHistory(RealTag(detour, network))
-@@ -490,17 +676,69 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -488,17 +674,69 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  		return fallbackIgnoreOutbound, true
  	}
  	if minOutbound == nil {
@@ -1809,7 +1803,7 @@ index 8d19da9..bc8bff2 100644
  func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{}) {
  	if time.Since(g.lastActive.Load()) > g.interval {
  		g.lastActive.Store(time.Now())
-@@ -551,7 +789,25 @@ func (g *URLTestGroup) urlTestWait(ctx context.Context, force bool) (map[string]
+@@ -549,7 +787,25 @@ func (g *URLTestGroup) urlTestWait(ctx context.Context, force bool) (map[string]
  
  func (g *URLTestGroup) urlTestLocked(ctx context.Context, force bool) (map[string]uint16, error) {
  	ctx = urltest.ContextWithUnifiedDelay(ctx, urltest.UnifiedDelayFromContext(g.ctx))
@@ -1836,7 +1830,7 @@ index 8d19da9..bc8bff2 100644
  	select {
  	case <-ctx.Done():
  	default:
-@@ -619,11 +875,12 @@ func (s *urlTestSession) test(ctx context.Context, key urlTestSessionKey, test f
+@@ -617,11 +873,12 @@ func (s *urlTestSession) test(ctx context.Context, key urlTestSessionKey, test f
  }
  
  type urlTestBatch struct {
@@ -1854,7 +1848,7 @@ index 8d19da9..bc8bff2 100644
  	batch    *batch.Batch[any]
  	checked  map[string]bool
  	groups   []adapter.OutboundGroup
-@@ -631,15 +888,16 @@ type urlTestBatch struct {
+@@ -629,15 +886,16 @@ type urlTestBatch struct {
  	result   map[string]uint16
  }
  
@@ -1877,7 +1871,7 @@ index 8d19da9..bc8bff2 100644
  		batch:    b,
  		checked:  make(map[string]bool),
  		result:   make(map[string]uint16),
-@@ -707,12 +965,18 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval
+@@ -705,12 +963,18 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval
  					}
  					b.logger.Debug("outbound ", tag, " unavailable: ", testResult.err)
  					b.history.DeleteURLTestHistory(tag)
