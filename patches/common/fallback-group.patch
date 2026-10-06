@@ -49,10 +49,10 @@ index 4ee11d9..d1d5d08 100644
  	URL         string             `json:"url,omitempty"`
 diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
 new file mode 100644
-index 0000000..9011762
+index 0000000..fe705cd
 --- /dev/null
 +++ b/protocol/group/fallback.go
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,251 @@
 +package group
 +
 +import (
@@ -165,6 +165,10 @@ index 0000000..9011762
 +		conn, err = s.outbounds[tag].DialContext(ctx, network, destination)
 +		if err != nil {
 +			s.logger.InfoContext(ctx, err)
++			if ctx.Err() != nil {
++				// 客户端侧取消/超时：失败归因于本端而非节点——不拉黑，终止轮询
++				return nil, err
++			}
 +			s.mtx.Lock()
 +			s.addToBlacklist(tag)
 +			s.mtx.Unlock()
@@ -251,6 +255,9 @@ index 0000000..9011762
 +		conn, err = s.outbounds[tag].ListenPacket(ctx, destination)
 +		if err != nil {
 +			s.logger.InfoContext(ctx, err)
++			if ctx.Err() != nil {
++				return nil, err
++			}
 +			s.mtx.Lock()
 +			s.addToBlacklist(tag)
 +			s.mtx.Unlock()

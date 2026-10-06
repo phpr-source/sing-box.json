@@ -85,10 +85,10 @@ index d1d5d08..19c8e53 100644
  type GroupCommonOption struct {
 diff --git a/protocol/group/autoban.go b/protocol/group/autoban.go
 new file mode 100644
-index 0000000..052232b
+index 0000000..76b9bbd
 --- /dev/null
 +++ b/protocol/group/autoban.go
-@@ -0,0 +1,1340 @@
+@@ -0,0 +1,1344 @@
 +package group
 +
 +import (
@@ -272,6 +272,10 @@ index 0000000..052232b
 +	// 商场/小区宽带的运营商劫持、插 JS 或 302 导致误判断网。
 +	"https://connect.rom.miui.com/generate_204",
 +	"https://connectivitycheck.platform.hicloud.com/generate_204",
++	// 国际端点（probeNetwork 竞速、任一成功即健康）：非中国大陆用户访问
++	// 国内探针不稳时 preflight 恒失败，AutoBan 会整体失明（跳过全部记账）；
++	// 竞速语义下中国大陆用户不受影响。
++	"https://cp.cloudflare.com/generate_204",
 +}
 +
 +func NewAutoBan(ctx context.Context, options AutoBanOptions) *AutoBan {
