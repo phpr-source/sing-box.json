@@ -1,8 +1,8 @@
 diff --git a/constant/proxy.go b/constant/proxy.go
-index 10382ab..28cf3d2 100644
+index 771a697..9a95cc8 100644
 --- a/constant/proxy.go
 +++ b/constant/proxy.go
-@@ -48,6 +48,7 @@ const (
+@@ -51,6 +51,7 @@ const (
  )
  
  const (
@@ -10,7 +10,7 @@ index 10382ab..28cf3d2 100644
  	TypeSelector    = "selector"
  	TypeURLTest     = "urltest"
  	TypeLoadBalance = "loadbalance"
-@@ -123,6 +124,8 @@ func ProxyDisplayName(proxyType string) string {
+@@ -132,6 +133,8 @@ func ProxyDisplayName(proxyType string) string {
  		return "Selector"
  	case TypeURLTest:
  		return "URLTest"
@@ -20,10 +20,10 @@ index 10382ab..28cf3d2 100644
  		return "LoadBalance"
  	default:
 diff --git a/include/registry.go b/include/registry.go
-index d3ed42a..db20ec8 100644
+index 3d8efbd..5547761 100644
 --- a/include/registry.go
 +++ b/include/registry.go
-@@ -104,6 +104,7 @@ func OutboundRegistry() *outbound.Registry {
+@@ -106,6 +106,7 @@ func OutboundRegistry() *outbound.Registry {
  	group.RegisterSelector(registry)
  	group.RegisterURLTest(registry)
  	group.RegisterLoadBalance(registry)
@@ -49,10 +49,10 @@ index 4ee11d9..d1d5d08 100644
  	URL         string             `json:"url,omitempty"`
 diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
 new file mode 100644
-index 0000000..fe705cd
+index 0000000..b91fbcc
 --- /dev/null
 +++ b/protocol/group/fallback.go
-@@ -0,0 +1,251 @@
+@@ -0,0 +1,266 @@
 +package group
 +
 +import (
@@ -68,6 +68,7 @@ index 0000000..fe705cd
 +	"github.com/sagernet/sing-box/log"
 +	"github.com/sagernet/sing-box/option"
 +	E "github.com/sagernet/sing/common/exceptions"
++	"github.com/sagernet/sing/common"
 +	"github.com/sagernet/sing/common/logger"
 +	M "github.com/sagernet/sing/common/metadata"
 +	N "github.com/sagernet/sing/common/network"
@@ -162,6 +163,10 @@ index 0000000..fe705cd
 +	var err error
 +	for _, tag := range active {
 +		var conn net.Conn
++		if outbound := s.outbounds[tag]; outbound != nil && !common.Contains(outbound.Network(), network) {
++			// 网络不支持是配置属性而非故障：跳过且不拉黑
++			continue
++		}
 +		conn, err = s.outbounds[tag].DialContext(ctx, network, destination)
 +		if err != nil {
 +			s.logger.InfoContext(ctx, err)
@@ -205,11 +210,18 @@ index 0000000..fe705cd
 +	for _, tag := range s.tags {
 +		if !s.isBlacklisted(tag) {
 +			if outbound, ok := s.outbounds[tag]; ok {
++				// 2026-10-06：跳过不支持请求网络的成员——上游路由对解析出的
++				// 成员做网络检查，首成员不支持时整条连接直接失败，组内后续
++				// 成员永无机会（故障转移失效）
++				if !common.Contains(outbound.Network(), network) {
++					continue
++				}
 +				s.lastUsedOutbound = tag
 +				return outbound
 +			}
 +		}
 +	}
++	// 全部被拉黑或不支持：回退首成员，由上游给出明确的 not supported 错误
 +	if outbound, ok := s.outbounds[s.tags[0]]; ok {
 +		return outbound
 +	}
@@ -252,6 +264,9 @@ index 0000000..fe705cd
 +	var err error
 +	for _, tag := range active {
 +		var conn net.PacketConn
++		if outbound := s.outbounds[tag]; outbound != nil && !common.Contains(outbound.Network(), network) {
++			continue
++		}
 +		conn, err = s.outbounds[tag].ListenPacket(ctx, destination)
 +		if err != nil {
 +			s.logger.InfoContext(ctx, err)
