@@ -1443,7 +1443,7 @@ index 114e136..5c54c4a 100644
  		updateLoadBalanceURLTestHistory(g.outbound, g.history, g.tag, outbounds)
  	}
 diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
-index 7a3e1b2..a84aa68 100644
+index 7a3e1b2..1cd3e14 100644
 --- a/protocol/group/urltest.go
 +++ b/protocol/group/urltest.go
 @@ -2,6 +2,8 @@ package group
@@ -1655,7 +1655,7 @@ index 7a3e1b2..a84aa68 100644
 +	// 即时生效——与 stable 的每次 Select 语义对齐。
 +	if outbound != nil && s.autoBan != nil && s.autoBan.Blocked(RealTag(outbound, N.NetworkUDP)) {
 +		s.logger.Warn("auto_ban: cached outbound ", outbound.Tag(), " is blocked; re-selecting")
-+		outbound, _ = s.group.Select(network)
++		outbound, _ = s.group.Select(N.NetworkUDP)
 +	}
  	if outbound == nil {
  		return nil, E.New("missing supported outbound")
