@@ -49,10 +49,10 @@ index 4ee11d9..d1d5d08 100644
  	URL         string             `json:"url,omitempty"`
 diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
 new file mode 100644
-index 0000000..c6644cd
+index 00000000..48862595
 --- /dev/null
 +++ b/protocol/group/fallback.go
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,300 @@
 +package group
 +
 +import (
@@ -67,23 +67,27 @@ index 0000000..c6644cd
 +	C "github.com/sagernet/sing-box/constant"
 +	"github.com/sagernet/sing-box/log"
 +	"github.com/sagernet/sing-box/option"
-+	E "github.com/sagernet/sing/common/exceptions"
 +	"github.com/sagernet/sing/common"
++	E "github.com/sagernet/sing/common/exceptions"
 +	"github.com/sagernet/sing/common/logger"
 +	M "github.com/sagernet/sing/common/metadata"
 +	N "github.com/sagernet/sing/common/network"
 +	"github.com/sagernet/sing/service"
 +)
 +
-+// Fallback outbound group, ported verbatim from shtorm-7/sing-box-extended
++// Fallback outbound group, ported from shtorm-7/sing-box-extended
 +// (protocol/group/fallback.go) and adapted to both reF1nd branches:
-+//   - reF1nd-stable: OutboundGroup = {Now, All}; failover runs inside
-+//     DialContext/ListenPacket (dial failure -> blacklist).
++//   - reF1nd-stable: OutboundGroup = {Now, All}; the route manager dials the
++//     group directly, so failover runs inside DialContext/ListenPacket
++//     (dial failure -> blacklist). Lifecycle: the stable outbound manager
++//     starts non-Lifecycle outbounds through a plain `Start() error`
++//     interface, provided by reF1nd_Stable/fallback-group-lifecycle.patch.
 +//   - reF1nd-testing: OutboundGroup = {All, Selected, AttachConnection};
 +//     route resolves members via Selected, and chain dial failures are
 +//     reported through adapter.ConnectionFailureListener (route/conn.go
-+//     notifyConnectionFailure) -> OnConnectionFailure blacklists the member
-+//     that was last resolved/used. The superset below compiles on both.
++//     notifyConnectionFailure). The scope-based adapter.Lifecycle Start and
++//     the chain-aware failure listener (which needs testing-only chain
++//     metadata) are appended by reF1nd_Testing/fallback-group-lifecycle.patch.
 +// AttachConnection is a no-op: this group never interrupts existing
 +// connections (faithful to the upstream shtorm-7 implementation).
 +func RegisterFallback(registry *outbound.Registry) {
@@ -127,7 +131,11 @@ index 0000000..c6644cd
 +	return outbound, nil
 +}
 +
-+func (s *Fallback) Start() error {
++// start eagerly resolves the member table, failing loudly on unknown tags.
++// Called by the per-branch Start wrapper (see the file header).
++func (s *Fallback) start() error {
++	s.mtx.Lock()
++	defer s.mtx.Unlock()
 +	for i, tag := range s.tags {
 +		outbound, loaded := s.outbound.Outbound(tag)
 +		if !loaded {
@@ -136,6 +144,24 @@ index 0000000..c6644cd
 +		s.outbounds[tag] = outbound
 +	}
 +	return nil
++}
++
++// resolveMembersLocked refreshes member pointers from the outbound manager.
++// This runs on every access, not only at Start, for two reasons:
++//  1. Provider subscription updates replace same-tag outbound instances
++//     (outbound.Manager.Replace); a table built once would keep dialing
++//     the closed old instances forever.
++//  2. It lazily completes the table when Start could not resolve a member
++//     yet (e.g. a provider member registered after the group started).
++func (s *Fallback) resolveMembersLocked() {
++	if s.outbound == nil {
++		return
++	}
++	for _, tag := range s.tags {
++		if outbound, loaded := s.outbound.Outbound(tag); loaded && s.outbounds[tag] != outbound {
++			s.outbounds[tag] = outbound
++		}
++	}
 +}
 +
 +func (s *Fallback) Now() string {
@@ -150,6 +176,7 @@ index 0000000..c6644cd
 +
 +func (s *Fallback) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 +	s.mtx.Lock()
++	s.resolveMembersLocked()
 +	var active, blacklisted []string
 +	for _, tag := range s.tags {
 +		if s.isBlacklisted(tag) {
@@ -160,13 +187,16 @@ index 0000000..c6644cd
 +	}
 +	s.mtx.Unlock()
 +
-+	var err error
++	// Seed with a definite error so "no dial was ever attempted" (every
++	// member unsupported/absent and nothing blacklisted) cannot return a
++	// nil conn with a nil error — callers would treat that as success.
++	err := error(E.New("no outbound in group supports ", network))
 +	for _, tag := range active {
-+		var conn net.Conn
-+		if outbound := s.outbounds[tag]; outbound != nil && !common.Contains(outbound.Network(), network) {
-+			// 网络不支持是配置属性而非故障：跳过且不拉黑
++		if outbound := s.outbounds[tag]; outbound == nil || !common.Contains(outbound.Network(), network) {
++			// 网络不支持/成员未就绪是配置属性而非故障：跳过且不拉黑
 +			continue
 +		}
++		var conn net.Conn
 +		conn, err = s.outbounds[tag].DialContext(ctx, network, destination)
 +		if err != nil {
 +			s.logger.InfoContext(ctx, err)
@@ -185,6 +215,9 @@ index 0000000..c6644cd
 +		return conn, nil
 +	}
 +	for _, tag := range blacklisted {
++		if outbound := s.outbounds[tag]; outbound == nil || !common.Contains(outbound.Network(), network) {
++			continue
++		}
 +		var conn net.Conn
 +		conn, err = s.outbounds[tag].DialContext(ctx, network, destination)
 +		if err != nil {
@@ -200,28 +233,38 @@ index 0000000..c6644cd
 +	return nil, err
 +}
 +
-+// Selected returns the first non-blacklisted outbound in configured order;
-+// when every tag is blacklisted it degrades to the first configured tag
-+// (the last-resort pass in DialContext will still try blacklisted tags).
-+// Only used by the reF1nd-testing routing model.
++// Selected returns the first non-blacklisted outbound in configured order.
++// Only used by the reF1nd-testing routing model (resolveOutbound).
 +func (s *Fallback) Selected(network string) adapter.Outbound {
 +	s.mtx.Lock()
 +	defer s.mtx.Unlock()
++	s.resolveMembersLocked()
 +	for _, tag := range s.tags {
-+		if !s.isBlacklisted(tag) {
-+			if outbound, ok := s.outbounds[tag]; ok {
-+				// 2026-10-06：跳过不支持请求网络的成员——上游路由对解析出的
-+				// 成员做网络检查，首成员不支持时整条连接直接失败，组内后续
-+				// 成员永无机会（故障转移失效）
-+				if !common.Contains(outbound.Network(), network) {
-+					continue
-+				}
-+				s.lastUsedOutbound = tag
-+				return outbound
++		if s.isBlacklisted(tag) {
++			continue
++		}
++		if outbound, ok := s.outbounds[tag]; ok {
++			// 2026-10-06：跳过不支持请求网络的成员——上游路由对解析出的
++			// 成员做网络检查，首成员不支持时整条连接直接失败，组内后续
++			// 成员永无机会（故障转移失效）
++			if !common.Contains(outbound.Network(), network) {
++				continue
 +			}
++			s.lastUsedOutbound = tag
++			return outbound
 +		}
 +	}
-+	// 全部被拉黑或不支持：回退首成员，由上游给出明确的 not supported 错误
++	// 2026-10-07：全部成员被拉黑或不支持时，原实现固定回退 tags[0]——若其
++	// 不支持请求网络，即使存在支持该网络（虽被拉黑）的成员，连接也会在上游
++	// 的网络检查处失败。第二遍忽略黑名单、仅要求网络支持，与 DialContext
++	// 的兜底轮语义对齐：黑名单是偏好，不是硬过滤。
++	for _, tag := range s.tags {
++		if outbound, ok := s.outbounds[tag]; ok && common.Contains(outbound.Network(), network) {
++			s.lastUsedOutbound = tag
++			return outbound
++		}
++	}
++	// 全部成员都不支持请求网络：回退首成员，由上游给出明确的 not supported 错误
 +	if outbound, ok := s.outbounds[s.tags[0]]; ok {
 +		return outbound
 +	}
@@ -235,22 +278,9 @@ index 0000000..c6644cd
 +	return func() {}
 +}
 +
-+// OnConnectionFailure satisfies adapter.ConnectionFailureListener on
-+// reF1nd-testing (notified by route/conn.go notifyConnectionFailure for
-+// every element of the dial chain). The member resolved most recently is
-+// blacklisted; under concurrent dials this may transiently mislabel a
-+// healthy member, which the blacklist timeout (default 1m) and the
-+// last-resort pass self-heal — same tolerance as the original semantics.
-+func (s *Fallback) OnConnectionFailure(context.Context) {
-+	s.mtx.Lock()
-+	defer s.mtx.Unlock()
-+	if tag := s.lastUsedOutbound; tag != "" {
-+		s.addToBlacklist(tag)
-+	}
-+}
-+
 +func (s *Fallback) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 +	s.mtx.Lock()
++	s.resolveMembersLocked()
 +	var active, blacklisted []string
 +	for _, tag := range s.tags {
 +		if s.isBlacklisted(tag) {
@@ -261,12 +291,13 @@ index 0000000..c6644cd
 +	}
 +	s.mtx.Unlock()
 +
-+	var err error
++	// See DialContext: never return a nil PacketConn with a nil error.
++	err := error(E.New("no outbound in group supports ", N.NetworkUDP))
 +	for _, tag := range active {
-+		var conn net.PacketConn
-+		if outbound := s.outbounds[tag]; outbound != nil && !common.Contains(outbound.Network(), N.NetworkUDP) {
++		if outbound := s.outbounds[tag]; outbound == nil || !common.Contains(outbound.Network(), N.NetworkUDP) {
 +			continue
 +		}
++		var conn net.PacketConn
 +		conn, err = s.outbounds[tag].ListenPacket(ctx, destination)
 +		if err != nil {
 +			s.logger.InfoContext(ctx, err)
@@ -284,6 +315,9 @@ index 0000000..c6644cd
 +		return conn, nil
 +	}
 +	for _, tag := range blacklisted {
++		if outbound := s.outbounds[tag]; outbound == nil || !common.Contains(outbound.Network(), N.NetworkUDP) {
++			continue
++		}
 +		var conn net.PacketConn
 +		conn, err = s.outbounds[tag].ListenPacket(ctx, destination)
 +		if err != nil {

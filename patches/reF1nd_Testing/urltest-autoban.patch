@@ -1,5 +1,5 @@
 diff --git a/daemon/started_service.go b/daemon/started_service.go
-index 851b4c8..a065848 100644
+index 851b4c8c..a0658485 100644
 --- a/daemon/started_service.go
 +++ b/daemon/started_service.go
 @@ -740,7 +740,7 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
@@ -12,7 +12,7 @@ index 851b4c8..a065848 100644
  		go func() {
  			t, err := urltest.URLTest(boxService.ctx, "", outbound)
 diff --git a/experimental/clashapi/api_meta_group.go b/experimental/clashapi/api_meta_group.go
-index 7103665..0c29d3f 100644
+index 7103665f..0c29d3f5 100644
 --- a/experimental/clashapi/api_meta_group.go
 +++ b/experimental/clashapi/api_meta_group.go
 @@ -89,7 +89,7 @@ func getGroupDelay(server *Server) func(w http.ResponseWriter, r *http.Request)
@@ -25,7 +25,7 @@ index 7103665..0c29d3f 100644
  
  		if err != nil {
 diff --git a/option/group.go b/option/group.go
-index d1d5d08..19c8e53 100644
+index 4ee11d9f..b68f0aca 100644
 --- a/option/group.go
 +++ b/option/group.go
 @@ -16,6 +16,54 @@ type URLTestOutboundOptions struct {
@@ -56,7 +56,7 @@ index d1d5d08..19c8e53 100644
 +	// Multi-target 204 probe URLs. Defaults to domestic + international
 +	// endpoints when empty.
 +	ProbeURLs []string `json:"probe_urls,omitempty"`
-+	// Pre-flight probe timeout (default "5s").
++	// Pre-flight probe timeout (default "3s").
 +	ProbeTimeout badoption.Duration `json:"probe_timeout,omitempty"`
 +	// Active recovery scan interval (default "1m").
 +	RecoveryInterval badoption.Duration `json:"recovery_interval,omitempty"`
@@ -85,10 +85,10 @@ index d1d5d08..19c8e53 100644
  type GroupCommonOption struct {
 diff --git a/protocol/group/autoban.go b/protocol/group/autoban.go
 new file mode 100644
-index 0000000..aa8902a
+index 00000000..fb3b773d
 --- /dev/null
 +++ b/protocol/group/autoban.go
-@@ -0,0 +1,1344 @@
+@@ -0,0 +1,1357 @@
 +package group
 +
 +import (
@@ -1053,7 +1053,17 @@ index 0000000..aa8902a
 +		if !a.lastSweepAt.IsZero() && time.Since(a.lastSweepAt) > time.Hour {
 +			// Wall-clock catch-up after Android Doze / suspend: if we clearly
 +			// missed a scheduled exam, run one immediately.
-+			a.runScheduledSweep()
++			if a.runScheduledSweep() {
++				continue
++			}
++			// The sweep did not run (network unhealthy or another probe
++			// still in flight): back off before retrying, otherwise this
++			// catch-up branch busy-spins while the network is down.
++			select {
++			case <-a.closed:
++				return
++			case <-time.After(a.recoveryInterval + jitterDuration(a.recoveryInterval)):
++			}
 +			continue
 +		}
 +		next := a.nextCheckTime(time.Now())
@@ -1102,28 +1112,31 @@ index 0000000..aa8902a
 +
 +// runScheduledSweep probes ALL current nodes at the configured check_times,
 +// bypassing backoff so a good node that was hit by evening congestion can be
-+// vindicated in the next morning's global exam.
-+func (a *AutoBan) runScheduledSweep() {
++// vindicated in the next morning's global exam. It reports whether a sweep
++// actually ran so callers can back off instead of busy-looping while the
++// network is down.
++func (a *AutoBan) runScheduledSweep() bool {
 +	if a.testFunc == nil || a.allTagsFunc == nil {
-+		return
++		return false
 +	}
 +	if !a.lastSweepAt.IsZero() && time.Since(a.lastSweepAt) < time.Minute {
-+		return
++		return false
 +	}
 +	if !a.checking.CompareAndSwap(false, true) {
-+		return
++		return false
 +	}
 +	defer a.checking.Store(false)
 +
 +	if !a.isNetworkHealthy() {
-+		return
++		return false
 +	}
 +	a.lastSweepAt = time.Now()
 +	tags := a.allTagsFunc()
 +	if len(tags) == 0 {
-+		return
++		return true
 +	}
 +	a.probeTags(tags)
++	return true
 +}
 +
 +type autoBanStateV3 struct {
@@ -1434,7 +1447,7 @@ index 0000000..aa8902a
 +	return time.Duration(rand.Int63n(int64(maxJitter)))
 +}
 diff --git a/protocol/group/loadbalance.go b/protocol/group/loadbalance.go
-index 114e136..5c54c4a 100644
+index 114e1363..5c54c4a0 100644
 --- a/protocol/group/loadbalance.go
 +++ b/protocol/group/loadbalance.go
 @@ -493,7 +493,7 @@ func (g *LoadBalanceGroup) urlTestWait(ctx context.Context, force bool) (map[str
@@ -1446,8 +1459,21 @@ index 114e136..5c54c4a 100644
  	if g.tag != "" {
  		updateLoadBalanceURLTestHistory(g.outbound, g.history, g.tag, outbounds)
  	}
+diff --git a/protocol/group/loadbalance_urltest_test.go b/protocol/group/loadbalance_urltest_test.go
+index 58bf2676..e1e68d26 100644
+--- a/protocol/group/loadbalance_urltest_test.go
++++ b/protocol/group/loadbalance_urltest_test.go
+@@ -124,7 +124,7 @@ func TestURLTestTriggersNestedLoadBalance(t *testing.T) {
+ 	manager.outbounds[leafTwo.tag] = leafTwo
+ 	manager.outbounds[nested.Tag()] = nested
+ 
+-	result := URLTestOutbounds(context.Background(), manager, history, log.NewNOPFactory().Logger(), []adapter.Outbound{nested}, outerServer.URL, time.Hour, true)
++	result := URLTestOutbounds(context.Background(), manager, history, log.NewNOPFactory().Logger(), []adapter.Outbound{nested}, outerServer.URL, time.Hour, true, nil)
+ 
+ 	require.Zero(t, outerRequests.Load())
+ 	require.EqualValues(t, 2, nestedRequests.Load())
 diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
-index 7a3e1b2..b10ac34 100644
+index 7a3e1b2b..c97e53b3 100644
 --- a/protocol/group/urltest.go
 +++ b/protocol/group/urltest.go
 @@ -2,6 +2,8 @@ package group
@@ -1796,7 +1822,7 @@ index 7a3e1b2..b10ac34 100644
 +		}
 +	}
 +	if bestAvailable != nil {
-+		return bestAvailable, false
++		return bestAvailable, true
 +	}
 +	if len(blockedCandidates) > 0 {
 +		// Round-robin across blocked nodes so a single dead last-resort node
@@ -1806,7 +1832,7 @@ index 7a3e1b2..b10ac34 100644
 +		if g.autoBan != nil {
 +			g.logger.Warn("auto_ban: no available outbound, last-resort fallback to blocked outbound ", bestBlocked.Tag())
 +		}
-+		return bestBlocked, false
++		return bestBlocked, true
 +	}
 +	return nil, false
 +}
@@ -1909,3 +1935,25 @@ index 7a3e1b2..b10ac34 100644
  					b.access.Lock()
  					b.result[tag] = testResult.delay
  					b.access.Unlock()
+diff --git a/protocol/group/urltest_recursive_test.go b/protocol/group/urltest_recursive_test.go
+index dcef4425..3ffb0877 100644
+--- a/protocol/group/urltest_recursive_test.go
++++ b/protocol/group/urltest_recursive_test.go
+@@ -37,7 +37,7 @@ func TestURLTestDeduplicatesSameLeafAndURLAcrossNestedGroups(t *testing.T) {
+ 	manager.outbounds[firstGroup.Tag()] = firstGroup
+ 	manager.outbounds[secondGroup.Tag()] = secondGroup
+ 
+-	result := URLTestOutbounds(context.Background(), manager, history, log.NewNOPFactory().Logger(), []adapter.Outbound{firstGroup, secondGroup}, "", time.Hour, true)
++	result := URLTestOutbounds(context.Background(), manager, history, log.NewNOPFactory().Logger(), []adapter.Outbound{firstGroup, secondGroup}, "", time.Hour, true, nil)
+ 
+ 	require.EqualValues(t, 1, leaf.dialCount.Load())
+ 	require.EqualValues(t, 1, requests.Load())
+@@ -69,7 +69,7 @@ func TestURLTestDoesNotDeduplicateDifferentURLs(t *testing.T) {
+ 	manager.outbounds[firstGroup.Tag()] = firstGroup
+ 	manager.outbounds[secondGroup.Tag()] = secondGroup
+ 
+-	URLTestOutbounds(context.Background(), manager, history, log.NewNOPFactory().Logger(), []adapter.Outbound{firstGroup, secondGroup}, "", time.Hour, true)
++	URLTestOutbounds(context.Background(), manager, history, log.NewNOPFactory().Logger(), []adapter.Outbound{firstGroup, secondGroup}, "", time.Hour, true, nil)
+ 
+ 	require.EqualValues(t, 2, leaf.dialCount.Load())
+ 	require.EqualValues(t, 1, firstRequests.Load())

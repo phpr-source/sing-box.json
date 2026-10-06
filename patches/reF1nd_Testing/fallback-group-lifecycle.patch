@@ -1,0 +1,59 @@
+diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
+index 48862595..2910c47d 100644
+--- a/protocol/group/fallback.go
++++ b/protocol/group/fallback.go
+@@ -298,3 +298,54 @@ func (s *Fallback) addToBlacklist(tag string) {
+ 		s.blacklist[tag] = time.Now().Add(s.blacklistTimeout)
+ 	}
+ }
++
++// Start implements adapter.Lifecycle (scope-based lifecycle, reF1nd-testing
++// outbound manager). The stage guard matches upstream groups: the member
++// table is resolved at StartStateStart, when all members have started.
++func (s *Fallback) Start(stage adapter.StartStage, scope *adapter.Scope) error {
++	if stage != adapter.StartStateStart {
++		return nil
++	}
++	return s.start()
++}
++
++// OnConnectionFailure implements adapter.ConnectionFailureListener, notified
++// by route/conn.go notifyConnectionFailure for every element of a resolved
++// chain whose dial failed.
++func (s *Fallback) OnConnectionFailure(ctx context.Context) {
++	if ctx.Err() != nil {
++		// 客户端侧取消/超时：失败归因于本端而非节点——不拉黑
++		//（与 DialContext 的取消守卫同型）
++		return
++	}
++	// 精确归因：notifyConnectionFailure 携带本连接的解析链（OutboundChain），
++	// 紧随本组之后的元素就是本次拨号失败的成员。并发拨号下不再依赖
++	// lastUsedOutbound 的"最近解析"启发式，消除误标窗口。
++	if metadata := adapter.ContextFrom(ctx); metadata != nil {
++		for i, chainOutbound := range metadata.OutboundChain {
++			if chainOutbound != adapter.Outbound(s) {
++				continue
++			}
++			if i+1 < len(metadata.OutboundChain) {
++				if failed := metadata.OutboundChain[i+1]; failed != nil {
++					s.mtx.Lock()
++					for _, tag := range s.tags {
++						if s.outbounds[tag] == failed {
++							s.addToBlacklist(tag)
++							break
++						}
++					}
++					s.mtx.Unlock()
++				}
++			}
++			return
++		}
++	}
++	// 兜底（detour 链或缺失链元数据）：拉黑最近解析的成员。并发窗口的短暂
++	// 误标由黑名单超时与 DialContext 的兜底轮自愈——与原语义相同的容忍度。
++	s.mtx.Lock()
++	defer s.mtx.Unlock()
++	if tag := s.lastUsedOutbound; tag != "" {
++		s.addToBlacklist(tag)
++	}
++}
