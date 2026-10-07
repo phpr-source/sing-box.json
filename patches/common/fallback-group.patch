@@ -49,10 +49,10 @@ index 4ee11d9..d1d5d08 100644
  	URL         string             `json:"url,omitempty"`
 diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
 new file mode 100644
-index 00000000..48862595
+index 00000000..52232b94
 --- /dev/null
 +++ b/protocol/group/fallback.go
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,309 @@
 +package group
 +
 +import (
@@ -116,6 +116,9 @@ index 00000000..48862595
 +	blacklistTimeout := time.Duration(options.BlacklistTimeout)
 +	if blacklistTimeout == 0 {
 +		blacklistTimeout = time.Minute
++	}
++	if blacklistTimeout < 0 {
++		return nil, E.New("blacklist_timeout must not be negative")
 +	}
 +	outbound := &Fallback{
 +		Adapter:          outbound.NewAdapter(C.TypeFallback, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.Outbounds),
@@ -187,10 +190,7 @@ index 00000000..48862595
 +	}
 +	s.mtx.Unlock()
 +
-+	// Seed with a definite error so "no dial was ever attempted" (every
-+	// member unsupported/absent and nothing blacklisted) cannot return a
-+	// nil conn with a nil error — callers would treat that as success.
-+	err := error(E.New("no outbound in group supports ", network))
++	var err error // last dial failure; nil while no dial has been attempted
 +	for _, tag := range active {
 +		if outbound := s.outbounds[tag]; outbound == nil || !common.Contains(outbound.Network(), network) {
 +			// 网络不支持/成员未就绪是配置属性而非故障：跳过且不拉黑
@@ -229,6 +229,12 @@ index 00000000..48862595
 +		s.lastUsedOutbound = tag
 +		s.mtx.Unlock()
 +		return conn, nil
++	}
++	if err == nil {
++		// No dial was ever attempted (every member unsupported/absent and
++		// nothing blacklisted): never return a nil conn with a nil error —
++		// callers would treat that as success.
++		err = E.New("no outbound in group supports ", network)
 +	}
 +	return nil, err
 +}
@@ -291,8 +297,7 @@ index 00000000..48862595
 +	}
 +	s.mtx.Unlock()
 +
-+	// See DialContext: never return a nil PacketConn with a nil error.
-+	err := error(E.New("no outbound in group supports ", N.NetworkUDP))
++	var err error // last dial failure; nil while no dial has been attempted
 +	for _, tag := range active {
 +		if outbound := s.outbounds[tag]; outbound == nil || !common.Contains(outbound.Network(), N.NetworkUDP) {
 +			continue
@@ -329,6 +334,10 @@ index 00000000..48862595
 +		s.lastUsedOutbound = tag
 +		s.mtx.Unlock()
 +		return conn, nil
++	}
++	if err == nil {
++		// See DialContext: never return a nil PacketConn with a nil error.
++		err = E.New("no outbound in group supports ", N.NetworkUDP)
 +	}
 +	return nil, err
 +}

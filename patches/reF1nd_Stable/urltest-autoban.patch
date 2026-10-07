@@ -85,10 +85,10 @@ index 4ee11d9f..b68f0aca 100644
  type GroupCommonOption struct {
 diff --git a/protocol/group/autoban.go b/protocol/group/autoban.go
 new file mode 100644
-index 00000000..6fea6bd7
+index 00000000..1d225839
 --- /dev/null
 +++ b/protocol/group/autoban.go
-@@ -0,0 +1,1357 @@
+@@ -0,0 +1,1364 @@
 +package group
 +
 +import (
@@ -135,6 +135,11 @@ index 00000000..6fea6bd7
 +type AutoBan struct {
 +	access sync.RWMutex
 +	ctx    context.Context
++
++	// writeMu serializes state-file writes: two flushes (a debounced timer
++	// and a Close flush) could otherwise interleave and let the older
++	// snapshot land after the newer one, briefly rolling the file back.
++	writeMu sync.Mutex
 +
 +	nodes     map[string]*nodeState
 +	threshold int // hard consecutive-failure threshold
@@ -1297,6 +1302,8 @@ index 00000000..6fea6bd7
 +// writeStateSnapshot performs JSON serialization and atomic file write without
 +// holding any AutoBan lock.
 +func (a *AutoBan) writeStateSnapshot(state autoBanStateV3) {
++	a.writeMu.Lock()
++	defer a.writeMu.Unlock()
 +	content, err := json.MarshalIndent(state, "", "  ")
 +	if err != nil {
 +		return
