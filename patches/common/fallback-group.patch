@@ -49,10 +49,10 @@ index 4ee11d9..d1d5d08 100644
  	URL         string             `json:"url,omitempty"`
 diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
 new file mode 100644
-index 00000000..52232b94
+index 00000000..f2eb76a8
 --- /dev/null
 +++ b/protocol/group/fallback.go
-@@ -0,0 +1,309 @@
+@@ -0,0 +1,321 @@
 +package group
 +
 +import (
@@ -161,8 +161,14 @@ index 00000000..52232b94
 +		return
 +	}
 +	for _, tag := range s.tags {
-+		if outbound, loaded := s.outbound.Outbound(tag); loaded && s.outbounds[tag] != outbound {
-+			s.outbounds[tag] = outbound
++		if outbound, loaded := s.outbound.Outbound(tag); loaded {
++			if s.outbounds[tag] != outbound {
++				s.outbounds[tag] = outbound
++			}
++		} else if s.outbounds[tag] != nil {
++			// 成员已从 manager 移除（provider 订阅更新删除节点）：丢弃已关闭
++			// 的陈旧实例，让 nil 守卫按"未就绪"跳过，而不是永远拨打死实例
++			delete(s.outbounds, tag)
 +		}
 +	}
 +}
@@ -361,4 +367,10 @@ index 00000000..52232b94
 +	if s.blacklistTimeout > 0 {
 +		s.blacklist[tag] = time.Now().Add(s.blacklistTimeout)
 +	}
++}
++
++// Start implements the plain-starter interface the reF1nd-stable outbound
++// manager honors for outbounds that are not adapter.Lifecycle.
++func (s *Fallback) Start() error {
++	return s.start()
 +}

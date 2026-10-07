@@ -1523,7 +1523,7 @@ index 03f1788d..f7c5efa4 100644
  	require.Zero(t, outerRequests.Load())
  	require.EqualValues(t, 2, nestedRequests.Load())
 diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
-index 9ed80c20..b8d8117f 100644
+index 9ed80c20..120bb974 100644
 --- a/protocol/group/urltest.go
 +++ b/protocol/group/urltest.go
 @@ -2,6 +2,8 @@ package group
@@ -1730,7 +1730,21 @@ index 9ed80c20..b8d8117f 100644
  func (s *URLTest) SelectPreMatchOutbound(metadata *adapter.InboundContext, selectOutbound func(adapter.Outbound) (adapter.Outbound, adapter.PreMatchAction)) (adapter.Outbound, adapter.PreMatchAction) {
  	s.group.Touch()
  	network := metadata.Network
-@@ -351,8 +506,11 @@ type URLTestGroup struct {
+@@ -197,6 +352,13 @@ func (s *URLTest) SelectPreMatchOutbound(metadata *adapter.InboundContext, selec
+ 	if selectedOutbound == nil {
+ 		selectedOutbound, _ = s.group.Select(network)
+ 	}
++	// 2026-10-07：缓存选中可能已被恢复循环拉黑（缓存仅在被动巡检周期刷新），
++	// 复查 Blocked 并回退 Select（内含过滤），与 testing 的 Selected 包装层
++	// （round-16）及 stable 拨号路径语义对齐。
++	if selectedOutbound != nil && s.autoBan != nil && s.autoBan.Blocked(RealTag(s.outbound, selectedOutbound)) {
++		s.logger.Warn("auto_ban: cached outbound ", selectedOutbound.Tag(), " is blocked; re-selecting")
++		selectedOutbound, _ = s.group.Select(network)
++	}
+ 	return selectOutbound(selectedOutbound)
+ }
+ 
+@@ -351,8 +513,11 @@ type URLTestGroup struct {
  	close                        chan struct{}
  	started                      atomic.Bool
  	lastActive                   common.TypedValue[time.Time]
@@ -1742,7 +1756,7 @@ index 9ed80c20..b8d8117f 100644
  }
  
  func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, fallback URLTestFallback, interruptExternalConnections bool) (*URLTestGroup, error) {
-@@ -434,11 +592,33 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -434,11 +599,33 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  	var minOutbound adapter.Outbound
  	var fallbackIgnoreOutboundDelay uint16
  	var fallbackIgnoreOutbound adapter.Outbound
@@ -1777,7 +1791,7 @@ index 9ed80c20..b8d8117f 100644
  				if history := g.history.LoadURLTestHistory(RealTag(g.outbound, selectedOutbound)); history != nil {
  					minOutbound = selectedOutbound
  					minDelay = history.Delay
-@@ -446,7 +626,10 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -446,7 +633,10 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  			}
  		case N.NetworkUDP:
  			selectedOutbound := g.selectedOutboundUDP.Load()
@@ -1789,7 +1803,7 @@ index 9ed80c20..b8d8117f 100644
  				if history := g.history.LoadURLTestHistory(RealTag(g.outbound, selectedOutbound)); history != nil {
  					minOutbound = selectedOutbound
  					minDelay = history.Delay
-@@ -456,7 +639,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -456,7 +646,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  	}
  	outbounds := g.loadOutbounds()
  	for _, detour := range outbounds {
@@ -1798,7 +1812,7 @@ index 9ed80c20..b8d8117f 100644
  			continue
  		}
  		history := g.history.LoadURLTestHistory(RealTag(g.outbound, detour))
-@@ -488,17 +671,69 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -488,17 +678,69 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  		return fallbackIgnoreOutbound, true
  	}
  	if minOutbound == nil {
@@ -1873,7 +1887,7 @@ index 9ed80c20..b8d8117f 100644
  func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{}) {
  	if time.Since(g.lastActive.Load()) > g.interval {
  		g.lastActive.Store(time.Now())
-@@ -549,7 +784,25 @@ func (g *URLTestGroup) urlTestWait(ctx context.Context, force bool) (map[string]
+@@ -549,7 +791,25 @@ func (g *URLTestGroup) urlTestWait(ctx context.Context, force bool) (map[string]
  
  func (g *URLTestGroup) urlTestLocked(ctx context.Context, force bool) (map[string]uint16, error) {
  	ctx = urltest.ContextWithUnifiedDelay(ctx, urltest.UnifiedDelayFromContext(g.ctx))
@@ -1900,7 +1914,7 @@ index 9ed80c20..b8d8117f 100644
  	select {
  	case <-ctx.Done():
  	default:
-@@ -617,30 +870,32 @@ func (s *urlTestSession) test(ctx context.Context, key urlTestSessionKey, test f
+@@ -617,30 +877,32 @@ func (s *urlTestSession) test(ctx context.Context, key urlTestSessionKey, test f
  }
  
  type urlTestBatch struct {
@@ -1954,7 +1968,7 @@ index 9ed80c20..b8d8117f 100644
  	}
  	testBatch.test(outbounds, link, interval, force)
  	b.Wait()
-@@ -705,12 +960,18 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval
+@@ -705,12 +967,18 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval
  					}
  					b.logger.Debug("outbound ", tag, " unavailable: ", testResult.err)
  					b.history.DeleteURLTestHistory(tag)
