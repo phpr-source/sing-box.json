@@ -49,10 +49,10 @@ index 4ee11d9..d1d5d08 100644
  	URL         string             `json:"url,omitempty"`
 diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
 new file mode 100644
-index 00000000..f2eb76a8
+index 00000000..08b68ec2
 --- /dev/null
 +++ b/protocol/group/fallback.go
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,315 @@
 +package group
 +
 +import (
@@ -367,10 +367,4 @@ index 00000000..f2eb76a8
 +	if s.blacklistTimeout > 0 {
 +		s.blacklist[tag] = time.Now().Add(s.blacklistTimeout)
 +	}
-+}
-+
-+// Start implements the plain-starter interface the reF1nd-stable outbound
-+// manager honors for outbounds that are not adapter.Lifecycle.
-+func (s *Fallback) Start() error {
-+	return s.start()
 +}
