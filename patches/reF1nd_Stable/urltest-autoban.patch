@@ -68,10 +68,10 @@ index 7103665f..0c29d3f5 100644
  
  		if err != nil {
 diff --git a/option/group.go b/option/group.go
-index 4ee11d9f..b68f0aca 100644
+index e6310ef5..3dfa1bb4 100644
 --- a/option/group.go
 +++ b/option/group.go
-@@ -16,6 +16,54 @@ type URLTestOutboundOptions struct {
+@@ -16,6 +16,55 @@ type URLTestOutboundOptions struct {
  	IdleTimeout               badoption.Duration     `json:"idle_timeout,omitempty"`
  	InterruptExistConnections bool                   `json:"interrupt_exist_connections,omitempty"`
  	Fallback                  URLTestFallbackOptions `json:"fallback,omitempty"`
@@ -89,7 +89,8 @@ index 4ee11d9f..b68f0aca 100644
 +	// Consecutive failures after which a node is forced into banned/low-health
 +	// state (default 5).
 +	FailThreshold int `json:"fail_threshold,omitempty"`
-+	// Deprecated: kept for compatibility. v3 uses EWMA time decay instead.
++	// How long a failed node stays Striked (temporarily excluded) before it
++	// may be re-selected. Ban and recover decisions are score-based (EWMA).
 +	FailCooldown badoption.Duration `json:"fail_cooldown,omitempty"`
 +	// State file path, resolved by filemanager. Default is derived per group
 +	// ("autoban_<safe_tag>_<hash>.json") so multiple groups never share state.
@@ -128,10 +129,10 @@ index 4ee11d9f..b68f0aca 100644
  type GroupCommonOption struct {
 diff --git a/protocol/group/autoban.go b/protocol/group/autoban.go
 new file mode 100644
-index 00000000..1d225839
+index 00000000..e82a8c5a
 --- /dev/null
 +++ b/protocol/group/autoban.go
-@@ -0,0 +1,1364 @@
+@@ -0,0 +1,1487 @@
 +package group
 +
 +import (
@@ -182,7 +183,15 @@ index 00000000..1d225839
 +	// writeMu serializes state-file writes: two flushes (a debounced timer
 +	// and a Close flush) could otherwise interleave and let the older
 +	// snapshot land after the newer one, briefly rolling the file back.
-+	writeMu sync.Mutex
++	// Serialization alone is not enough, because flush() releases access
++	// before the file I/O: lastWrittenRev makes writeStateSnapshot drop any
++	// payload older than the newest one that already reached the disk.
++	writeMu        sync.Mutex
++	lastWrittenRev uint64
++
++	// snapshotSeq numbers every snapshot taken under access, so
++	// writeStateSnapshot can tell which payload is newer.
++	snapshotSeq uint64
 +
 +	nodes     map[string]*nodeState
 +	threshold int // hard consecutive-failure threshold
@@ -233,6 +242,10 @@ index 00000000..1d225839
 +	cooldown         time.Duration
 +	summaryMu        sync.Mutex
 +	lastSummaryAt    time.Time
++
++	// probing guards the single in-flight pre-flight probe; see
++	// isNetworkHealthy.
++	probing bool
 +}
 +
 +type nodeState struct {
@@ -309,10 +322,14 @@ index 00000000..1d225839
 +	massFailWindow                 = 2 * time.Minute
 +	massFailMinSamplesFloor        = 3
 +	massFailRatio                  = 0.8
-+	defaultAutoBanNeutralScore     = 80.0
-+	defaultAutoBanInitialScore     = 100.0
-+	defaultAutoBanSuccessAlpha     = 0.3
-+	defaultAutoBanFailureAlpha     = 0.4
++	// maxRecentResults bounds the sample window independently of massFailWindow:
++	// a large group probed in a tight loop appends far more samples than the
++	// 2 minute age window ever drops.
++	maxRecentResults           = 4096
++	defaultAutoBanNeutralScore = 80.0
++	defaultAutoBanInitialScore = 100.0
++	defaultAutoBanSuccessAlpha = 0.3
++	defaultAutoBanFailureAlpha = 0.4
 +)
 +
 +var defaultAutoBanProbeURLs = []string{
@@ -325,6 +342,15 @@ index 00000000..1d225839
 +	// 竞速语义下中国大陆用户不受影响。
 +	"https://cp.cloudflare.com/generate_204",
 +}
++
++// Score-space bounds keeping the ban/recover thresholds coherent.
++const (
++	defaultAutoBanMaxScore     = 100.0
++	defaultAutoBanThresholdGap = 20.0
++	// A ban threshold above this leaves no room for the mandatory recover
++	// gap, which would make recovery unreachable.
++	defaultAutoBanMaxBanThreshold = defaultAutoBanMaxScore - defaultAutoBanThresholdGap
++)
 +
 +func NewAutoBan(ctx context.Context, options AutoBanOptions) *AutoBan {
 +	if options.Threshold <= 0 {
@@ -353,8 +379,19 @@ index 00000000..1d225839
 +	if recoverThreshold <= 0 {
 +		recoverThreshold = defaultAutoBanRecoverThreshold
 +	}
++	// Scores live in [0,100], so an out-of-range threshold makes the state
++	// machine incoherent: ban_threshold > 100 bans every node on its first
++	// evaluation (score < threshold is always true) while the derived
++	// recover_threshold > 100 can never be reached, leaving the whole
++	// subscription banned forever. Clamp into range and keep the gap.
++	if banThreshold > defaultAutoBanMaxBanThreshold {
++		banThreshold = defaultAutoBanMaxBanThreshold
++	}
 +	if recoverThreshold <= banThreshold {
-+		recoverThreshold = banThreshold + 20
++		recoverThreshold = banThreshold + defaultAutoBanThresholdGap
++	}
++	if recoverThreshold > defaultAutoBanMaxScore {
++		recoverThreshold = defaultAutoBanMaxScore
 +	}
 +	recoverSuccesses := options.RecoverSuccesses
 +	if recoverSuccesses <= 0 {
@@ -442,6 +479,7 @@ index 00000000..1d225839
 +// ensureHTTPClient lazily creates the protected HTTP client. Construction is
 +// deferred until first use because NetworkManager may not be injected into the
 +// service context when NewAutoBan is called during early startup.
++// Caller must hold a.healthMu.
 +func (a *AutoBan) ensureHTTPClient() {
 +	if a.httpClient == nil {
 +		a.httpClient = newProtectedHTTPClient(a.ctx, a.probeTimeout)
@@ -454,8 +492,8 @@ index 00000000..1d225839
 +		if a.logger != nil && a.threshold > 3 {
 +			a.logger.Warn("auto_ban: fail_threshold=", a.threshold, " but score-based ban may trigger earlier; consider fail_threshold<=3 or adjust ban_threshold/recover_threshold")
 +		}
-+		if a.logger != nil && a.cooldown > 0 {
-+			a.logger.Warn("auto_ban: fail_cooldown is set but deprecated; v3 uses EWMA time decay and ignores this option")
++		if a.logger != nil && a.cooldown != defaultAutoBanStrikeCooldown {
++			a.logger.Info("auto_ban: fail_cooldown=", a.cooldown, " controls how long a failed node stays Striked before it may be re-selected; ban and recover decisions are score-based (EWMA decay)")
 +		}
 +		go a.recoveryLoop()
 +		if len(a.times) > 0 {
@@ -649,8 +687,11 @@ index 00000000..1d225839
 +		return false
 +	}
 +	// Temporary strike cooldown: an old single failure should not permanently
-+	// block a node across restarts or long idle periods.
-+	if a.cooldown > 0 && time.Since(n.LastFailAt) > a.cooldown {
++	// block a node across restarts or long idle periods. It only applies to a
++	// node that has proven itself at least once: a node that has NEVER succeeded
++	// must not be released back into selection just because probing paused
++	// (Android Doze / backgrounded app) long enough for the cooldown to lapse.
++	if a.cooldown > 0 && !n.LastSuccessAt.IsZero() && time.Since(n.LastFailAt) > a.cooldown {
 +		return false
 +	}
 +	if !n.LastSuccessAt.IsZero() && n.LastSuccessAt.After(n.LastFailAt) {
@@ -720,11 +761,25 @@ index 00000000..1d225839
 +		n.NextProbeAt = time.Time{}
 +	} else if a.massFailureLocked(now) {
 +		// Mass environment failure (GFW/QoS/network switch): mark the node
-+		// temporarily Striked but do NOT advance ban score/backoff. This prevents
-+		// a whole subscription from being permanently banned during an outage.
++		// temporarily Striked and exempt it from the ban score, so a whole
++		// subscription is not permanently banned during an outage.
++		//
++		// The backoff is still advanced: a node that keeps failing is still
++		// failing. Freezing NextProbeAt would make runRecoveryRound treat it
++		// as due on every round -- probing the whole subscription at full
++		// speed for the entire outage and never reaching max_backoff.
 +		n.LastFailAt = now
 +		n.LastProbeAt = now
 +		n.ConsecutiveSuccesses = 0
++		if n.Backoff <= 0 {
++			n.Backoff = a.initialBackoff
++		} else {
++			n.Backoff *= 2
++			if n.Backoff > a.maxBackoff {
++				n.Backoff = a.maxBackoff
++			}
++		}
++		n.NextProbeAt = now.Add(n.Backoff + jitterDuration(n.Backoff))
 +	} else {
 +		n.ConsecutiveFails++
 +		penalty := defaultAutoBanFailureAlpha * (1 + 0.25*float64(n.ConsecutiveFails-1))
@@ -836,6 +891,10 @@ index 00000000..1d225839
 +	}
 +	if keep > 0 {
 +		a.recentResults = append([]resultSample(nil), a.recentResults[keep:]...)
++	}
++	if len(a.recentResults) > maxRecentResults {
++		// Hard cap: the age window alone is unbounded under a probe storm.
++		a.recentResults = append([]resultSample(nil), a.recentResults[len(a.recentResults)-maxRecentResults:]...)
 +	}
 +}
 +
@@ -1133,7 +1192,14 @@ index 00000000..1d225839
 +			return
 +		case <-timer.C:
 +		}
-+		a.runScheduledSweep()
++		// The wait is capped at maxSweepStep only so that a Doze/suspend
++		// wake-up re-derives the schedule; the cap must not turn into an
++		// unconditional sweep. Run the exam only once the configured
++		// check_times moment has actually arrived, otherwise check_times
++		// silently degrades into a full sweep every 10 minutes.
++		if !time.Now().Before(next) {
++			a.runScheduledSweep()
++		}
 +	}
 +}
 +
@@ -1191,6 +1257,10 @@ index 00000000..1d225839
 +	Nodes     map[string]*nodeState `json:"nodes"`
 +	Pinned    []string              `json:"pinned"`
 +	LastCheck time.Time             `json:"last_check"`
++	// Revision is a per-process monotonic sequence number, persisted for
++	// diagnostics only: Load deliberately does not restore it, so a fresh
++	// process starts writing from revision 1 again.
++	Revision uint64 `json:"revision,omitempty"`
 +}
 +
 +// legacyAutoBanState is the v2 file format, used only for migration.
@@ -1226,7 +1296,9 @@ index 00000000..1d225839
 +	}
 +
 +	var state autoBanStateV3
-+	if err := json.Unmarshal(content, &state); err == nil && len(state.Nodes) > 0 {
++	// A v3 file may legitimately carry pins with no nodes yet; accepting it on
++	// Pinned alone keeps those pins from being dropped into the legacy path.
++	if err := json.Unmarshal(content, &state); err == nil && (len(state.Nodes) > 0 || len(state.Pinned) > 0) {
 +		a.nodes = state.Nodes
 +		if a.nodes == nil {
 +			a.nodes = make(map[string]*nodeState)
@@ -1335,10 +1407,12 @@ index 00000000..1d225839
 +		pinned = append(pinned, key)
 +	}
 +	sort.Strings(pinned)
++	a.snapshotSeq++
 +	return autoBanStateV3{
 +		Nodes:     nodes,
 +		Pinned:    pinned,
 +		LastCheck: time.Now(),
++		Revision:  a.snapshotSeq,
 +	}
 +}
 +
@@ -1347,6 +1421,12 @@ index 00000000..1d225839
 +func (a *AutoBan) writeStateSnapshot(state autoBanStateV3) {
 +	a.writeMu.Lock()
 +	defer a.writeMu.Unlock()
++	if state.Revision != 0 && state.Revision < a.lastWrittenRev {
++		// A newer snapshot already reached the disk. flush() snapshots under
++		// access and then releases it before the file I/O, so an older payload
++		// can arrive here second; dropping it keeps the file monotonic.
++		return
++	}
 +	content, err := json.MarshalIndent(state, "", "  ")
 +	if err != nil {
 +		return
@@ -1367,6 +1447,9 @@ index 00000000..1d225839
 +	// new file is ever unreadable (see loadBackupLocked).
 +	_ = os.Rename(path, path+".bak")
 +	_ = os.Rename(tmpPath, path)
++	if state.Revision != 0 {
++		a.lastWrittenRev = state.Revision
++	}
 +}
 +
 +// loadBackupLocked restores state from the ".bak" snapshot written by
@@ -1419,14 +1502,33 @@ index 00000000..1d225839
 +	}
 +
 +	a.healthMu.Lock()
-+	defer a.healthMu.Unlock()
-+
 +	if !a.healthChecked.IsZero() && time.Since(a.healthChecked) < a.probeInterval {
-+		return a.healthOK
++		ok := a.healthOK
++		a.healthMu.Unlock()
++		return ok
++	}
++	if a.probing {
++		// Another goroutine is already running the pre-flight probe. Return the
++		// last known result instead of blocking: this is called from the passive
++		// per-round check, and a probe can take up to probe_timeout.
++		ok := a.healthOK
++		a.healthMu.Unlock()
++		return ok
++	}
++	a.probing = true
++	a.ensureHTTPClient()
++	client := a.httpClient
++	a.healthMu.Unlock()
++
++	// The HTTP probe runs OUTSIDE healthMu: holding the mutex across it would
++	// stall every NetworkHealthy() caller for up to probe_timeout.
++	ok := false
++	if client != nil {
++		ok = a.probeNetworkWithClient(client)
 +	}
 +
-+	a.ensureHTTPClient()
-+	ok := a.probeNetwork()
++	a.healthMu.Lock()
++	a.probing = false
 +	if !ok {
 +		// Rebuild the protected client on the next attempt so network switches /
 +		// VPN recreation pick up the current VpnService protection context.
@@ -1435,6 +1537,7 @@ index 00000000..1d225839
 +	changed := a.healthChecked.IsZero() || a.healthOK != ok
 +	a.healthChecked = time.Now()
 +	a.healthOK = ok
++	a.healthMu.Unlock()
 +	if changed && a.logger != nil {
 +		if ok {
 +			a.logger.Info("auto_ban: direct network probe ok")
@@ -1445,31 +1548,52 @@ index 00000000..1d225839
 +	return ok
 +}
 +
-+// probeNetwork races multiple 204 endpoints. Any 2xx response means the local
-+// network is considered healthy.
++// probeNetwork races multiple 204 endpoints using the currently installed
++// protected client. Callers that already hold a snapshot of the client
++// should call probeNetworkWithClient directly.
 +func (a *AutoBan) probeNetwork() bool {
++	a.healthMu.Lock()
++	client := a.httpClient
++	a.healthMu.Unlock()
++	if client == nil {
++		return false
++	}
++	return a.probeNetworkWithClient(client)
++}
++
++// probeNetworkWithClient races multiple 204 endpoints. Any 2xx response
++// means the local network is considered healthy. The client is passed by
++// value so a straggler goroutine that outlives this call keeps using the
++// client it was started with instead of racing the nil-drop in
++// isNetworkHealthy.
++func (a *AutoBan) probeNetworkWithClient(client *http.Client) bool {
 +	ctx, cancel := context.WithTimeout(a.ctx, a.probeTimeout)
 +	defer cancel()
 +	results := make(chan bool, len(a.probeURLs))
 +	for _, url := range a.probeURLs {
 +		go func(u string) {
-+			results <- a.probeOne(ctx, u)
++			results <- a.probeOne(ctx, client, u)
 +		}(url)
 +	}
 +	for range a.probeURLs {
 +		if <-results {
++			// Cancel the remaining probes. They are abandoned by design -- this
++			// function must return as soon as one target answers -- but a
++			// well-behaved transport stops on context cancellation instead of
++			// running until probe_timeout.
++			cancel()
 +			return true
 +		}
 +	}
 +	return false
 +}
 +
-+func (a *AutoBan) probeOne(ctx context.Context, url string) bool {
++func (a *AutoBan) probeOne(ctx context.Context, client *http.Client, url string) bool {
 +	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 +	if err != nil {
 +		return false
 +	}
-+	resp, err := a.httpClient.Do(req)
++	resp, err := client.Do(req)
 +	if err != nil {
 +		return false
 +	}
@@ -1523,7 +1647,7 @@ index 03f1788d..f7c5efa4 100644
  	require.Zero(t, outerRequests.Load())
  	require.EqualValues(t, 2, nestedRequests.Load())
 diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
-index 9ed80c20..120bb974 100644
+index 9ed80c20..52bd1ef2 100644
 --- a/protocol/group/urltest.go
 +++ b/protocol/group/urltest.go
 @@ -2,6 +2,8 @@ package group
@@ -1655,13 +1779,20 @@ index 9ed80c20..120bb974 100644
  	outbounds := s.group.loadOutbounds()
  	tags := make([]string, 0, len(outbounds))
  	for _, detour := range outbounds {
-@@ -181,6 +268,74 @@ func (s *URLTest) All() []string {
+@@ -181,6 +268,105 @@ func (s *URLTest) All() []string {
  	return tags
  }
  
 +// Pin marks a node as manually selected: it is exempt from AutoBan banning.
-+// SFA should call this when the user explicitly selects a node in the UI.
++// SFA calls this when the user explicitly selects a node in the UI. The
++// exemption must be recorded on the AutoBan instance that actually gates
++// selection -- the group's -- so prefer it and fall back to this outbound's
++// own handle (the two are the same pointer when built through NewURLTest).
 +func (s *URLTest) Pin(tag string) {
++	if s.group != nil && s.group.autoBan != nil {
++		s.group.autoBan.Pin(tag)
++		return
++	}
 +	if s.autoBan != nil {
 +		s.autoBan.Pin(tag)
 +	}
@@ -1669,6 +1800,10 @@ index 9ed80c20..120bb974 100644
 +
 +// Unpin clears a manual-selection exemption.
 +func (s *URLTest) Unpin(tag string) {
++	if s.group != nil && s.group.autoBan != nil {
++		s.group.autoBan.Unpin(tag)
++		return
++	}
 +	if s.autoBan != nil {
 +		s.autoBan.Unpin(tag)
 +	}
@@ -1702,16 +1837,36 @@ index 9ed80c20..120bb974 100644
 +		return E.New("urltest group not started")
 +	}
 +	if tag == "" || tag == s.Tag() {
++		previous, _ := s.group.manualTag.Load().(string)
 +		s.group.manualTag.Store("")
++		if previous != "" {
++			s.Unpin(previous)
++		}
 +		return nil
 +	}
++	// Resolve the member first: Pin/Unpin take the AutoBan lock, and the
++	// group lock (loadOutbounds) must never be held while doing so, or the
++	// allTagsFunc edge (AutoBan -> group) would close into a lock cycle.
++	matched := false
 +	for _, detour := range s.group.loadOutbounds() {
 +		if detour.Tag() == tag || RealTag(s.outbound, detour) == tag {
-+			s.group.manualTag.Store(tag)
-+			return nil
++			matched = true
++			break
 +		}
 +	}
-+	return E.New("outbound not found in group: ", tag)
++	if !matched {
++		return E.New("outbound not found in group: ", tag)
++	}
++	previous, _ := s.group.manualTag.Load().(string)
++	s.group.manualTag.Store(tag)
++	if previous != "" && previous != tag {
++		s.Unpin(previous)
++	}
++	// A manually selected node is exempt from AutoBan banning. Without this
++	// Pin the group still reports the node as Blocked on every connection
++	// and logs a re-selection warning forever.
++	s.Pin(tag)
++	return nil
 +}
 +
 +// SetManualTag sets the manual-selection override used by Select().
@@ -1730,7 +1885,7 @@ index 9ed80c20..120bb974 100644
  func (s *URLTest) SelectPreMatchOutbound(metadata *adapter.InboundContext, selectOutbound func(adapter.Outbound) (adapter.Outbound, adapter.PreMatchAction)) (adapter.Outbound, adapter.PreMatchAction) {
  	s.group.Touch()
  	network := metadata.Network
-@@ -197,6 +352,13 @@ func (s *URLTest) SelectPreMatchOutbound(metadata *adapter.InboundContext, selec
+@@ -197,6 +383,13 @@ func (s *URLTest) SelectPreMatchOutbound(metadata *adapter.InboundContext, selec
  	if selectedOutbound == nil {
  		selectedOutbound, _ = s.group.Select(network)
  	}
@@ -1744,7 +1899,7 @@ index 9ed80c20..120bb974 100644
  	return selectOutbound(selectedOutbound)
  }
  
-@@ -351,8 +513,11 @@ type URLTestGroup struct {
+@@ -351,8 +544,11 @@ type URLTestGroup struct {
  	close                        chan struct{}
  	started                      atomic.Bool
  	lastActive                   common.TypedValue[time.Time]
@@ -1756,7 +1911,7 @@ index 9ed80c20..120bb974 100644
  }
  
  func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, fallback URLTestFallback, interruptExternalConnections bool) (*URLTestGroup, error) {
-@@ -434,11 +599,33 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -434,11 +630,33 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  	var minOutbound adapter.Outbound
  	var fallbackIgnoreOutboundDelay uint16
  	var fallbackIgnoreOutbound adapter.Outbound
@@ -1791,7 +1946,7 @@ index 9ed80c20..120bb974 100644
  				if history := g.history.LoadURLTestHistory(RealTag(g.outbound, selectedOutbound)); history != nil {
  					minOutbound = selectedOutbound
  					minDelay = history.Delay
-@@ -446,7 +633,10 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -446,7 +664,10 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  			}
  		case N.NetworkUDP:
  			selectedOutbound := g.selectedOutboundUDP.Load()
@@ -1803,7 +1958,7 @@ index 9ed80c20..120bb974 100644
  				if history := g.history.LoadURLTestHistory(RealTag(g.outbound, selectedOutbound)); history != nil {
  					minOutbound = selectedOutbound
  					minDelay = history.Delay
-@@ -456,7 +646,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -456,7 +677,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  	}
  	outbounds := g.loadOutbounds()
  	for _, detour := range outbounds {
@@ -1812,7 +1967,7 @@ index 9ed80c20..120bb974 100644
  			continue
  		}
  		history := g.history.LoadURLTestHistory(RealTag(g.outbound, detour))
-@@ -488,17 +678,69 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+@@ -488,17 +709,69 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
  		return fallbackIgnoreOutbound, true
  	}
  	if minOutbound == nil {
@@ -1887,7 +2042,7 @@ index 9ed80c20..120bb974 100644
  func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{}) {
  	if time.Since(g.lastActive.Load()) > g.interval {
  		g.lastActive.Store(time.Now())
-@@ -549,7 +791,25 @@ func (g *URLTestGroup) urlTestWait(ctx context.Context, force bool) (map[string]
+@@ -549,7 +822,25 @@ func (g *URLTestGroup) urlTestWait(ctx context.Context, force bool) (map[string]
  
  func (g *URLTestGroup) urlTestLocked(ctx context.Context, force bool) (map[string]uint16, error) {
  	ctx = urltest.ContextWithUnifiedDelay(ctx, urltest.UnifiedDelayFromContext(g.ctx))
@@ -1914,7 +2069,7 @@ index 9ed80c20..120bb974 100644
  	select {
  	case <-ctx.Done():
  	default:
-@@ -617,30 +877,32 @@ func (s *urlTestSession) test(ctx context.Context, key urlTestSessionKey, test f
+@@ -617,30 +908,32 @@ func (s *urlTestSession) test(ctx context.Context, key urlTestSessionKey, test f
  }
  
  type urlTestBatch struct {
@@ -1968,7 +2123,7 @@ index 9ed80c20..120bb974 100644
  	}
  	testBatch.test(outbounds, link, interval, force)
  	b.Wait()
-@@ -705,12 +967,18 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval
+@@ -705,12 +998,18 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval
  					}
  					b.logger.Debug("outbound ", tag, " unavailable: ", testResult.err)
  					b.history.DeleteURLTestHistory(tag)

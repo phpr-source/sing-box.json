@@ -1,8 +1,8 @@
 diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
-index 52232b94..90eb516d 100644
+index 6ea8e6c5..36401fc6 100644
 --- a/protocol/group/fallback.go
 +++ b/protocol/group/fallback.go
-@@ -307,3 +307,9 @@ func (s *Fallback) addToBlacklist(tag string) {
+@@ -346,3 +346,9 @@ func (s *Fallback) addToBlacklist(tag string) {
  		s.blacklist[tag] = time.Now().Add(s.blacklistTimeout)
  	}
  }

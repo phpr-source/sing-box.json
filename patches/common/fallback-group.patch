@@ -1,5 +1,5 @@
 diff --git a/constant/proxy.go b/constant/proxy.go
-index 771a697..9a95cc8 100644
+index 771a6977..9a95cc89 100644
 --- a/constant/proxy.go
 +++ b/constant/proxy.go
 @@ -51,6 +51,7 @@ const (
@@ -20,7 +20,7 @@ index 771a697..9a95cc8 100644
  		return "LoadBalance"
  	default:
 diff --git a/include/registry.go b/include/registry.go
-index 3d8efbd..5547761 100644
+index 3d8efbd8..55477610 100644
 --- a/include/registry.go
 +++ b/include/registry.go
 @@ -106,6 +106,7 @@ func OutboundRegistry() *outbound.Registry {
@@ -32,16 +32,19 @@ index 3d8efbd..5547761 100644
  	socks.RegisterOutbound(registry)
  	http.RegisterOutbound(registry)
 diff --git a/option/group.go b/option/group.go
-index 4ee11d9..d1d5d08 100644
+index 4ee11d9f..e6310ef5 100644
 --- a/option/group.go
 +++ b/option/group.go
-@@ -31,6 +31,11 @@ type URLTestFallbackOptions struct {
+@@ -31,6 +31,14 @@ type URLTestFallbackOptions struct {
  	MaxDelay badoption.Duration `json:"max_delay,omitempty"`
  }
  
 +type FallbackOutboundOptions struct {
-+	Outbounds        []string           `json:"outbounds" reference:"outbound"`
-+	BlacklistTimeout badoption.Duration `json:"blacklist_timeout,omitempty"`
++	Outbounds []string `json:"outbounds" reference:"outbound"`
++	// How long a member that just failed is skipped (blacklisted) before it may
++	// be dialed again. Omitted: 1 minute. Explicit 0 disables the blacklist
++	// entirely. Negative values are rejected.
++	BlacklistTimeout *badoption.Duration `json:"blacklist_timeout,omitempty"`
 +}
 +
  type LoadBalanceOutboundOptions struct {
@@ -49,16 +52,17 @@ index 4ee11d9..d1d5d08 100644
  	URL         string             `json:"url,omitempty"`
 diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
 new file mode 100644
-index 00000000..08b68ec2
+index 00000000..6ea8e6c5
 --- /dev/null
 +++ b/protocol/group/fallback.go
-@@ -0,0 +1,315 @@
+@@ -0,0 +1,348 @@
 +package group
 +
 +import (
 +	"context"
 +	"io"
 +	"net"
++	"slices"
 +	"sync"
 +	"time"
 +
@@ -109,16 +113,30 @@ index 00000000..08b68ec2
 +	mtx              sync.Mutex
 +}
 +
++// fallbackMember is a resolved (tag, outbound) pair. DialContext and
++// ListenPacket snapshot members into a local slice of these while holding
++// mtx, so the dial loops never touch the member map concurrently with
++// resolveMembersLocked (which writes and deletes entries on every
++// provider/subscription update).
++type fallbackMember struct {
++	tag      string
++	outbound adapter.Outbound
++}
++
 +func NewFallback(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.FallbackOutboundOptions) (adapter.Outbound, error) {
 +	if len(options.Outbounds) == 0 {
 +		return nil, E.New("missing tags")
 +	}
-+	blacklistTimeout := time.Duration(options.BlacklistTimeout)
-+	if blacklistTimeout == 0 {
-+		blacklistTimeout = time.Minute
-+	}
-+	if blacklistTimeout < 0 {
-+		return nil, E.New("blacklist_timeout must not be negative")
++	// 2026-10-09: the option is a pointer so "omitted" and "explicitly 0" are
++	// distinguishable. Omitted keeps the 1 minute default; an explicit 0 now
++	// really disables the blacklist (the guards in isBlacklisted/addToBlacklist
++	// used to be unreachable dead code because 0 was rewritten to 1m here).
++	blacklistTimeout := time.Minute
++	if options.BlacklistTimeout != nil {
++		blacklistTimeout = time.Duration(*options.BlacklistTimeout)
++		if blacklistTimeout < 0 {
++			return nil, E.New("blacklist_timeout must not be negative")
++		}
 +	}
 +	outbound := &Fallback{
 +		Adapter:          outbound.NewAdapter(C.TypeFallback, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.Outbounds),
@@ -139,6 +157,12 @@ index 00000000..08b68ec2
 +func (s *Fallback) start() error {
 +	s.mtx.Lock()
 +	defer s.mtx.Unlock()
++	if s.outbound == nil {
++		// 2026-10-09: resolveMembersLocked() guards this case, start() did not,
++		// so a nil manager (context without a service registry) panicked here
++		// instead of returning the error this function promises.
++		return E.New("missing outbound manager")
++	}
 +	for i, tag := range s.tags {
 +		outbound, loaded := s.outbound.Outbound(tag)
 +		if !loaded {
@@ -180,30 +204,44 @@ index 00000000..08b68ec2
 +}
 +
 +func (s *Fallback) All() []string {
-+	return s.tags
++	s.mtx.Lock()
++	defer s.mtx.Unlock()
++	// 2026-10-09: s.tags aliases options.Outbounds, so returning it directly both
++	// raced the lock-free read against resolveMembersLocked and handed callers a
++	// slice they could mutate in place (selector.go clones for the same reason).
++	return slices.Clone(s.tags)
 +}
 +
 +func (s *Fallback) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 +	s.mtx.Lock()
 +	s.resolveMembersLocked()
-+	var active, blacklisted []string
++	// 2026-10-09：成员指针必须在锁内解析成局部切片。原实现在 Unlock 之后
++	// 二次读取 s.outbounds[tag]（守卫一次、调用一次），而 resolveMembersLocked
++	// 会在订阅/provider 更新时于其他 goroutine 持锁写入(:111)或删除(:116)
++	// 同一张 map —— 既触发 Go 运行时的 concurrent map read and map write
++	// （不可恢复，整个进程崩溃），也存在 delete 落在两次读取之间时读到零值
++	// adapter.Outbound 接口、调用解引用 nil itab 的 SIGSEGV。局部切片一经
++	// 构造即与 map 解耦，后续只遍历它。
++	var active, blacklisted []fallbackMember
 +	for _, tag := range s.tags {
++		outbound, loaded := s.outbounds[tag]
++		if !loaded || outbound == nil || !common.Contains(outbound.Network(), network) {
++			// 网络不支持/成员未就绪是配置属性而非故障：跳过且不拉黑
++			continue
++		}
++		member := fallbackMember{tag: tag, outbound: outbound}
 +		if s.isBlacklisted(tag) {
-+			blacklisted = append(blacklisted, tag)
++			blacklisted = append(blacklisted, member)
 +		} else {
-+			active = append(active, tag)
++			active = append(active, member)
 +		}
 +	}
 +	s.mtx.Unlock()
 +
 +	var err error // last dial failure; nil while no dial has been attempted
-+	for _, tag := range active {
-+		if outbound := s.outbounds[tag]; outbound == nil || !common.Contains(outbound.Network(), network) {
-+			// 网络不支持/成员未就绪是配置属性而非故障：跳过且不拉黑
-+			continue
-+		}
++	for _, member := range active {
 +		var conn net.Conn
-+		conn, err = s.outbounds[tag].DialContext(ctx, network, destination)
++		conn, err = member.outbound.DialContext(ctx, network, destination)
 +		if err != nil {
 +			s.logger.InfoContext(ctx, err)
 +			if ctx.Err() != nil {
@@ -211,28 +249,25 @@ index 00000000..08b68ec2
 +				return nil, err
 +			}
 +			s.mtx.Lock()
-+			s.addToBlacklist(tag)
++			s.addToBlacklist(member.tag)
 +			s.mtx.Unlock()
 +			continue
 +		}
 +		s.mtx.Lock()
-+		s.lastUsedOutbound = tag
++		s.lastUsedOutbound = member.tag
 +		s.mtx.Unlock()
 +		return conn, nil
 +	}
-+	for _, tag := range blacklisted {
-+		if outbound := s.outbounds[tag]; outbound == nil || !common.Contains(outbound.Network(), network) {
-+			continue
-+		}
++	for _, member := range blacklisted {
 +		var conn net.Conn
-+		conn, err = s.outbounds[tag].DialContext(ctx, network, destination)
++		conn, err = member.outbound.DialContext(ctx, network, destination)
 +		if err != nil {
 +			s.logger.InfoContext(ctx, err)
 +			continue
 +		}
 +		s.mtx.Lock()
-+		delete(s.blacklist, tag)
-+		s.lastUsedOutbound = tag
++		delete(s.blacklist, member.tag)
++		s.lastUsedOutbound = member.tag
 +		s.mtx.Unlock()
 +		return conn, nil
 +	}
@@ -293,51 +328,52 @@ index 00000000..08b68ec2
 +func (s *Fallback) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 +	s.mtx.Lock()
 +	s.resolveMembersLocked()
-+	var active, blacklisted []string
++	// 2026-10-09：同 DialContext —— 成员指针在锁内解析成局部切片，解锁后
++	// 不再触碰 s.outbounds map（并发读写会 fatal，二次读取会 SIGSEGV）。
++	var active, blacklisted []fallbackMember
 +	for _, tag := range s.tags {
++		outbound, loaded := s.outbounds[tag]
++		if !loaded || outbound == nil || !common.Contains(outbound.Network(), N.NetworkUDP) {
++			continue
++		}
++		member := fallbackMember{tag: tag, outbound: outbound}
 +		if s.isBlacklisted(tag) {
-+			blacklisted = append(blacklisted, tag)
++			blacklisted = append(blacklisted, member)
 +		} else {
-+			active = append(active, tag)
++			active = append(active, member)
 +		}
 +	}
 +	s.mtx.Unlock()
 +
 +	var err error // last dial failure; nil while no dial has been attempted
-+	for _, tag := range active {
-+		if outbound := s.outbounds[tag]; outbound == nil || !common.Contains(outbound.Network(), N.NetworkUDP) {
-+			continue
-+		}
++	for _, member := range active {
 +		var conn net.PacketConn
-+		conn, err = s.outbounds[tag].ListenPacket(ctx, destination)
++		conn, err = member.outbound.ListenPacket(ctx, destination)
 +		if err != nil {
 +			s.logger.InfoContext(ctx, err)
 +			if ctx.Err() != nil {
 +				return nil, err
 +			}
 +			s.mtx.Lock()
-+			s.addToBlacklist(tag)
++			s.addToBlacklist(member.tag)
 +			s.mtx.Unlock()
 +			continue
 +		}
 +		s.mtx.Lock()
-+		s.lastUsedOutbound = tag
++		s.lastUsedOutbound = member.tag
 +		s.mtx.Unlock()
 +		return conn, nil
 +	}
-+	for _, tag := range blacklisted {
-+		if outbound := s.outbounds[tag]; outbound == nil || !common.Contains(outbound.Network(), N.NetworkUDP) {
-+			continue
-+		}
++	for _, member := range blacklisted {
 +		var conn net.PacketConn
-+		conn, err = s.outbounds[tag].ListenPacket(ctx, destination)
++		conn, err = member.outbound.ListenPacket(ctx, destination)
 +		if err != nil {
 +			s.logger.InfoContext(ctx, err)
 +			continue
 +		}
 +		s.mtx.Lock()
-+		delete(s.blacklist, tag)
-+		s.lastUsedOutbound = tag
++		delete(s.blacklist, member.tag)
++		s.lastUsedOutbound = member.tag
 +		s.mtx.Unlock()
 +		return conn, nil
 +	}
