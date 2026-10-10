@@ -1,0 +1,253 @@
+diff --git a/protocol/group/realtag_cycle_test.go b/protocol/group/realtag_cycle_test.go
+new file mode 100644
+index 0000000..8dbb652
+--- /dev/null
++++ b/protocol/group/realtag_cycle_test.go
+@@ -0,0 +1,91 @@
++package group
++
++import (
++	"context"
++	"io"
++	"net"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/outbound"
++	C "github.com/sagernet/sing-box/constant"
++	E "github.com/sagernet/sing/common/exceptions"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++// realtagCycleMember satisfies adapter.Outbound. Only Tag() and Network() are
++// reached by the RealTag walk; the dial methods exist to complete the interface.
++type realtagCycleMember struct {
++	outbound.Adapter
++}
++
++func (m *realtagCycleMember) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	return nil, E.New("not implemented")
++}
++
++func (m *realtagCycleMember) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	return nil, E.New("not implemented")
++}
++
++// realtagCycleGroup is a minimal adapter.OutboundGroup whose Selected() points
++// at another group, so two of them form a cycle.
++type realtagCycleGroup struct {
++	*realtagCycleMember
++	next adapter.Outbound
++}
++
++func (g *realtagCycleGroup) All() []string                            { return []string{g.next.Tag()} }
++func (g *realtagCycleGroup) Selected(network string) adapter.Outbound { return g.next }
++func (g *realtagCycleGroup) AttachConnection(closer io.Closer) func() { return func() {} }
++
++func newRealtagCycleGroup(tag string, next adapter.Outbound) *realtagCycleGroup {
++	return &realtagCycleGroup{
++		realtagCycleMember: &realtagCycleMember{
++			Adapter: outbound.NewAdapter(C.TypeSelector, tag, []string{N.NetworkTCP, N.NetworkUDP}, nil),
++		},
++		next: next,
++	}
++}
++
++// TestRealTagCycleTerminates pins the depth guard on RealTag. Without it a
++// cyclic group configuration (A selects B, B selects A) makes the walk loop
++// forever: the caller goroutine never returns and spins at 100% CPU. The
++// pre-match walk in route.Router.selectPreMatchOutbound bounds the same kind of
++// traversal with `depth > 8`; RealTag had no bound at all.
++func TestRealTagCycleTerminates(t *testing.T) {
++	var a, b *realtagCycleGroup
++	b = newRealtagCycleGroup("b", nil)
++	a = newRealtagCycleGroup("a", b)
++	b.next = a
++
++	done := make(chan string, 1)
++	go func() {
++		done <- RealTag(a, N.NetworkTCP)
++	}()
++	select {
++	case got := <-done:
++		t.Logf("RealTag returned %q", got)
++	case <-time.After(3 * time.Second):
++		t.Fatal("RealTag did not terminate within 3s on a group cycle (a -> b -> a)")
++	}
++}
++
++// TestRealTagSelfCycleTerminates covers the degenerate one-node cycle: a group
++// whose Selected() is itself.
++func TestRealTagSelfCycleTerminates(t *testing.T) {
++	a := newRealtagCycleGroup("a", nil)
++	a.next = a
++
++	done := make(chan string, 1)
++	go func() {
++		done <- RealTag(a, N.NetworkTCP)
++	}()
++	select {
++	case got := <-done:
++		t.Logf("RealTag returned %q", got)
++	case <-time.After(3 * time.Second):
++		t.Fatal("RealTag did not terminate within 3s on a self cycle (a -> a)")
++	}
++}
+diff --git a/protocol/group/selector.go b/protocol/group/selector.go
+index 073222a..78995a5 100644
+--- a/protocol/group/selector.go
++++ b/protocol/group/selector.go
+@@ -224,8 +224,14 @@ func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
+ 	return s.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx), interrupt.IsResourceDownloadFromContext(ctx)), nil
+ }
+ 
++// maxGroupTagDepth bounds RealTag's group walk. Nested groups are shallow in
++// practice; the bound exists so that a cyclic configuration (A selects B, B
++// selects A) cannot spin forever. The pre-match walk in
++// route.Router.selectPreMatchOutbound uses the same bound for the same reason.
++const maxGroupTagDepth = 8
++
+ func RealTag(detour adapter.Outbound, network string) string {
+-	for {
++	for depth := 0; ; depth++ {
+ 		if _, isLoadBalance := detour.(adapter.LoadBalanceGroup); isLoadBalance {
+ 			return detour.Tag()
+ 		}
+@@ -233,6 +239,9 @@ func RealTag(detour adapter.Outbound, network string) string {
+ 		if !isGroup {
+ 			return detour.Tag()
+ 		}
++		if depth > maxGroupTagDepth {
++			return detour.Tag()
++		}
+ 		detour = group.Selected(network)
+ 		if detour == nil {
+ 			return ""
+diff --git a/route/resolveoutbound_cycle_test.go b/route/resolveoutbound_cycle_test.go
+new file mode 100644
+index 0000000..d130c37
+--- /dev/null
++++ b/route/resolveoutbound_cycle_test.go
+@@ -0,0 +1,93 @@
++package route
++
++import (
++	"context"
++	"io"
++	"net"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/outbound"
++	C "github.com/sagernet/sing-box/constant"
++	E "github.com/sagernet/sing/common/exceptions"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++// resolveOutboundCycleMember satisfies adapter.Outbound. Only Tag() and
++// Network() are reached while resolving; the dial methods exist to complete the
++// interface.
++type resolveOutboundCycleMember struct {
++	outbound.Adapter
++}
++
++func (m *resolveOutboundCycleMember) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	return nil, E.New("not implemented")
++}
++
++func (m *resolveOutboundCycleMember) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	return nil, E.New("not implemented")
++}
++
++// resolveOutboundCycleGroup is a minimal adapter.OutboundGroup whose Selected()
++// points at another group, so two of them form a cycle.
++type resolveOutboundCycleGroup struct {
++	*resolveOutboundCycleMember
++	next adapter.Outbound
++}
++
++func (g *resolveOutboundCycleGroup) All() []string                            { return []string{g.next.Tag()} }
++func (g *resolveOutboundCycleGroup) Selected(network string) adapter.Outbound { return g.next }
++func (g *resolveOutboundCycleGroup) AttachConnection(closer io.Closer) func() { return func() {} }
++
++func newResolveOutboundCycleGroup(tag string, next adapter.Outbound) *resolveOutboundCycleGroup {
++	return &resolveOutboundCycleGroup{
++		resolveOutboundCycleMember: &resolveOutboundCycleMember{
++			Adapter: outbound.NewAdapter(C.TypeSelector, tag, []string{N.NetworkTCP, N.NetworkUDP}, nil),
++		},
++		next: next,
++	}
++}
++
++// TestResolveOutboundCycleTerminates pins the depth guard on resolveOutbound.
++// Without it a cyclic group configuration (A selects B, B selects A) appends
++// one element to the chain per hop with no bound, so the function never returns
++// and the chain grows until the process runs out of memory. The pre-match walk
++// in route.Router.selectPreMatchOutbound bounds the same kind of traversal with
++// `depth > 8`; resolveOutbound had no bound at all.
++func TestResolveOutboundCycleTerminates(t *testing.T) {
++	var a, b *resolveOutboundCycleGroup
++	b = newResolveOutboundCycleGroup("b", nil)
++	a = newResolveOutboundCycleGroup("a", b)
++	b.next = a
++
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		_, _ = resolveOutbound(a, N.NetworkTCP, &adapter.InboundContext{})
++	}()
++	select {
++	case <-done:
++	case <-time.After(3 * time.Second):
++		t.Fatal("resolveOutbound did not terminate within 3s on a group cycle (a -> b -> a)")
++	}
++}
++
++// TestResolveOutboundSelfCycleTerminates covers the degenerate one-node cycle: a
++// group whose Selected() is itself.
++func TestResolveOutboundSelfCycleTerminates(t *testing.T) {
++	a := newResolveOutboundCycleGroup("a", nil)
++	a.next = a
++
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		_, _ = resolveOutbound(a, N.NetworkTCP, &adapter.InboundContext{})
++	}()
++	select {
++	case <-done:
++	case <-time.After(3 * time.Second):
++		t.Fatal("resolveOutbound did not terminate within 3s on a self cycle (a -> a)")
++	}
++}
+diff --git a/route/route.go b/route/route.go
+index 24fea58..96facb4 100644
+--- a/route/route.go
++++ b/route/route.go
+@@ -198,13 +198,21 @@ func isPassOutbound(manager adapter.OutboundManager, tag string) bool {
+ 	return outbound != nil && outbound.Type() == C.TypePass
+ }
+ 
++// maxResolveOutboundDepth bounds the group walk in resolveOutbound. Nested
++// groups are shallow in practice; the bound exists so that a cyclic
++// configuration (A selects B, B selects A) cannot grow the chain forever.
++const maxResolveOutboundDepth = 8
++
+ func resolveOutbound(outbound adapter.Outbound, network string, metadata *adapter.InboundContext) ([]adapter.Outbound, error) {
+ 	chain := []adapter.Outbound{outbound}
+-	for {
++	for depth := 0; ; depth++ {
+ 		group, isGroup := outbound.(adapter.OutboundGroup)
+ 		if !isGroup {
+ 			break
+ 		}
++		if depth > maxResolveOutboundDepth {
++			return nil, E.New("group chain too deep at outbound: ", group.Tag())
++		}
+ 		if connectionGroup, ok := group.(adapter.ConnectionOutboundGroup); ok {
+ 			selectionMetadata := *metadata
+ 			selectionMetadata.Network = network

@@ -1,6 +1,6 @@
 diff --git a/adapter/provider/group_dependency_test.go b/adapter/provider/group_dependency_test.go
 new file mode 100644
-index 0000000..acc4162
+index 0000000..8021a00
 --- /dev/null
 +++ b/adapter/provider/group_dependency_test.go
 @@ -0,0 +1,180 @@
@@ -75,7 +75,7 @@ index 0000000..acc4162
 +
 +// newGroupProvider builds an inline provider whose registry can build leaf
 +// members plus selector and fallback groups.
-+func newGroupProvider(t *testing.T) provider.Adapter {
++func newGroupProvider(t *testing.T) *provider.Adapter {
 +	t.Helper()
 +	ctx := service.ContextWithPtr(context.Background(), urltest.NewHistoryStorage())
 +	factory := log.NewNOPFactory()
@@ -112,7 +112,7 @@ index 0000000..acc4162
 +	p := provider.NewAdapter(ctx, nil, manager, ep, factory, logger, "p", "inline", option.ProviderHealthCheckOptions{})
 +	require.NoError(t, p.Start())
 +	t.Cleanup(func() { require.NoError(t, p.Close()) })
-+	return p
++	return &p
 +}
 +
 +// TestProviderOrdersFallbackGroupMembersFirst pins the dependency-ordering

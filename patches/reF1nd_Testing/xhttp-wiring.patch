@@ -108,10 +108,10 @@ index 0000000..e060a53
 +	return c.From + T(bigInt.Int64())
 +}
 diff --git a/option/v2ray_transport.go b/option/v2ray_transport.go
-index 8788151..7c27609 100644
+index 8788151..66b5bf2 100644
 --- a/option/v2ray_transport.go
 +++ b/option/v2ray_transport.go
-@@ -1,9 +1,12 @@
+@@ -1,8 +1,11 @@
  package option
  
  import (
@@ -119,11 +119,10 @@ index 8788151..7c27609 100644
  	"reflect"
 +	"strings"
  
- 	C "github.com/sagernet/sing-box/constant"
 +	"github.com/sagernet/sing-box/common/xray/utils"
+ 	C "github.com/sagernet/sing-box/constant"
  	"github.com/sagernet/sing-box/schema"
  	E "github.com/sagernet/sing/common/exceptions"
- 	"github.com/sagernet/sing/common/json"
 @@ -12,12 +15,13 @@ import (
  )
  
@@ -135,7 +134,7 @@ index 8788151..7c27609 100644
  	QUICOptions        V2RayQUICOptions        `json:"-"`
  	GRPCOptions        V2RayGRPCOptions        `json:"-"`
  	HTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
-+	XHTTPOptions        V2RayXHTTPOptions        `json:"-"`
++	XHTTPOptions       V2RayXHTTPOptions       `json:"-"`
  }
  
  type V2RayTransportOptions _V2RayTransportOptions
@@ -175,13 +174,13 @@ index 8788151..7c27609 100644
 +	Path                 string                     `json:"path,omitempty"`
 +	Headers              map[string]string          `json:"headers,omitempty"`
 +	DomainStrategy       DomainStrategy             `json:"domain_strategy,omitempty"`
-+	XPaddingBytes        Range[int]       `json:"x_padding_bytes"`
++	XPaddingBytes        Range[int]                 `json:"x_padding_bytes"`
 +	NoGRPCHeader         bool                       `json:"no_grpc_header,omitempty"`
 +	NoSSEHeader          bool                       `json:"no_sse_header,omitempty"`
-+	ScMaxEachPostBytes   *Range[int]      `json:"sc_max_each_post_bytes"`
-+	ScMinPostsIntervalMs *Range[int]      `json:"sc_min_posts_interval_ms"`
++	ScMaxEachPostBytes   *Range[int]                `json:"sc_max_each_post_bytes"`
++	ScMinPostsIntervalMs *Range[int]                `json:"sc_min_posts_interval_ms"`
 +	ScMaxBufferedPosts   int64                      `json:"sc_max_buffered_posts,omitempty"`
-+	ScStreamUpServerSecs *Range[int]      `json:"sc_stream_up_server_secs"`
++	ScStreamUpServerSecs *Range[int]                `json:"sc_stream_up_server_secs"`
 +	ServerMaxHeaderBytes int                        `json:"server_max_header_bytes"`
 +	TrustedXForwardedFor badoption.Listable[string] `json:"trusted_x_forwarded_for,omitempty"`
 +	Xmux                 *V2RayXHTTPXmuxOptions     `json:"xmux"`
@@ -197,9 +196,9 @@ index 8788151..7c27609 100644
 +	SeqKey               string                     `json:"seq_key,omitempty"`
 +	UplinkDataPlacement  string                     `json:"uplink_data_placement,omitempty"`
 +	UplinkDataKey        string                     `json:"uplink_data_key,omitempty"`
-+	UplinkChunkSize      *Range[int]      `json:"uplink_chunk_size,omitempty"`
++	UplinkChunkSize      *Range[int]                `json:"uplink_chunk_size,omitempty"`
 +	SessionIDTable       string                     `json:"session_id_table,omitempty"`
-+	SessionIDLength      Range[int]       `json:"session_id_length,omitempty"`
++	SessionIDLength      Range[int]                 `json:"session_id_length,omitempty"`
 +	CongestionController string                     `json:"congestion_controller,omitempty"`
 +	CWND                 int                        `json:"cwnd,omitempty"`
 +}
@@ -554,7 +553,7 @@ index 8788151..7c27609 100644
 +	CMaxReuseTimes   Range[int] `json:"c_max_reuse_times"`
 +	HMaxRequestTimes Range[int] `json:"h_max_request_times"`
 +	HMaxReusableSecs Range[int] `json:"h_max_reusable_secs"`
-+	HKeepAlivePeriod int64                `json:"h_keep_alive_period"`
++	HKeepAlivePeriod int64      `json:"h_keep_alive_period"`
 +}
 +
 +func (m *V2RayXHTTPXmuxOptions) GetNormalizedMaxConcurrency() Range[int] {
