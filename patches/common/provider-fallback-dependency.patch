@@ -1,0 +1,199 @@
+diff --git a/adapter/provider/group_dependency_test.go b/adapter/provider/group_dependency_test.go
+new file mode 100644
+index 0000000..acc4162
+--- /dev/null
++++ b/adapter/provider/group_dependency_test.go
+@@ -0,0 +1,180 @@
++package provider_test
++
++import (
++	"context"
++	"net"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/endpoint"
++	"github.com/sagernet/sing-box/adapter/outbound"
++	"github.com/sagernet/sing-box/adapter/provider"
++	"github.com/sagernet/sing-box/common/urltest"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++	M "github.com/sagernet/sing/common/metadata"
++	"github.com/sagernet/sing/service"
++
++	"github.com/stretchr/testify/require"
++)
++
++// groupMemberOptions is the option payload of a plain leaf member.
++type groupMemberOptions struct {
++	option.DialerOptions
++}
++
++// groupMemberNode is a leaf outbound used as a group member.
++type groupMemberNode struct {
++	outbound.Adapter
++}
++
++func (n *groupMemberNode) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
++	return nil, E.New("not implemented")
++}
++
++func (*groupMemberNode) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	return nil, E.New("not implemented")
++}
++
++// groupNode mirrors the member-table contract that matters for ordering: the
++// members are resolved once the group itself starts, so they must already be
++// installed in the outbound manager by then.
++type groupNode struct {
++	outbound.Adapter
++	members []string
++	manager adapter.OutboundManager
++}
++
++func (n *groupNode) Start(stage adapter.StartStage, _ *adapter.Scope) error {
++	if stage != adapter.StartStateStart {
++		return nil
++	}
++	for i, member := range n.members {
++		if _, loaded := n.manager.Outbound(member); !loaded {
++			return E.New("outbound ", i, " not found: ", member)
++		}
++	}
++	return nil
++}
++
++func (n *groupNode) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
++	return nil, E.New("not implemented")
++}
++
++func (*groupNode) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	return nil, E.New("not implemented")
++}
++
++// newGroupProvider builds an inline provider whose registry can build leaf
++// members plus selector and fallback groups.
++func newGroupProvider(t *testing.T) provider.Adapter {
++	t.Helper()
++	ctx := service.ContextWithPtr(context.Background(), urltest.NewHistoryStorage())
++	factory := log.NewNOPFactory()
++	logger := factory.Logger()
++	outRegistry, epRegistry := outbound.NewRegistry(), endpoint.NewRegistry()
++	ep := endpoint.NewManager(epRegistry)
++	manager := outbound.NewManager(outRegistry, ep, "")
++
++	outbound.Register[groupMemberOptions](outRegistry, "group-member", func(_ context.Context, _ adapter.Router, _ log.ContextLogger, tag string, _ groupMemberOptions) (adapter.Outbound, error) {
++		return &groupMemberNode{Adapter: outbound.NewAdapter("group-member", tag, []string{"tcp"}, nil)}, nil
++	})
++	outbound.Register[option.FallbackOutboundOptions](outRegistry, C.TypeFallback, func(_ context.Context, _ adapter.Router, _ log.ContextLogger, tag string, opts option.FallbackOutboundOptions) (adapter.Outbound, error) {
++		return &groupNode{
++			Adapter: outbound.NewAdapter(C.TypeFallback, tag, []string{"tcp"}, opts.Outbounds),
++			members: opts.Outbounds,
++			manager: manager,
++		}, nil
++	})
++	outbound.Register[option.SelectorOutboundOptions](outRegistry, C.TypeSelector, func(_ context.Context, _ adapter.Router, _ log.ContextLogger, tag string, opts option.SelectorOutboundOptions) (adapter.Outbound, error) {
++		return &groupNode{
++			Adapter: outbound.NewAdapter(C.TypeSelector, tag, []string{"tcp"}, opts.Outbounds),
++			members: opts.Outbounds,
++			manager: manager,
++		}, nil
++	})
++
++	require.NoError(t, manager.Create(ctx, nil, logger, "static", "group-member", &groupMemberOptions{}))
++	scope := adapter.NewScope(ctx, logger)
++	t.Cleanup(func() { require.NoError(t, scope.Close()) })
++	for _, stage := range adapter.ListStartStages {
++		require.NoError(t, scope.Start("endpoint", ep, stage))
++		require.NoError(t, scope.Start("outbound", manager, stage))
++	}
++	p := provider.NewAdapter(ctx, nil, manager, ep, factory, logger, "p", "inline", option.ProviderHealthCheckOptions{})
++	require.NoError(t, p.Start())
++	t.Cleanup(func() { require.NoError(t, p.Close()) })
++	return p
++}
++
++// TestProviderOrdersFallbackGroupMembersFirst pins the dependency-ordering
++// contract for a fallback group carried by a provider: a group declared before
++// its own members must still have the members installed first, because the
++// group resolves its member table when it starts.
++func TestProviderOrdersFallbackGroupMembersFirst(t *testing.T) {
++	p := newGroupProvider(t)
++	outs := []option.Outbound{
++		{Type: C.TypeFallback, Tag: "group", Options: &option.FallbackOutboundOptions{Outbounds: []string{"p/m1", "p/m2"}}},
++		{Type: "group-member", Tag: "m1", Options: &groupMemberOptions{}},
++		{Type: "group-member", Tag: "m2", Options: &groupMemberOptions{}},
++	}
++	require.NoError(t, p.UpdateNodes(outs, nil))
++	_, loaded := p.Outbound("p/group")
++	require.True(t, loaded)
++}
++
++// TestProviderOrdersSelectorGroupMembersFirst is the selector control case: it
++// shares the same dependency path, so it must keep working alongside fallback.
++func TestProviderOrdersSelectorGroupMembersFirst(t *testing.T) {
++	p := newGroupProvider(t)
++	outs := []option.Outbound{
++		{Type: C.TypeSelector, Tag: "group", Options: &option.SelectorOutboundOptions{GroupCommonOption: option.GroupCommonOption{Outbounds: []string{"p/m1", "p/m2"}}}},
++		{Type: "group-member", Tag: "m1", Options: &groupMemberOptions{}},
++		{Type: "group-member", Tag: "m2", Options: &groupMemberOptions{}},
++	}
++	require.NoError(t, p.UpdateNodes(outs, nil))
++	_, loaded := p.Outbound("p/group")
++	require.True(t, loaded)
++}
++
++// TestProviderFallbackGroupMembersListedFirst confirms the members-first order
++// keeps working, so the fix does not merely reverse which order is accepted.
++func TestProviderFallbackGroupMembersListedFirst(t *testing.T) {
++	p := newGroupProvider(t)
++	outs := []option.Outbound{
++		{Type: "group-member", Tag: "m1", Options: &groupMemberOptions{}},
++		{Type: "group-member", Tag: "m2", Options: &groupMemberOptions{}},
++		{Type: C.TypeFallback, Tag: "group", Options: &option.FallbackOutboundOptions{Outbounds: []string{"p/m1", "p/m2"}}},
++	}
++	require.NoError(t, p.UpdateNodes(outs, nil))
++	_, loaded := p.Outbound("p/group")
++	require.True(t, loaded)
++}
++
++// TestProviderGroupMembersUseQualifiedTags documents that a provider-carried
++// group must list its members by the fully-qualified "<provider>/<tag>" names.
++// Bare local tags are rejected identically for every group kind, so this is a
++// uniform provider contract rather than a fallback-specific limitation.
++func TestProviderGroupMembersUseQualifiedTags(t *testing.T) {
++	p := newGroupProvider(t)
++	outs := []option.Outbound{
++		{Type: C.TypeFallback, Tag: "group", Options: &option.FallbackOutboundOptions{Outbounds: []string{"m1", "m2"}}},
++		{Type: "group-member", Tag: "m1", Options: &groupMemberOptions{}},
++		{Type: "group-member", Tag: "m2", Options: &groupMemberOptions{}},
++	}
++	require.ErrorContains(t, p.UpdateNodes(outs, nil), "provider dependency not found: m1")
++}
++
++// TestProviderSelectorGroupMembersUseQualifiedTags is the selector counterpart
++// of TestProviderGroupMembersUseQualifiedTags.
++func TestProviderSelectorGroupMembersUseQualifiedTags(t *testing.T) {
++	p := newGroupProvider(t)
++	outs := []option.Outbound{
++		{Type: C.TypeSelector, Tag: "group", Options: &option.SelectorOutboundOptions{GroupCommonOption: option.GroupCommonOption{Outbounds: []string{"m1", "m2"}}}},
++		{Type: "group-member", Tag: "m1", Options: &groupMemberOptions{}},
++		{Type: "group-member", Tag: "m2", Options: &groupMemberOptions{}},
++	}
++	require.ErrorContains(t, p.UpdateNodes(outs, nil), "provider dependency not found: m1")
++}
+diff --git a/adapter/provider/update.go b/adapter/provider/update.go
+index 7b8ab87..db5e3a0 100644
+--- a/adapter/provider/update.go
++++ b/adapter/provider/update.go
+@@ -58,6 +58,8 @@ func (a *Adapter) UpdateNodes(outOpts []option.Outbound, epOpts []option.Endpoin
+ 			dependencies = append(dependencies, opts.Outbounds...)
+ 		case *option.URLTestOutboundOptions:
+ 			dependencies = append(dependencies, opts.Outbounds...)
++		case *option.FallbackOutboundOptions:
++			dependencies = append(dependencies, opts.Outbounds...)
+ 		}
+ 		for _, dep := range dependencies {
+ 			if _, internal := nodes[dep]; internal {
