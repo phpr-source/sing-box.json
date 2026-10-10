@@ -1,8 +1,8 @@
 diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
-index 6ea8e6c5..3b796561 100644
+index 59d9bf4..226ef5d 100644
 --- a/protocol/group/fallback.go
 +++ b/protocol/group/fallback.go
-@@ -346,3 +346,54 @@ func (s *Fallback) addToBlacklist(tag string) {
+@@ -379,3 +379,63 @@ func (s *Fallback) addToBlacklist(tag string) {
  		s.blacklist[tag] = time.Now().Add(s.blacklistTimeout)
  	}
  }
@@ -36,12 +36,21 @@ index 6ea8e6c5..3b796561 100644
 +			}
 +			if i+1 < len(metadata.OutboundChain) {
 +				if failed := metadata.OutboundChain[i+1]; failed != nil {
++					if _, isGroup := failed.(adapter.OutboundGroup); isGroup {
++						// 2026-10-10：chain[i+1] 是嵌套组而非具体节点。resolveOutbound
++						// 会继续下钻并把嵌套组本身也 append 进链，而
++						// notifyConnectionFailure 对链上每个元素都调用监听器——嵌套组
++						// 自己的监听器已精确归因到它失败的成员，本组若把整个子树拉黑，
++						// 一次叶子失败就会让该子树里所有健康兄弟节点在 60s 内不可达。
++						// 归因权交给嵌套组自己。
++						return
++					}
 +					s.mtx.Lock()
-+					for _, tag := range s.tags {
-+						if s.outbounds[tag] == failed {
-+							s.addToBlacklist(tag)
-+							break
-+						}
++					// 按 tag 匹配而非指针相等：provider 订阅更新会替换同 tag 的实例，
++					// 指针比较会因陈旧成员表而漏标；tag 在 outbound manager 内唯一。
++					failedTag := failed.Tag()
++					if slices.Contains(s.tags, failedTag) {
++						s.addToBlacklist(failedTag)
 +					}
 +					s.mtx.Unlock()
 +				}

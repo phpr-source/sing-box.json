@@ -1,8 +1,8 @@
 diff --git a/constant/proxy.go b/constant/proxy.go
-index 771a6977..9a95cc89 100644
+index 10382ab..28cf3d2 100644
 --- a/constant/proxy.go
 +++ b/constant/proxy.go
-@@ -51,6 +51,7 @@ const (
+@@ -48,6 +48,7 @@ const (
  )
  
  const (
@@ -10,7 +10,7 @@ index 771a6977..9a95cc89 100644
  	TypeSelector    = "selector"
  	TypeURLTest     = "urltest"
  	TypeLoadBalance = "loadbalance"
-@@ -132,6 +133,8 @@ func ProxyDisplayName(proxyType string) string {
+@@ -123,6 +124,8 @@ func ProxyDisplayName(proxyType string) string {
  		return "Selector"
  	case TypeURLTest:
  		return "URLTest"
@@ -20,10 +20,10 @@ index 771a6977..9a95cc89 100644
  		return "LoadBalance"
  	default:
 diff --git a/include/registry.go b/include/registry.go
-index 3d8efbd8..55477610 100644
+index d3ed42a..db20ec8 100644
 --- a/include/registry.go
 +++ b/include/registry.go
-@@ -106,6 +106,7 @@ func OutboundRegistry() *outbound.Registry {
+@@ -104,6 +104,7 @@ func OutboundRegistry() *outbound.Registry {
  	group.RegisterSelector(registry)
  	group.RegisterURLTest(registry)
  	group.RegisterLoadBalance(registry)
@@ -32,7 +32,7 @@ index 3d8efbd8..55477610 100644
  	socks.RegisterOutbound(registry)
  	http.RegisterOutbound(registry)
 diff --git a/option/group.go b/option/group.go
-index 4ee11d9f..e6310ef5 100644
+index 4ee11d9..e6310ef 100644
 --- a/option/group.go
 +++ b/option/group.go
 @@ -31,6 +31,14 @@ type URLTestFallbackOptions struct {
@@ -52,10 +52,10 @@ index 4ee11d9f..e6310ef5 100644
  	URL         string             `json:"url,omitempty"`
 diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
 new file mode 100644
-index 00000000..6ea8e6c5
+index 0000000..59d9bf4
 --- /dev/null
 +++ b/protocol/group/fallback.go
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,381 @@
 +package group
 +
 +import (
@@ -92,6 +92,7 @@ index 00000000..6ea8e6c5
 +//     notifyConnectionFailure). The scope-based adapter.Lifecycle Start and
 +//     the chain-aware failure listener (which needs testing-only chain
 +//     metadata) are appended by reF1nd_Testing/fallback-group-lifecycle.patch.
++//
 +// AttachConnection is a no-op: this group never interrupts existing
 +// connections (faithful to the upstream shtorm-7 implementation).
 +func RegisterFallback(registry *outbound.Registry) {
@@ -113,6 +114,15 @@ index 00000000..6ea8e6c5
 +	mtx              sync.Mutex
 +}
 +
++// Blacklisting is deliberately error-agnostic: any member dial error other
++// than a client-side cancellation counts against that member for the whole
++// blacklist timeout. A member's DialContext surfaces the end-to-end error, so
++// a destination-side refusal/reset is indistinguishable from a dead node here.
++// adapter.ConnectionFailureListener carries no error value either, so the
++// testing chain listener cannot classify more precisely. Classification (e.g.
++// only net.Error timeouts) would need an interface change and a shorter
++// soft-penalty tier; until then the short default timeout is the mitigation.
++//
 +// fallbackMember is a resolved (tag, outbound) pair. DialContext and
 +// ListenPacket snapshot members into a local slice of these while holding
 +// mtx, so the dial loops never touch the member map concurrently with
@@ -223,7 +233,14 @@ index 00000000..6ea8e6c5
 +	// adapter.Outbound 接口、调用解引用 nil itab 的 SIGSEGV。局部切片一经
 +	// 构造即与 map 解耦，后续只遍历它。
 +	var active, blacklisted []fallbackMember
++	seen := make(map[string]bool, len(s.tags))
 +	for _, tag := range s.tags {
++		if seen[tag] {
++			// 配置里重复的 tag：快照在写入任何黑名单项之前就构造完毕，
++			// 故同一成员会在同一轮里被拨号两次。去重后每个成员每轮只试一次。
++			continue
++		}
++		seen[tag] = true
 +		outbound, loaded := s.outbounds[tag]
 +		if !loaded || outbound == nil || !common.Contains(outbound.Network(), network) {
 +			// 网络不支持/成员未就绪是配置属性而非故障：跳过且不拉黑
@@ -263,6 +280,12 @@ index 00000000..6ea8e6c5
 +		conn, err = member.outbound.DialContext(ctx, network, destination)
 +		if err != nil {
 +			s.logger.InfoContext(ctx, err)
++			if ctx.Err() != nil {
++				// 客户端侧取消/超时：失败归因于本端而非节点——不拉黑，
++				// 也不再继续拨号（活动轮已有同型守卫，兜底轮此前缺失，
++				// 导致 ctx 已取消时仍会把全部成员拨一遍）。
++				return nil, err
++			}
 +			continue
 +		}
 +		s.mtx.Lock()
@@ -331,7 +354,13 @@ index 00000000..6ea8e6c5
 +	// 2026-10-09：同 DialContext —— 成员指针在锁内解析成局部切片，解锁后
 +	// 不再触碰 s.outbounds map（并发读写会 fatal，二次读取会 SIGSEGV）。
 +	var active, blacklisted []fallbackMember
++	seen := make(map[string]bool, len(s.tags))
 +	for _, tag := range s.tags {
++		if seen[tag] {
++			// 同 DialContext：重复 tag 会让同一成员在一轮里被监听两次
++			continue
++		}
++		seen[tag] = true
 +		outbound, loaded := s.outbounds[tag]
 +		if !loaded || outbound == nil || !common.Contains(outbound.Network(), N.NetworkUDP) {
 +			continue
@@ -369,6 +398,10 @@ index 00000000..6ea8e6c5
 +		conn, err = member.outbound.ListenPacket(ctx, destination)
 +		if err != nil {
 +			s.logger.InfoContext(ctx, err)
++			if ctx.Err() != nil {
++				// 同 DialContext 的兜底轮守卫
++				return nil, err
++			}
 +			continue
 +		}
 +		s.mtx.Lock()

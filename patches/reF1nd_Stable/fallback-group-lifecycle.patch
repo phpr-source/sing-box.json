@@ -1,14 +1,23 @@
 diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
-index 6ea8e6c5..36401fc6 100644
+index 59d9bf4..0c62454 100644
 --- a/protocol/group/fallback.go
 +++ b/protocol/group/fallback.go
-@@ -346,3 +346,9 @@ func (s *Fallback) addToBlacklist(tag string) {
+@@ -379,3 +379,18 @@ func (s *Fallback) addToBlacklist(tag string) {
  		s.blacklist[tag] = time.Now().Add(s.blacklistTimeout)
  	}
  }
 +
-+// Start implements the plain-starter interface the reF1nd-stable outbound
-+// manager honors for outbounds that are not adapter.Lifecycle.
-+func (s *Fallback) Start() error {
++// Start implements adapter.Lifecycle (the scope-based lifecycle used by the
++// reF1nd-stable outbound manager). The stage guard matches upstream groups: the
++// member table is resolved at StartStateStart, once every member has started.
++//
++// 2026-10-10: this replaced a plain `Start() error` shim. Upstream removed the
++// plain-starter fallback branch from adapter/outbound.Manager.startOutbounds --
++// it now type-asserts adapter.Lifecycle and silently `continue`s otherwise, so
++// the shim stopped being called and the member table was never resolved.
++func (s *Fallback) Start(stage adapter.StartStage, scope *adapter.Scope) error {
++	if stage != adapter.StartStateStart {
++		return nil
++	}
 +	return s.start()
 +}
