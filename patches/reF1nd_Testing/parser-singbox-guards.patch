@@ -1,0 +1,76 @@
+diff --git a/provider/parser/sing_box.go b/provider/parser/sing_box.go
+index d5f4da9..65a97e5 100644
+--- a/provider/parser/sing_box.go
++++ b/provider/parser/sing_box.go
+@@ -24,13 +24,25 @@ func (o *SingBoxDocument) UnmarshalJSONContext(ctx context.Context, inputContent
+ 	}
+ 	outbounds, hasOutbounds := content.Get("outbounds")
+ 	if hasOutbounds {
++		outboundList, valid := outbounds.(badjson.JSONArray)
++		if !valid {
++			return E.New("outbounds must be an array")
++		}
+ 		var outs badjson.JSONArray
+-		for i, outbound := range outbounds.(badjson.JSONArray) {
+-			typeVal, loaded := outbound.(*badjson.JSONObject).Get("type")
++		for i, outbound := range outboundList {
++			object, valid := outbound.(*badjson.JSONObject)
++			if !valid || object == nil {
++				return E.New("outbound[", i, "] must be an object")
++			}
++			typeVal, loaded := object.Get("type")
+ 			if !loaded {
+ 				return E.New("missing type in outbound[", i, "]")
+ 			}
+-			switch typeVal.(string) {
++			outboundType, valid := typeVal.(string)
++			if !valid {
++				return E.New("outbound[", i, "] type must be a string")
++			}
++			switch outboundType {
+ 			case C.TypeDirect, C.TypeBlock, C.TypeDNS, C.TypeSelector, C.TypeURLTest, C.TypePass:
+ 				continue
+ 			default:
+diff --git a/provider/parser/singbox_shapes_test.go b/provider/parser/singbox_shapes_test.go
+new file mode 100644
+index 0000000..cec3d34
+--- /dev/null
++++ b/provider/parser/singbox_shapes_test.go
+@@ -0,0 +1,37 @@
++package parser
++
++import (
++	"context"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++// Subscription content is untrusted remote input: provider/remote fetches it in
++// a background goroutine, so a panic here takes down the whole process.
++//
++// The box-subscription decoder walked the raw badjson values and type-asserted
++// them without checking: `outbounds.(badjson.JSONArray)`,
++// `outbound.(*badjson.JSONObject)` and `typeVal.(string)`. A malformed document
++// therefore panicked instead of returning an error.
++func TestParseBoxSubscriptionMalformedOutbounds(t *testing.T) {
++	for _, content := range []string{
++		`{"outbounds": 5}`,
++		`{"outbounds": "x"}`,
++		`{"outbounds": [1,2]}`,
++		`{"outbounds": ["a"]}`,
++		`{"outbounds": [null]}`,
++		`{"outbounds": {"a":1}}`,
++		`{"outbounds": [{"type": 5}]}`,
++		`{"outbounds": [{"type": ["a"]}]}`,
++		`{"outbounds": [{"type": null}]}`,
++		`{"outbounds": [{"type":"direct"}, 7]}`,
++	} {
++		t.Run(content, func(t *testing.T) {
++			require.NotPanics(t, func() {
++				_, _, err := ParseBoxSubscription(context.Background(), content)
++				require.Error(t, err)
++			})
++		})
++	}
++}

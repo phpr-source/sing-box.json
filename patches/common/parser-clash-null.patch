@@ -1,0 +1,61 @@
+diff --git a/provider/parser/clash.go b/provider/parser/clash.go
+index cee79d1..1849093 100644
+--- a/provider/parser/clash.go
++++ b/provider/parser/clash.go
+@@ -121,7 +121,7 @@ func (c *ClashProxy) BuildEndpoint() option.Endpoint {
+ 
+ func ParseClashSubscription(_ context.Context, content string) ([]option.Outbound, []option.Endpoint, error) {
+ 	config := &ClashConfig{}
+-	err := yaml.Unmarshal([]byte(content), &config)
++	err := yaml.Unmarshal([]byte(content), config)
+ 	if err != nil {
+ 		return nil, nil, E.Cause(err, "parse clash config")
+ 	}
+diff --git a/provider/parser/clash_null_test.go b/provider/parser/clash_null_test.go
+new file mode 100644
+index 0000000..463a334
+--- /dev/null
++++ b/provider/parser/clash_null_test.go
+@@ -0,0 +1,42 @@
++package parser
++
++import (
++	"context"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++// Subscription content is untrusted remote input: provider/remote fetches it in
++// a background goroutine, so a panic here takes down the whole process.
++//
++// An explicit YAML null document ("null", "~", "---", ...) must be rejected
++// gracefully. Before this guard, ParseClashSubscription passed **ClashConfig to
++// yaml.Unmarshal, and yaml.v3 nils the pointer itself for a null document while
++// returning no error, so the following config.Proxies dereferenced nil.
++func TestParseClashSubscriptionNullDocument(t *testing.T) {
++	for _, content := range []string{"null", "~", "---", "--- null", "Null", "NULL"} {
++		t.Run(content, func(t *testing.T) {
++			require.NotPanics(t, func() {
++				outbounds, endpoints, err := ParseClashSubscription(context.Background(), content)
++				if err == nil {
++					require.Empty(t, outbounds)
++					require.Empty(t, endpoints)
++				}
++			})
++		})
++	}
++}
++
++// The same input must also survive the real entry point, which is the one
++// provider/remote and provider/local actually call.
++func TestParseSubscriptionNullDocument(t *testing.T) {
++	for _, content := range []string{"null", "~", "---", "--- null", "Null", "NULL"} {
++		t.Run(content, func(t *testing.T) {
++			require.NotPanics(t, func() {
++				_, _, err := ParseSubscription(context.Background(), content, nil, nil, nil, "test")
++				require.Error(t, err)
++			})
++		})
++	}
++}
