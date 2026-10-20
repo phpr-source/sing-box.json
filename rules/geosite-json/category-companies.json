@@ -415,6 +415,8 @@
         "itunesconnect.apple.com",
         "js-cdn.music.apple.com",
         "km.support.apple.com",
+        "kp-config-smart-tv.akamaized.net",
+        "kp-configs-smart-tv.s3.eu-central-1.amazonaws.com",
         "ksn-cinfo-geo.kaspersky-labs.com",
         "ksn-cinfo.geoksn.kaspersky.com",
         "ksn-crypto-info-geo.kaspersky-labs.com",
@@ -6340,6 +6342,7 @@
         "msudalosti.com",
         "msunlimitedcloudsummit.com",
         "mt.lv",
+        "mts-link.ru",
         "mts-ws.net",
         "mts.ru",
         "mtsbank.ru",
@@ -8625,8 +8628,8 @@
         "zukunftswerkstatt.de"
       ],
       "domain_regex": [
-        ".+\\.awsdns-[0-9][0-9]\\.(co\\.uk|com|net|org)$",
         "^ewcdn[0-9]+\\.nowe\\.com$",
+        ".+\\.awsdns-[0-9][0-9]\\.(co\\.uk|com|net|org)$",
         "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.xn--ngstr-lra8j\\.com$",
         "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.googlevideo\\.com$",
         ".+\\.awsdns-cn-[0-9][0-9]\\.(biz|com|net|top)$",

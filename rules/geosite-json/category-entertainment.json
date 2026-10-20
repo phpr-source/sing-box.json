@@ -149,6 +149,8 @@
         "is-ssl.mzstatic.com-cn-lb.itunes-apple.com.akadns.net",
         "itunesconnect.apple.com",
         "js-cdn.music.apple.com",
+        "kp-config-smart-tv.akamaized.net",
+        "kp-configs-smart-tv.s3.eu-central-1.amazonaws.com",
         "lastfm-img.freetls.fastly.net",
         "lastfm.freetls.fastly.net",
         "lazer.ppy.sh",
@@ -1089,6 +1091,7 @@
         "konamisportsclub.jp",
         "konamistyle.jp",
         "koubaibu.jp",
+        "kp.yandex.net",
         "kpacg.com",
         "kraftonde.com",
         "kyurem.com",
@@ -2132,14 +2135,14 @@
         "zyngapoker.com"
       ],
       "domain_regex": [
-        "^hses[1-7]?\\.akamaized\\.net$",
         "^[0-9]+vod-adaptive\\.akamaized\\.net$",
+        "^hses[1-7]?\\.akamaized\\.net$",
+        "^ewcdn[0-9]+\\.nowe\\.com$",
+        "^epicgames-download\\d\\.akamaized\\.net$",
         "(^|\\.)apiproxy-device-prod-nlb-.+\\.amazonaws\\.com$",
         "(^|\\.)apiproxy-website-nlb-prod-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.apiproxy-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.ichnaea-web-.+\\.amazonaws\\.com$",
-        "^epicgames-download\\d\\.akamaized\\.net$",
-        "^ewcdn[0-9]+\\.nowe\\.com$",
         "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
         "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
       ]

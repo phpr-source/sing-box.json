@@ -2,6 +2,10 @@
   "version": 5,
   "rules": [
     {
+      "domain": [
+        "kp-config-smart-tv.akamaized.net",
+        "kp-configs-smart-tv.s3.eu-central-1.amazonaws.com"
+      ],
       "domain_suffix": [
         "24h.tv",
         "amediateka.ru",
@@ -14,6 +18,7 @@
         "kinopoisk-ru.clstorage.net",
         "kinopoisk.ru",
         "kinorium.com",
+        "kp.yandex.net",
         "more.tv",
         "okko.sport",
         "okko.tv",
