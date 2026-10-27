@@ -168,7 +168,6 @@
         "mvod.itunes.apple.com",
         "myapp.itunes.apple.com",
         "nbbb1bb7.pmhcjk.com",
-        "netflix.com.edgesuite.net",
         "notify.ppy.sh",
         "np-edge.itunes.apple.com",
         "ntdfreemobile-tgc.cdn.hinet.net",
@@ -215,7 +214,6 @@
         "sp.itunes.apple.com",
         "spectator.ppy.sh",
         "speedysub.music.apple.com",
-        "spotify.com.edgesuite.net",
         "spotify.map.fastly.net",
         "spotify.map.fastlylb.net",
         "ssl-lvlt.cdn.ea.com",
@@ -1269,6 +1267,7 @@
         "neoforged.net",
         "netflix.ca",
         "netflix.com",
+        "netflix.com.edgesuite.net",
         "netflix.net",
         "netflixdnstest0.com",
         "netflixdnstest1.com",
@@ -1652,6 +1651,7 @@
         "spoti.fi",
         "spotify-everywhere.com",
         "spotify.com",
+        "spotify.com.edgesuite.net",
         "spotify.design",
         "spotify.link",
         "spotifycdn.com",
@@ -2151,14 +2151,14 @@
         "zyngapoker.com"
       ],
       "domain_regex": [
+        "^ewcdn[0-9]+\\.nowe\\.com$",
         "^epicgames-download\\d\\.akamaized\\.net$",
-        "^hses[1-7]?\\.akamaized\\.net$",
         "(^|\\.)apiproxy-device-prod-nlb-.+\\.amazonaws\\.com$",
         "(^|\\.)apiproxy-website-nlb-prod-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.apiproxy-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.ichnaea-web-.+\\.amazonaws\\.com$",
-        "^ewcdn[0-9]+\\.nowe\\.com$",
         "^[0-9]+vod-adaptive\\.akamaized\\.net$",
+        "^hses[1-7]?\\.akamaized\\.net$",
         "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
         "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
       ]

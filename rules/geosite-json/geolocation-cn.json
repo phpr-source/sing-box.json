@@ -1795,6 +1795,7 @@
         "fhldns.com",
         "fhyx.com",
         "filez.com",
+        "filmorigin.com",
         "fimmu.com",
         "finchina.com",
         "finclip.com",
@@ -2624,7 +2625,6 @@
         "jikecdn.com",
         "jikeiot.cloud",
         "jikexueyuan.com",
-        "jikipedia.com",
         "jin10.com",
         "jinantimes.com.cn",
         "jinchutou.com",
@@ -2792,6 +2792,7 @@
         "kaipuyun.net",
         "kaixin001.com",
         "kajicam.com",
+        "kakaxing.com",
         "kameng98.com",
         "kancloud.cn",
         "kanimg.com",
@@ -4874,6 +4875,7 @@
         "xiaoluyouxuan.com",
         "xiaoluzhidian.com",
         "xiaomaicn.com",
+        "xiaomaigui.com",
         "xiaomengai.com",
         "xiaomimimo.com",
         "xiaomingtaiji.com",
@@ -5412,9 +5414,9 @@
         "zzzmap.com"
       ],
       "domain_regex": [
-        "^.+-mihayo\\.akamaized\\.net$",
         ".+\\.awsdns-cn-[0-9][0-9]\\.(biz|com|net|top)$",
-        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$"
+        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$",
+        "^.+-mihayo\\.akamaized\\.net$"
       ]
     }
   ]
