@@ -1709,6 +1709,7 @@
         "steamgames.com",
         "steaminventoryhelper.com",
         "steamos.cloud",
+        "steampeek.hu",
         "steampowered.com",
         "steampowered.com.8686c.com",
         "steamserver.net",
@@ -2160,10 +2161,10 @@
         "(^|\\.)apiproxy-website-nlb-prod-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.apiproxy-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.ichnaea-web-.+\\.amazonaws\\.com$",
-        "^ewcdn[0-9]+\\.nowe\\.com$",
-        "^[0-9]+vod-adaptive\\.akamaized\\.net$",
         "^hses[1-7]?\\.akamaized\\.net$",
+        "^ewcdn[0-9]+\\.nowe\\.com$",
         "^epicgames-download\\d\\.akamaized\\.net$",
+        "^[0-9]+vod-adaptive\\.akamaized\\.net$",
         "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
         "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
       ]

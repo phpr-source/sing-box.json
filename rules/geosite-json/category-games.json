@@ -930,6 +930,7 @@
         "steamgames.com",
         "steaminventoryhelper.com",
         "steamos.cloud",
+        "steampeek.hu",
         "steampowered.com",
         "steampowered.com.8686c.com",
         "steamserver.net",
@@ -1146,9 +1147,9 @@
       ],
       "domain_regex": [
         "^epicgames-download\\d\\.akamaized\\.net$",
-        "^.+-mihayo\\.akamaized\\.net$",
         "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
-        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
+        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$",
+        "^.+-mihayo\\.akamaized\\.net$"
       ]
     }
   ]
