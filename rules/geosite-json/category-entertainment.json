@@ -1129,6 +1129,9 @@
         "likeeapp.ru",
         "likeevideo.com",
         "likeevideo.ru",
+        "limbuscompany.global",
+        "limbuscompanyapi.com",
+        "limbuscompanycdn.org",
         "linetv.tw",
         "litbus-anime.com",
         "litv.tv",
@@ -1482,6 +1485,7 @@
         "prod.service.minerva.devices.a2z.com",
         "product.co.jp",
         "projectapex.com",
+        "projectmoon.studio",
         "promodj.com",
         "protondb.com",
         "pscdn.co",
@@ -1617,6 +1621,7 @@
         "simg.jp",
         "skate2.com",
         "sketchfab.com",
+        "skinswap.com",
         "skylanders.com",
         "sledgehammergames.com",
         "sling.com",
@@ -2157,14 +2162,14 @@
         "zyngapoker.com"
       ],
       "domain_regex": [
+        "^hses[1-7]?\\.akamaized\\.net$",
         "(^|\\.)apiproxy-device-prod-nlb-.+\\.amazonaws\\.com$",
         "(^|\\.)apiproxy-website-nlb-prod-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.apiproxy-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.ichnaea-web-.+\\.amazonaws\\.com$",
-        "^hses[1-7]?\\.akamaized\\.net$",
+        "^epicgames-download\\d\\.akamaized\\.net$",
         "^ewcdn[0-9]+\\.nowe\\.com$",
         "^[0-9]+vod-adaptive\\.akamaized\\.net$",
-        "^epicgames-download\\d\\.akamaized\\.net$",
         "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
         "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
       ]
