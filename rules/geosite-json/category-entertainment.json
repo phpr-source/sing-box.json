@@ -196,6 +196,7 @@
         "pubg1.battleye.com",
         "pvr-hamivideo.cdn.hinet.net",
         "q676790b.pmhcjk.com",
+        "radio.itunes.apple.com",
         "roblox-load-generator-configuration.s3.us-east-2.amazonaws.com",
         "roblox-poc.global.ssl.fastly.net",
         "robloxcorp.s.llnwi.net",
@@ -2166,10 +2167,10 @@
         "(^|\\.)apiproxy-website-nlb-prod-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.apiproxy-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.ichnaea-web-.+\\.amazonaws\\.com$",
-        "^ewcdn[0-9]+\\.nowe\\.com$",
         "^hses[1-7]?\\.akamaized\\.net$",
-        "^[0-9]+vod-adaptive\\.akamaized\\.net$",
         "^epicgames-download\\d\\.akamaized\\.net$",
+        "^ewcdn[0-9]+\\.nowe\\.com$",
+        "^[0-9]+vod-adaptive\\.akamaized\\.net$",
         "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
         "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
       ]
