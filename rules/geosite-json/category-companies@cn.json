@@ -111,6 +111,7 @@
         "communities.apple.com",
         "configuration.apple.com",
         "configuration.apple.com.akadns.net",
+        "configuration.ls.apple.com",
         "connectivitycheck.gstatic.com",
         "crashlyticsreports-pa.googleapis.com",
         "crl-lb.apple.com.akadns.net",
@@ -315,10 +316,12 @@
         "msdprod-ad.download.prss.microsoft.com",
         "msproduct.download.prss.microsoft.com",
         "music.apple.com",
+        "musicstatus.itunes.apple.com",
         "musicstatus.music.apple.com",
         "mvod.itunes.apple.com",
         "myapp.itunes.apple.com",
         "myvs.download.prss.microsoft.com",
+        "mzstorekit.itunes.apple.com",
         "np-edge.itunes.apple.com",
         "o.pki.goog",
         "ocsp.apple.com",
@@ -659,6 +662,7 @@
         "bluecloudprod.com",
         "canon.cn",
         "canon.com.cn",
+        "captive.apple.com",
         "cegid-cloud.cn",
         "chinacloud-mobile.cn",
         "chinacloudapi.cn",
@@ -846,10 +850,10 @@
         "z.cn"
       ],
       "domain_regex": [
-        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.xn--ngstr-lra8j\\.com$",
-        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.googlevideo\\.com$",
         ".+\\.awsdns-cn-[0-9][0-9]\\.(biz|com|net|top)$",
-        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$"
+        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$",
+        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.xn--ngstr-lra8j\\.com$",
+        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.googlevideo\\.com$"
       ]
     }
   ]

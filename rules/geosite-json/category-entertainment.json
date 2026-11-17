@@ -164,9 +164,11 @@
         "misc-assets.itunes.apple.com",
         "mobilelive-hamivideo.cdn.hinet.net",
         "msh.amazon.co.uk",
+        "musicstatus.itunes.apple.com",
         "musicstatus.music.apple.com",
         "mvod.itunes.apple.com",
         "myapp.itunes.apple.com",
+        "mzstorekit.itunes.apple.com",
         "nbbb1bb7.pmhcjk.com",
         "notify.ppy.sh",
         "np-edge.itunes.apple.com",
@@ -2163,14 +2165,14 @@
         "zyngapoker.com"
       ],
       "domain_regex": [
+        "^[0-9]+vod-adaptive\\.akamaized\\.net$",
+        "^hses[1-7]?\\.akamaized\\.net$",
+        "^epicgames-download\\d\\.akamaized\\.net$",
         "(^|\\.)apiproxy-device-prod-nlb-.+\\.amazonaws\\.com$",
         "(^|\\.)apiproxy-website-nlb-prod-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.apiproxy-.+\\.amazonaws\\.com$",
         "(^|\\.)dualstack\\.ichnaea-web-.+\\.amazonaws\\.com$",
-        "^hses[1-7]?\\.akamaized\\.net$",
-        "^[0-9]+vod-adaptive\\.akamaized\\.net$",
         "^ewcdn[0-9]+\\.nowe\\.com$",
-        "^epicgames-download\\d\\.akamaized\\.net$",
         "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
         "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
       ]

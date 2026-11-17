@@ -142,6 +142,7 @@
         "bj1.api.bing.com",
         "bookkeeper.itunes.apple.com",
         "bs.mail.ru",
+        "builds.dotnet.microsoft.com",
         "c.admob.com",
         "c.android.clients.google.com",
         "c.pki.goog",
@@ -209,6 +210,7 @@
         "configuration-lb.ls-apple.com.akadns.net",
         "configuration.apple.com",
         "configuration.apple.com.akadns.net",
+        "configuration.ls.apple.com",
         "connectivitycheck.gstatic.com",
         "copilot-proxy.githubusercontent.com",
         "copilot-telemetry-service.githubusercontent.com",
@@ -277,6 +279,7 @@
         "dnl-17.geo.kaspersky.com",
         "dnl-18.geo.kaspersky.com",
         "dnl-19.geo.kaspersky.com",
+        "dotnetcli.trafficmanager.net",
         "download.developer.apple.com",
         "download.microsoft.com",
         "download.mlcc.google.com",
@@ -482,11 +485,13 @@
         "mtalk.google.com",
         "mtalk4.google.com",
         "music.apple.com",
+        "musicstatus.itunes.apple.com",
         "musicstatus.music.apple.com",
         "mvod.itunes.apple.com",
         "mwf-service.akamaized.net",
         "myapp.itunes.apple.com",
         "myvs.download.prss.microsoft.com",
+        "mzstorekit.itunes.apple.com",
         "na1r.services.adobe.com",
         "notary-submissions-prod.s3-accelerate.amazonaws.com",
         "notary-submissions-prod.s3.us-west-2.amazonaws.com",
@@ -779,6 +784,7 @@
         "storeedgefd.dsx.mp.microsoft.com",
         "streamingaudio.itunes.apple.com",
         "su.itunes.apple.com",
+        "sundry-star-net-geo.trafficmanager.net",
         "support-china.apple-support.akadns.net",
         "support.apple.com",
         "surface.download.prss.microsoft.com",
@@ -2846,6 +2852,7 @@
         "canva.com",
         "canvastatus.com",
         "capitalg.com",
+        "captive.apple.com",
         "carbon.com",
         "careersatfb.com",
         "carekit.org",
@@ -8424,6 +8431,7 @@
         "yastat.net",
         "yastatic-net.ru",
         "yastatic.net",
+        "yb-payment.ru",
         "yccdn.ru",
         "yclients.com",
         "ydb.tech",
@@ -8645,12 +8653,12 @@
         "zukunftswerkstatt.de"
       ],
       "domain_regex": [
-        "^ewcdn[0-9]+\\.nowe\\.com$",
         ".+\\.awsdns-[0-9][0-9]\\.(co\\.uk|com|net|org)$",
-        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.xn--ngstr-lra8j\\.com$",
-        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.googlevideo\\.com$",
+        "^ewcdn[0-9]+\\.nowe\\.com$",
         ".+\\.awsdns-cn-[0-9][0-9]\\.(biz|com|net|top)$",
-        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$"
+        ".+\\.awsdns-cn-[0-9][a-e0-9]\\.cn$",
+        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.xn--ngstr-lra8j\\.com$",
+        "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.googlevideo\\.com$"
       ]
     }
   ]
