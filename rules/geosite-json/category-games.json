@@ -255,6 +255,7 @@
         "championshipseriesleague.com",
         "changyou.com",
         "chillingo.com",
+        "chunithm.wahlap.com",
         "chunkbase.com",
         "clash.com",
         "clashmini.com",
@@ -527,6 +528,7 @@
         "maddenseason.net",
         "maddenseason.org",
         "mail4399.com",
+        "maimai.wahlap.com",
         "maindown4399.com",
         "makearmanotwar.com",
         "marioandluigidreamteam.com",
@@ -913,6 +915,7 @@
         "teamneedforspeed.com",
         "tellmewhygame.com",
         "testplus.cn",
+        "tgk-wcaime.wahlap.com",
         "tgpro.top",
         "tgprocs.net",
         "thedreadwolfrises.com",
@@ -966,6 +969,7 @@
         "vrzwk.com",
         "vrzwk.net",
         "vrzwk.top",
+        "wahlap.net",
         "wanmei.com",
         "wanwan4399.com",
         "wargaming.com",
@@ -1070,9 +1074,9 @@
       ],
       "domain_regex": [
         "^epicgames-download\\d\\.akamaized\\.net$",
-        "^.+-mihayo\\.akamaized\\.net$",
         "^cdn\\d-epicgames-\\d+\\.file\\.myqcloud\\.com$",
-        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$"
+        "^epicgames-download\\d-\\d+\\.file\\.myqcloud\\.com$",
+        "^.+-mihayo\\.akamaized\\.net$"
       ]
     }
   ]
